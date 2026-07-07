@@ -39,10 +39,11 @@ jobs:
       - name: Download libmpv from SourceForge
         shell: powershell
         run: |
-          $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20260607-git-71ebd08.7z/download"
+          $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20260607-git-71ebd08.7z"
           $archive = Join-Path $env:RUNNER_TEMP "mpv-dev-x86_64-v3-20260607-git-71ebd08.7z"
           $extractDir = Join-Path $env:RUNNER_TEMP "mpv-dev"
-          Invoke-WebRequest -Uri $url -OutFile $archive -MaximumRedirection 10
+          & curl.exe -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --output $archive $url
+          if ($LASTEXITCODE -ne 0) { throw "Failed to download libmpv archive" }
           $archiveSize = (Get-Item $archive).Length
           Write-Host "libmpv archive size: $archiveSize bytes"
           if ($archiveSize -lt 10485760) { throw "Downloaded libmpv archive is unexpectedly small: $archiveSize bytes" }
