@@ -10,7 +10,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,6 +31,37 @@ jobs:
           if (-not $asset) { throw "yt-dlp.exe asset not found" }
           New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "3rdpart/yt-dlp.exe"
+
+      - name: Download libmpv from SourceForge
+        shell: powershell
+        run: |
+          $url = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20260607-git-71ebd08.7z/download"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev-x86_64-v3-20260607-git-71ebd08.7z"
+          $extractDir = Join-Path $env:RUNNER_TEMP "mpv-dev"
+          Invoke-WebRequest -Uri $url -OutFile $archive -MaximumRedirection 10
+          $archiveSize = (Get-Item $archive).Length
+          Write-Host "libmpv archive size: $archiveSize bytes"
+          if ($archiveSize -lt 10485760) { throw "Downloaded libmpv archive is unexpectedly small: $archiveSize bytes" }
+
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe" }
+          if (-not (Test-Path $sevenZip)) {
+            choco install 7zip -y --no-progress
+            $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $sevenZip -or -not (Test-Path $sevenZip)) { throw "7-Zip was not found" }
+
+          if (Test-Path $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          & $sevenZip x $archive "-o$extractDir" -y
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract libmpv archive" }
+
+          $dll = Get-ChildItem -Path $extractDir -Recurse -Filter "libmpv-2.dll" |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll was not found in the SourceForge archive" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Copy-Item -LiteralPath $dll.FullName -Destination "3rdpart/libmpv-2.dll" -Force
 
       - name: Verify libmpv payload
         shell: powershell
