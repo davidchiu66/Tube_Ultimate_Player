@@ -1,0 +1,151 @@
+name: Release Version
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      notes: ${{ steps.version.outputs.notes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Read version
+        id: version
+        shell: powershell
+        run: |
+          $version = (Get-Content app_version.txt -Raw).Trim()
+          if (-not $version) { throw "app_version.txt is empty" }
+          $tag = "v$version"
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path $notes)) { throw "Release note file not found: $notes" }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "notes=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  build-portable:
+    runs-on: windows-latest
+    needs: prepare
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller requests
+
+      - name: Download latest yt-dlp
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "yt-dlp.exe asset not found" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "3rdpart/yt-dlp.exe"
+
+      - name: Build portable package
+        run: python build_portable.py
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_portable
+          path: dist/*.zip
+
+  build-installer:
+    runs-on: windows-latest
+    needs: prepare
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Inno Setup
+        shell: powershell
+        run: choco install innosetup -y
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller requests
+
+      - name: Download latest yt-dlp
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "yt-dlp.exe asset not found" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "3rdpart/yt-dlp.exe"
+
+      - name: Build installer
+        run: python build_installer.py
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_installer
+          path: dist/installer/*.exe
+
+  publish-release:
+    runs-on: windows-latest
+    needs: [prepare, build-portable, build-installer]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download portable artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_portable
+          path: release_assets
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_installer
+          path: release_assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Tube_Ultimate_Player ${{ needs.prepare.outputs.version }}
+          body_path: ${{ needs.prepare.outputs.notes }}
+          target_commitish: ${{ github.sha }}
+          files: release_assets/*
+          draft: false
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+          append_body: false
+          overwrite_files: true
+          fail_on_unmatched_files: true

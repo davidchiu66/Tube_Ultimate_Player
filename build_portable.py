@@ -20,7 +20,7 @@ def read_version() -> str:
     return VERSION_FILE.read_text(encoding="utf-8").strip()
 
 
-def run_pyinstaller(version: str) -> None:
+def run_pyinstaller() -> None:
     subprocess.run(
         [
             sys.executable,
@@ -33,17 +33,22 @@ def run_pyinstaller(version: str) -> None:
             "--windowed",
             "--add-data",
             f"{ROOT / 'resources'};resources",
-            "--add-binary",
-            f"{THIRDPART_DIR / 'libmpv-2.dll'};.",
-            "--add-binary",
-            f"{THIRDPART_DIR / 'libEGL.dll'};.",
-            "--add-binary",
-            f"{THIRDPART_DIR / 'libGLESv2.dll'};.",
+            "--add-data",
+            f"{ROOT / 'config'};config",
             str(ROOT / "main.py"),
         ],
         check=True,
         cwd=ROOT,
     )
+
+
+def _copy_tree_contents(source_dir: Path, target_dir: Path) -> None:
+    for child in source_dir.iterdir():
+        destination = target_dir / child.name
+        if child.is_dir():
+            shutil.copytree(child, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(child, destination)
 
 
 def assemble_portable(version: str) -> Path:
@@ -52,7 +57,7 @@ def assemble_portable(version: str) -> Path:
         shutil.rmtree(PORTABLE_DIR)
     PORTABLE_DIR.mkdir(parents=True, exist_ok=True)
 
-    shutil.copytree(bundle_dir, PORTABLE_DIR / RELEASE_NAME, dirs_exist_ok=True)
+    _copy_tree_contents(bundle_dir, PORTABLE_DIR)
     shutil.copytree(ROOT / "3rdpart", PORTABLE_DIR / "3rdpart", dirs_exist_ok=True)
     shutil.copy2(ROOT / "README.md", PORTABLE_DIR / "README.md")
     shutil.copy2(ROOT / "app_version.txt", PORTABLE_DIR / "app_version.txt")
@@ -68,7 +73,7 @@ def assemble_portable(version: str) -> Path:
 
 def main() -> int:
     version = read_version()
-    run_pyinstaller(version)
+    run_pyinstaller()
     zip_path = assemble_portable(version)
     print(zip_path)
     return 0

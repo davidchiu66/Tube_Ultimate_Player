@@ -2,8 +2,6 @@ name: Release Installer
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
 
 jobs:
   build-installer:
@@ -11,6 +9,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -44,9 +44,3 @@ jobs:
         with:
           name: Tube_Ultimate_Player_installer
           path: dist/installer/*.exe
-
-      - name: Upload to GitHub Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/installer/*.exe

@@ -17,7 +17,7 @@ PrivilegesRequired=admin
 
 [Files]
 Source: "{#ProjectRoot}\dist\Tube_Ultimate_Player\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
-Source: "{#ProjectRoot}\3rdpart\yt-dlp.exe"; DestDir: "{app}\3rdpart"; Flags: ignoreversion
+Source: "{#ProjectRoot}\3rdpart\*"; DestDir: "{app}\3rdpart"; Flags: recursesubdirs ignoreversion
 Source: "{#ProjectRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProjectRoot}\app_version.txt"; DestDir: "{app}"; Flags: ignoreversion
 

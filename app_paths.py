@@ -6,10 +6,34 @@ from pathlib import Path
 
 
 APP_NAME = "Tube_Ultimate_Player"
-BASE_DIR = Path(__file__).resolve().parent
-THIRDPART_DIR = BASE_DIR / "3rdpart"
-RESOURCE_DIR = BASE_DIR / "resources"
-DEFAULT_CONFIG_DIR = BASE_DIR / "config"
+SOURCE_DIR = Path(__file__).resolve().parent
+
+
+def _bundle_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return SOURCE_DIR
+
+
+def _app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return SOURCE_DIR
+
+
+def _pick_existing(*candidates: Path) -> Path:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+BUNDLE_DIR = _bundle_dir()
+APP_DIR = _app_dir()
+BASE_DIR = APP_DIR
+THIRDPART_DIR = _pick_existing(APP_DIR / "3rdpart", BUNDLE_DIR / "3rdpart", SOURCE_DIR / "3rdpart")
+RESOURCE_DIR = _pick_existing(APP_DIR / "resources", BUNDLE_DIR / "resources", SOURCE_DIR / "resources")
+DEFAULT_CONFIG_DIR = _pick_existing(APP_DIR / "config", BUNDLE_DIR / "config", SOURCE_DIR / "config")
 
 
 def _runtime_root_candidates() -> list[Path]:
@@ -19,7 +43,8 @@ def _runtime_root_candidates() -> list[Path]:
         if local_app_data:
             candidates.append(Path(local_app_data) / APP_NAME)
     candidates.append(Path.home() / f".{APP_NAME}")
-    candidates.append(BASE_DIR / "runtime")
+    candidates.append(APP_DIR / "runtime")
+    candidates.append(SOURCE_DIR / "runtime")
     return candidates
 
 
@@ -33,7 +58,7 @@ def _runtime_root() -> Path:
             return candidate
         except OSError:
             continue
-    return BASE_DIR / "runtime"
+    return SOURCE_DIR / "runtime"
 
 
 RUNTIME_ROOT = _runtime_root()
@@ -63,6 +88,10 @@ def thirdpart_path(name: str) -> Path:
 
 def default_config_path(name: str = "default_config.json") -> Path:
     return DEFAULT_CONFIG_DIR / name
+
+
+def resource_path(*parts: str) -> Path:
+    return RESOURCE_DIR.joinpath(*parts)
 
 
 def runtime_path(*parts: str) -> Path:

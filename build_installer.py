@@ -8,7 +8,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST_DIR = ROOT / "dist"
-THIRDPART_DIR = ROOT / "3rdpart"
 VERSION_FILE = ROOT / "app_version.txt"
 APP_NAME = "Tube_Ultimate_Player"
 
@@ -30,12 +29,8 @@ def run_pyinstaller() -> None:
             "--windowed",
             "--add-data",
             f"{ROOT / 'resources'};resources",
-            "--add-binary",
-            f"{THIRDPART_DIR / 'libmpv-2.dll'};.",
-            "--add-binary",
-            f"{THIRDPART_DIR / 'libEGL.dll'};.",
-            "--add-binary",
-            f"{THIRDPART_DIR / 'libGLESv2.dll'};.",
+            "--add-data",
+            f"{ROOT / 'config'};config",
             str(ROOT / "main.py"),
         ],
         check=True,
@@ -49,7 +44,7 @@ def build_installer(version: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     iscc = shutil.which("ISCC.exe")
     if not iscc:
-        raise RuntimeError("未找到 Inno Setup 编译器 ISCC.exe")
+        raise RuntimeError("Inno Setup compiler ISCC.exe was not found")
     subprocess.run(
         [
             iscc,
@@ -63,7 +58,7 @@ def build_installer(version: str) -> Path:
     )
     installers = sorted(output_dir.glob("*.exe"))
     if not installers:
-        raise RuntimeError("安装包构建完成，但未找到输出文件")
+        raise RuntimeError("Installer build finished but no output .exe was found")
     return installers[-1]
 
 

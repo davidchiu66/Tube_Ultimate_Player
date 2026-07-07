@@ -5,7 +5,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app_paths import APP_NAME, BASE_DIR, ensure_runtime_dirs
+from app_paths import APP_NAME, ensure_runtime_dirs, resource_path
 from services.logging_service import setup_logging
 from ui.main_window import MainWindow
 
@@ -33,7 +33,7 @@ def main() -> int:
 
 
 def _load_stylesheet(app: QApplication) -> None:
-    path = BASE_DIR / "resources" / "qss" / "dark.qss"
+    path = resource_path("qss", "dark.qss")
     try:
         with path.open("r", encoding="utf-8") as file:
             app.setStyleSheet(file.read())
