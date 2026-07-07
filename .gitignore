@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual / editor
+.venv/
+.idea/
+.vscode/
+
+# Runtime data
+logs/
+downloads/
+cache/
+data/
+config/user_config.json
+cookie.txt
+
+# Windows / packaging
+*.spec
+dist/
+build/
+*.msi
+*.exe
+*.zip
+
+# Local app data exports
+runtime/

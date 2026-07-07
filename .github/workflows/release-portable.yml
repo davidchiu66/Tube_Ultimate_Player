@@ -1,0 +1,48 @@
+name: Release Portable
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build-portable:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller requests
+
+      - name: Download latest yt-dlp
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "yt-dlp.exe asset not found" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "3rdpart/yt-dlp.exe"
+
+      - name: Build portable package
+        run: python build_portable.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_portable
+          path: dist/*.zip
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

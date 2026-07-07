@@ -1,0 +1,543 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from app_paths import thirdpart_path
+from resolver.models import HomeVideo, VideoInfo
+from resolver.quality_selector import QualitySelector
+from resolver.subtitle_parser import SubtitleParser
+from services.config_service import ConfigService
+from services.cookie_service import prepare_cookie_file
+from services.logging_service import sanitize_command
+
+
+logger = logging.getLogger("tube_player.resolver")
+ytdlp_logger = logging.getLogger("tube_player.ytdlp")
+VIDEO_ID_PATTERN = re.compile(r"^[0-9A-Za-z_-]{11}$")
+
+
+class YoutubeResolver:
+    def __init__(self, config: ConfigService) -> None:
+        self.config = config
+        self.ytdlp_path = self._find_ytdlp()
+
+    def resolve(self, url: str) -> VideoInfo:
+        normalized_url = normalize_youtube_video_url(url)
+        if normalized_url:
+            if normalized_url != url:
+                ytdlp_logger.info("normalized YouTube URL from %s to %s", url, normalized_url)
+            url = normalized_url
+        elif _is_youtube_playlist_url(url):
+            raise RuntimeError("当前链接是 YouTube 播放列表，不支持直接播放，请打开具体视频后再播放。")
+
+        command = self._build_command(url)
+        result = self._run_ytdlp(command, url, "primary")
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            cookie_file = self.config.cookie_file()
+            if cookie_file:
+                ytdlp_logger.warning("browser cookie extraction failed; retrying with configured cookie file")
+                command = self._build_command(url, force_cookie_file=True)
+                result = self._run_ytdlp(command, url, "fallback-cookie-file")
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            ytdlp_logger.error("yt-dlp failed detail:\n%s", detail)
+            raise RuntimeError(self._format_error(detail))
+
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            ytdlp_logger.exception("yt-dlp returned invalid JSON")
+            raise RuntimeError(f"yt-dlp 返回的 JSON 无法解析: {exc}") from exc
+
+        self._log_info_summary(info)
+        return self._parse_info(info, result.stderr.strip())
+
+    def fetch_home_videos(
+        self,
+        page: int = 1,
+        page_size: int = 56,
+    ) -> tuple[list[HomeVideo], bool]:
+        page = max(1, int(page))
+        page_size = max(1, min(100, int(page_size)))
+        total_needed = page * page_size + 1
+        url = "https://www.youtube.com/"
+        command = self._build_home_command(url, total_needed)
+        result = self._run_ytdlp(command, url, f"home-page-{page}")
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            cookie_file = self.config.cookie_file()
+            if cookie_file:
+                ytdlp_logger.warning("home browser cookie extraction failed; retrying with configured cookie file")
+                command = self._build_home_command(url, total_needed, force_cookie_file=True)
+                result = self._run_ytdlp(command, url, f"home-page-{page}-fallback-cookie-file")
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            ytdlp_logger.error("yt-dlp home fetch failed detail:\n%s", detail)
+            raise RuntimeError(self._format_error(detail))
+
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            ytdlp_logger.exception("yt-dlp home returned invalid JSON")
+            raise RuntimeError(f"yt-dlp 返回的首页 JSON 无法解析: {exc}") from exc
+
+        entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
+        videos = [video for entry in entries if (video := self._parse_home_entry(entry))]
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged = videos[start:end]
+        has_next = len(videos) > end
+        ytdlp_logger.info(
+            "home videos fetched page=%s page_size=%s count=%s has_next=%s source_entries=%s",
+            page,
+            page_size,
+            len(paged),
+            has_next,
+            len(entries),
+        )
+        return paged, has_next
+
+    def search_videos(
+        self,
+        keyword: str,
+        page: int = 1,
+        page_size: int = 45,
+    ) -> tuple[list[HomeVideo], bool]:
+        query = str(keyword or "").strip()
+        if not query:
+            return [], False
+
+        page = max(1, int(page))
+        page_size = max(1, min(45, int(page_size)))
+        total_needed = page * page_size + 1
+        url = f"ytsearch{total_needed}:{query}"
+        command = self._build_home_command(url, total_needed)
+        result = self._run_ytdlp(command, url, f"search-page-{page}")
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            cookie_file = self.config.cookie_file()
+            if cookie_file:
+                ytdlp_logger.warning("search browser cookie extraction failed; retrying with configured cookie file")
+                command = self._build_home_command(url, total_needed, force_cookie_file=True)
+                result = self._run_ytdlp(command, url, f"search-page-{page}-fallback-cookie-file")
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            ytdlp_logger.error("yt-dlp search failed detail:\n%s", detail)
+            raise RuntimeError(self._format_error(detail))
+
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            ytdlp_logger.exception("yt-dlp search returned invalid JSON")
+            raise RuntimeError(f"yt-dlp 返回的搜索 JSON 无法解析: {exc}") from exc
+
+        entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
+        videos = [video for entry in entries if (video := self._parse_home_entry(entry))]
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged = videos[start:end]
+        has_next = len(videos) > end
+        ytdlp_logger.info(
+            "search videos fetched keyword=%s page=%s page_size=%s count=%s has_next=%s source_entries=%s",
+            query,
+            page,
+            page_size,
+            len(paged),
+            has_next,
+            len(entries),
+        )
+        return paged, has_next
+
+    def _run_ytdlp(
+        self,
+        command: list[str],
+        url: str,
+        attempt: str,
+    ) -> subprocess.CompletedProcess[str]:
+        safe_command = sanitize_command(command)
+        started = time.perf_counter()
+        ytdlp_logger.info("yt-dlp resolve start attempt=%s url=%s", attempt, url)
+        ytdlp_logger.debug("yt-dlp command attempt=%s command=%s", attempt, safe_command)
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            creationflags=creationflags,
+        )
+        elapsed = time.perf_counter() - started
+        ytdlp_logger.info(
+            "yt-dlp resolve finished attempt=%s returncode=%s elapsed=%.2fs stdout_bytes=%s stderr_bytes=%s",
+            attempt,
+            result.returncode,
+            elapsed,
+            len(result.stdout.encode("utf-8", errors="replace")) if result.stdout else 0,
+            len(result.stderr.encode("utf-8", errors="replace")) if result.stderr else 0,
+        )
+        if result.stderr:
+            ytdlp_logger.warning("yt-dlp stderr attempt=%s:\n%s", attempt, result.stderr.strip())
+        return result
+
+    def _build_command(self, url: str, force_cookie_file: bool = False) -> list[str]:
+        languages = self.config.get("youtube.subtitle_languages", ["zh-Hans", "zh-Hant", "zh", "en"])
+        command = [
+            str(self.ytdlp_path),
+            "--dump-single-json",
+            "--skip-download",
+            "--no-playlist",
+            "--geo-bypass",
+            "--socket-timeout",
+            "30",
+            "--retries",
+            "5",
+            "--fragment-retries",
+            "5",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            ",".join(languages),
+            "--sub-format",
+            "vtt/srt/best",
+        ]
+
+        js_runtime = self.config.js_runtime()
+        if js_runtime:
+            command.extend(["--js-runtimes", js_runtime])
+
+        _, proxy = self.config.effective_proxy()
+        if proxy:
+            command.extend(["--proxy", proxy])
+
+        cookie_browser = self.config.explicit_cookie_browser()
+        cookie_file = self.config.cookie_file()
+        if force_cookie_file and cookie_file:
+            command.extend(["--cookies", prepare_cookie_file(cookie_file)])
+        elif cookie_browser:
+            command.extend(["--cookies-from-browser", cookie_browser])
+        elif cookie_file:
+            command.extend(["--cookies", prepare_cookie_file(cookie_file)])
+        elif auto_cookie_browser := self.config.auto_cookie_browser():
+            command.extend(["--cookies-from-browser", auto_cookie_browser])
+
+        command.append(url)
+        return command
+
+    def _build_home_command(
+        self,
+        url: str,
+        limit: int,
+        force_cookie_file: bool = False,
+    ) -> list[str]:
+        command = [
+            str(self.ytdlp_path),
+            "--dump-single-json",
+            "--flat-playlist",
+            "--playlist-end",
+            str(max(1, min(500, limit))),
+            "--skip-download",
+            "--geo-bypass",
+            "--socket-timeout",
+            "30",
+            "--retries",
+            "5",
+        ]
+
+        js_runtime = self.config.js_runtime()
+        if js_runtime:
+            command.extend(["--js-runtimes", js_runtime])
+
+        _, proxy = self.config.effective_proxy()
+        if proxy:
+            command.extend(["--proxy", proxy])
+
+        cookie_browser = self.config.explicit_cookie_browser()
+        cookie_file = self.config.cookie_file()
+        if force_cookie_file and cookie_file:
+            command.extend(["--cookies", prepare_cookie_file(cookie_file)])
+        elif cookie_browser:
+            command.extend(["--cookies-from-browser", cookie_browser])
+        elif cookie_file:
+            command.extend(["--cookies", prepare_cookie_file(cookie_file)])
+        elif auto_cookie_browser := self.config.auto_cookie_browser():
+            command.extend(["--cookies-from-browser", auto_cookie_browser])
+
+        command.append(url)
+        return command
+
+    def _parse_info(self, info: dict, warnings: str = "") -> VideoInfo:
+        formats = info.get("formats") or []
+        qualities = QualitySelector.select_all(formats)
+        if not qualities:
+            ytdlp_logger.error("no playable qualities found: %s", self._format_stats(info, formats))
+            raise RuntimeError(self._format_no_quality_error(info, formats, warnings))
+
+        subtitles = SubtitleParser.parse(
+            info.get("subtitles") or {},
+            info.get("automatic_captions") or {},
+        )
+
+        return VideoInfo(
+            video_id=str(info.get("id") or ""),
+            title=str(info.get("title") or "未命名视频"),
+            description=str(info.get("description") or ""),
+            uploader=str(info.get("uploader") or ""),
+            channel_id=str(info.get("channel_id") or ""),
+            duration=int(info.get("duration") or 0),
+            upload_date=str(info.get("upload_date") or ""),
+            webpage_url=str(info.get("webpage_url") or ""),
+            thumbnail=str(info.get("thumbnail") or ""),
+            qualities=qualities,
+            subtitles=subtitles,
+            automatic_captions=info.get("automatic_captions") or {},
+            http_headers=info.get("http_headers") or {},
+            raw_info=info,
+        )
+
+    @staticmethod
+    def _parse_home_entry(entry: dict) -> HomeVideo | None:
+        video_id = _clean_video_id(str(entry.get("id") or "").strip())
+        title = str(entry.get("title") or "").strip()
+        if not title:
+            return None
+
+        url = str(entry.get("webpage_url") or entry.get("url") or "").strip()
+        normalized_url = normalize_youtube_video_url(url, fallback_video_id=video_id)
+        if not normalized_url:
+            return None
+        url = normalized_url
+        video_id = _video_id_from_watch_url(url)
+        if not video_id:
+            return None
+
+        thumbnail = str(entry.get("thumbnail") or "").strip()
+        thumbnails = entry.get("thumbnails")
+        if not thumbnail and isinstance(thumbnails, list) and thumbnails:
+            for item in reversed(thumbnails):
+                if isinstance(item, dict) and item.get("url"):
+                    thumbnail = str(item["url"])
+                    break
+        if not thumbnail:
+            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+        return HomeVideo(
+            video_id=video_id,
+            title=title,
+            webpage_url=url,
+            uploader=str(entry.get("uploader") or entry.get("channel") or "").strip(),
+            duration=int(entry.get("duration") or 0),
+            thumbnail=thumbnail,
+        )
+
+    @staticmethod
+    def _format_stats(info: dict, formats: list[dict]) -> dict:
+        return {
+            "id": info.get("id"),
+            "title": info.get("title"),
+            "formats": len(formats),
+            "with_url": sum(1 for fmt in formats if fmt.get("url")),
+            "with_manifest": sum(1 for fmt in formats if fmt.get("manifest_url")),
+            "video": sum(1 for fmt in formats if fmt.get("vcodec") not in (None, "none")),
+            "audio": sum(1 for fmt in formats if fmt.get("acodec") not in (None, "none")),
+            "live_status": info.get("live_status"),
+            "availability": info.get("availability"),
+        }
+
+    @classmethod
+    def _log_info_summary(cls, info: dict) -> None:
+        formats = info.get("formats") or []
+        ytdlp_logger.info("yt-dlp info summary: %s", cls._format_stats(info, formats))
+        sample = []
+        for fmt in formats[:20]:
+            sample.append(
+                {
+                    "format_id": fmt.get("format_id"),
+                    "ext": fmt.get("ext"),
+                    "protocol": fmt.get("protocol"),
+                    "height": fmt.get("height"),
+                    "fps": fmt.get("fps"),
+                    "vcodec": fmt.get("vcodec"),
+                    "acodec": fmt.get("acodec"),
+                    "has_url": bool(fmt.get("url")),
+                    "has_manifest_url": bool(fmt.get("manifest_url")),
+                }
+            )
+        ytdlp_logger.debug("yt-dlp format sample(first 20, urls omitted): %s", sample)
+
+    @staticmethod
+    def _find_ytdlp() -> Path:
+        bundled = thirdpart_path("yt-dlp.exe")
+        if bundled.exists():
+            return bundled
+        return Path("yt-dlp")
+
+    @staticmethod
+    def _format_error(detail: str) -> str:
+        if not detail:
+            return "yt-dlp 解析失败"
+        lower = detail.lower()
+        if "playlist type is unviewable" in lower:
+            return (
+                "当前链接指向 YouTube 播放列表或推荐列表，不是具体视频地址。\n\n"
+                "请打开列表中的某一个视频后再播放；如果来自首页卡片，程序会自动尝试转换为具体视频地址。\n\n"
+                f"{detail}"
+            )
+        if "sign in to confirm" in lower and "not a bot" in lower:
+            if "cookies are no longer valid" in lower:
+                return (
+                    "YouTube 判定当前 Cookie 已失效或已被浏览器安全轮换。\n\n"
+                    "请重新导出 Netscape 格式 cookies.txt；如果使用 Brave/Chrome/Edge 直接读取，"
+                    "请先完全关闭浏览器及后台进程后重试。\n\n"
+                    f"{detail}"
+                )
+            return (
+                "YouTube 要求登录确认不是机器人，当前 Cookie 没有通过校验。\n\n"
+                "建议在设置页选择从浏览器读取 Cookie，并确认浏览器里已经登录 YouTube。\n\n"
+                f"{detail}"
+            )
+        if "could not copy" in lower and "cookie database" in lower:
+            return (
+                "yt-dlp 无法复制浏览器 Cookie 数据库。浏览器可能正在运行、数据库被锁定，"
+                "或当前系统权限不允许读取。\n\n"
+                "如果已经配置了 cookie.txt，请保持自动检测或关闭浏览器读取；如要直接读浏览器 Cookie，请先关闭浏览器后重试。\n\n"
+                f"{detail}"
+            )
+        if "failed to decrypt with dpapi" in lower:
+            return (
+                "yt-dlp 无法使用 Windows DPAPI 解密浏览器 Cookie。\n\n"
+                "程序会优先回退到配置的 cookie.txt；如果仍失败，请重新导出 Netscape 格式 cookies.txt。\n\n"
+                f"{detail}"
+            )
+        if "requested format is not available" in lower:
+            return (
+                "yt-dlp 报告请求的格式不可用。当前程序会自动选择可播放格式，如仍出现此提示，"
+                "通常说明该视频当前返回的格式集合异常或受限制。\n\n"
+                f"{detail}"
+            )
+        return detail
+
+    @staticmethod
+    def _should_retry_with_cookie_file(result: subprocess.CompletedProcess[str]) -> bool:
+        detail = f"{result.stderr or ''}\n{result.stdout or ''}".lower()
+        browser_cookie_failures = (
+            "could not copy chrome cookie database",
+            "failed to decrypt with dpapi",
+            "could not find chrome cookies database",
+        )
+        return any(message in detail for message in browser_cookie_failures)
+
+    @staticmethod
+    def _format_no_quality_error(info: dict, formats: list[dict], warnings: str) -> str:
+        with_url = sum(1 for fmt in formats if fmt.get("url"))
+        with_manifest = sum(1 for fmt in formats if fmt.get("manifest_url"))
+        videos = sum(1 for fmt in formats if fmt.get("vcodec") not in (None, "none"))
+        audios = sum(1 for fmt in formats if fmt.get("acodec") not in (None, "none"))
+        live_status = info.get("live_status") or ""
+        availability = info.get("availability") or ""
+
+        lines = [
+            "yt-dlp 返回了视频信息，但没有找到可直接交给播放器的媒体地址。",
+            "",
+            f"formats 总数: {len(formats)}",
+            f"带 url 的格式: {with_url}",
+            f"带 manifest_url 的格式: {with_manifest}",
+            f"视频格式数: {videos}",
+            f"音频格式数: {audios}",
+        ]
+        if live_status:
+            lines.append(f"直播状态: {live_status}")
+        if availability:
+            lines.append(f"可用性: {availability}")
+        if warnings:
+            lines.extend(["", "yt-dlp 警告:", warnings])
+        lines.extend(
+            [
+                "",
+                "通常原因：Cookie 已失效、账号未通过 YouTube 校验、视频受地区/年龄/会员限制，",
+                "或者 YouTube 当前返回的可播放格式不足。",
+            ]
+        )
+        return "\n".join(lines)
+
+
+def normalize_youtube_video_url(url: str, fallback_video_id: str = "") -> str:
+    raw = str(url or "").strip()
+    fallback = _clean_video_id(fallback_video_id)
+    if not raw:
+        return _watch_url(fallback) if fallback else ""
+
+    if not raw.startswith(("http://", "https://")):
+        direct_id = _clean_video_id(raw)
+        if direct_id:
+            return _watch_url(direct_id)
+        return _watch_url(fallback) if fallback else ""
+
+    parsed = urlparse(raw)
+    host = parsed.netloc.lower()
+    path = parsed.path.strip("/")
+    query = parse_qs(parsed.query)
+
+    if not _is_youtube_host(host):
+        return raw
+
+    video_id = _clean_video_id((query.get("v") or [""])[0])
+    if video_id:
+        return _watch_url(video_id)
+
+    parts = [part for part in path.split("/") if part]
+    if host.endswith("youtu.be") and parts:
+        video_id = _clean_video_id(parts[0])
+        if video_id:
+            return _watch_url(video_id)
+
+    if parts and parts[0] in ("shorts", "live", "embed") and len(parts) > 1:
+        video_id = _clean_video_id(parts[1])
+        if video_id:
+            return _watch_url(video_id)
+
+    list_id = str((query.get("list") or [""])[0]).strip()
+    if list_id.startswith("RD"):
+        video_id = _clean_video_id(list_id[2:])
+        if video_id:
+            return _watch_url(video_id)
+
+    return _watch_url(fallback) if fallback else ""
+
+
+def _video_id_from_watch_url(url: str) -> str:
+    parsed = urlparse(url)
+    return _clean_video_id((parse_qs(parsed.query).get("v") or [""])[0])
+
+
+def _clean_video_id(value: str) -> str:
+    candidate = str(value or "").strip()
+    return candidate if VIDEO_ID_PATTERN.match(candidate) else ""
+
+
+def _watch_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def _is_youtube_host(host: str) -> bool:
+    return host.endswith("youtube.com") or host.endswith("youtu.be") or host.endswith("youtube-nocookie.com")
+
+
+def _is_youtube_playlist_url(url: str) -> bool:
+    raw = str(url or "").strip()
+    if not raw.startswith(("http://", "https://")):
+        return False
+    parsed = urlparse(raw)
+    if not _is_youtube_host(parsed.netloc.lower()):
+        return False
+    query = parse_qs(parsed.query)
+    return bool(query.get("list")) and not _clean_video_id((query.get("v") or [""])[0])

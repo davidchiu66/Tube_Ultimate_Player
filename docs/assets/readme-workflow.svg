@@ -1,0 +1,50 @@
+<svg width="1280" height="520" viewBox="0 0 1280 520" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="520" rx="28" fill="#0F172A"/>
+  <text x="64" y="82" fill="#F8FAFC" font-size="42" font-family="Segoe UI, Arial, sans-serif" font-weight="700">
+    使用流程
+  </text>
+  <text x="64" y="122" fill="#94A3B8" font-size="22" font-family="Segoe UI, Arial, sans-serif">
+    从搜索到播放，再到下载与回看
+  </text>
+
+  <rect x="64" y="178" width="218" height="222" rx="24" fill="#111827" stroke="#23314D"/>
+  <rect x="318" y="178" width="218" height="222" rx="24" fill="#111827" stroke="#23314D"/>
+  <rect x="572" y="178" width="218" height="222" rx="24" fill="#111827" stroke="#23314D"/>
+  <rect x="826" y="178" width="218" height="222" rx="24" fill="#111827" stroke="#23314D"/>
+  <rect x="1080" y="178" width="136" height="222" rx="24" fill="#111827" stroke="#23314D"/>
+
+  <text x="100" y="226" fill="#60A5FA" font-size="18" font-family="Segoe UI, Arial, sans-serif">STEP 1</text>
+  <text x="100" y="266" fill="#F8FAFC" font-size="28" font-family="Segoe UI, Arial, sans-serif" font-weight="700">搜索或首页浏览</text>
+  <text x="100" y="312" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">关键词搜索</text>
+  <text x="100" y="340" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">首页推荐分页</text>
+  <text x="100" y="368" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">九宫格选中</text>
+
+  <text x="354" y="226" fill="#60A5FA" font-size="18" font-family="Segoe UI, Arial, sans-serif">STEP 2</text>
+  <text x="354" y="266" fill="#F8FAFC" font-size="28" font-family="Segoe UI, Arial, sans-serif" font-weight="700">解析并播放</text>
+  <text x="354" y="312" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">URL 解析</text>
+  <text x="354" y="340" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">mpv 播放控制</text>
+  <text x="354" y="368" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">字幕 / 清晰度 / 全屏</text>
+
+  <text x="608" y="226" fill="#60A5FA" font-size="18" font-family="Segoe UI, Arial, sans-serif">STEP 3</text>
+  <text x="608" y="266" fill="#F8FAFC" font-size="28" font-family="Segoe UI, Arial, sans-serif" font-weight="700">收藏与历史</text>
+  <text x="608" y="312" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">一键收藏视频</text>
+  <text x="608" y="340" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">自动记录播放历史</text>
+  <text x="608" y="368" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">重启后继续保留</text>
+
+  <text x="862" y="226" fill="#60A5FA" font-size="18" font-family="Segoe UI, Arial, sans-serif">STEP 4</text>
+  <text x="862" y="266" fill="#F8FAFC" font-size="28" font-family="Segoe UI, Arial, sans-serif" font-weight="700">下载队列</text>
+  <text x="862" y="312" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">并发下载</text>
+  <text x="862" y="340" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">暂停 / 启动 / 删除</text>
+  <text x="862" y="368" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">完成后本地回看</text>
+
+  <text x="1110" y="226" fill="#60A5FA" font-size="18" font-family="Segoe UI, Arial, sans-serif">STEP 5</text>
+  <text x="1110" y="266" fill="#F8FAFC" font-size="28" font-family="Segoe UI, Arial, sans-serif" font-weight="700">设置</text>
+  <text x="1110" y="312" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">代理</text>
+  <text x="1110" y="340" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">Cookie</text>
+  <text x="1110" y="368" fill="#94A3B8" font-size="19" font-family="Segoe UI, Arial, sans-serif">FFmpeg</text>
+
+  <path d="M282 290H318" stroke="#334155" stroke-width="4" stroke-linecap="round"/>
+  <path d="M536 290H572" stroke="#334155" stroke-width="4" stroke-linecap="round"/>
+  <path d="M790 290H826" stroke="#334155" stroke-width="4" stroke-linecap="round"/>
+  <path d="M1044 290H1080" stroke="#334155" stroke-width="4" stroke-linecap="round"/>
+</svg>

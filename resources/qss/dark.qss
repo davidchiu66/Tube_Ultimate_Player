@@ -1,0 +1,135 @@
+QMainWindow, QWidget {
+    background: #121212;
+    color: #f2f2f2;
+    font-size: 13px;
+}
+
+QLineEdit, QComboBox, QListWidget, QScrollArea, QTableWidget {
+    background: #1e1e1e;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 5px 7px;
+    color: #f2f2f2;
+}
+
+QHeaderView::section {
+    background: #242424;
+    color: #f2f2f2;
+    border: 0;
+    border-right: 1px solid #333333;
+    padding: 6px;
+}
+
+QTableWidget::item {
+    padding: 6px;
+}
+
+QPushButton {
+    background: #242424;
+    border: 1px solid #333333;
+    border-radius: 6px;
+    padding: 7px 10px;
+    color: #f2f2f2;
+}
+
+QPushButton:hover {
+    background: #303030;
+    border-color: #3ea6ff;
+}
+
+QPushButton:disabled {
+    color: #777777;
+    background: #1a1a1a;
+}
+
+QSlider::groove:horizontal {
+    height: 5px;
+    background: #2a2a2a;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    width: 14px;
+    margin: -5px 0;
+    background: #3ea6ff;
+    border-radius: 7px;
+}
+
+QProgressBar {
+    background: #1e1e1e;
+    border: 1px solid #2a2a2a;
+    border-radius: 5px;
+    height: 8px;
+    text-align: center;
+}
+
+QProgressBar::chunk {
+    background: #3ea6ff;
+    border-radius: 4px;
+}
+
+#VideoSurface {
+    background: #050505;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+}
+
+#PlayerControlPanel {
+    background: rgba(18, 18, 18, 218);
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+}
+
+#TitleLabel {
+    font-size: 17px;
+    font-weight: 600;
+}
+
+#MetaLabel {
+    color: #a0a0a0;
+}
+
+#PageTitle {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+#ThumbnailLabel {
+    background: #1e1e1e;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    color: #a0a0a0;
+}
+
+#HomeVideoCard {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+}
+
+#HomeVideoCard:hover {
+    border-color: #3ea6ff;
+    background: #202020;
+}
+
+#HomeVideoCard[selected="true"] {
+    border: 2px solid #3ea6ff;
+    background: #202428;
+}
+
+#HomeThumbnail {
+    background: #050505;
+    border-radius: 6px;
+    color: #a0a0a0;
+}
+
+#HomeVideoTitle {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#Toast {
+    background: #202428;
+    border: 1px solid #3ea6ff;
+    border-radius: 8px;
+}

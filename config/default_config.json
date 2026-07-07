@@ -1,0 +1,31 @@
+{
+  "player": {
+    "default_quality": "Auto",
+    "hardware_decode": "auto-safe",
+    "volume": 80,
+    "speed": 1.0
+  },
+  "youtube": {
+    "proxy": "",
+    "cookie_browser": "auto",
+    "cookie_browser_profile": "",
+    "cookie_file": "",
+    "js_runtime": "auto",
+    "subtitle_languages": ["zh-Hans", "zh-Hant", "zh", "en"]
+  },
+  "cache": {
+    "enabled": true,
+    "metadata_ttl_hours": 12,
+    "thumbnail_ttl_days": 30,
+    "subtitle_ttl_days": 30
+  },
+  "download": {
+    "save_dir": "",
+    "max_concurrent": 1,
+    "ffmpeg_dir": ""
+  },
+  "ui": {
+    "theme": "dark",
+    "language": "zh-CN"
+  }
+}
