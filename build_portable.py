@@ -14,6 +14,7 @@ PORTABLE_DIR = DIST_DIR / "Tube_Ultimate_Player_Portable"
 THIRDPART_DIR = ROOT / "3rdpart"
 VERSION_FILE = ROOT / "app_version.txt"
 RELEASE_NAME = "Tube_Ultimate_Player"
+MIN_DLL_SIZE = 10 * 1024 * 1024
 
 
 def read_version() -> str:
@@ -21,6 +22,7 @@ def read_version() -> str:
 
 
 def run_pyinstaller() -> None:
+    validate_thirdpart_binaries()
     subprocess.run(
         [
             sys.executable,
@@ -40,6 +42,24 @@ def run_pyinstaller() -> None:
         check=True,
         cwd=ROOT,
     )
+
+
+def validate_thirdpart_binaries() -> None:
+    required = (
+        "libmpv-2.dll",
+        "libEGL.dll",
+        "libGLESv2.dll",
+    )
+    for name in required:
+        path = THIRDPART_DIR / name
+        if not path.exists():
+            raise RuntimeError(f"Missing required third-party binary: {path}")
+        size = path.stat().st_size
+        if name == "libmpv-2.dll" and size < MIN_DLL_SIZE:
+            raise RuntimeError(
+                f"{path} is unexpectedly small ({size} bytes). "
+                "Git LFS content was likely not downloaded."
+            )
 
 
 def _copy_tree_contents(source_dir: Path, target_dir: Path) -> None:
