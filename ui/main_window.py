@@ -20,7 +20,6 @@ from services.runtime_install_service import RuntimeInstallService
 from services.update_service import REPO_URL, UpdateCheckResult, UpdateService
 from ui.about_page import AboutPage
 from ui.download_page import DownloadPage
-from ui.dialogs import AboutDialog
 from ui.favorite_page import FavoritePage
 from ui.history_page import HistoryPage
 from ui.home_page import HomePage
@@ -125,7 +124,7 @@ class MainWindow(QMainWindow):
         self.favorite_nav.clicked.connect(self._show_favorites)
         self.history_nav.clicked.connect(self._show_history)
         self.settings_nav.clicked.connect(lambda: self.stack.setCurrentWidget(self.settings_page))
-        self.about_nav.clicked.connect(self._show_about_dialog)
+        self.about_nav.clicked.connect(self._show_about)
 
         self.home_page.refresh_requested.connect(self._refresh_home_page)
         self.home_page.play_requested.connect(self.play_url)
@@ -485,10 +484,8 @@ class MainWindow(QMainWindow):
         self.history_page.refresh()
         self.stack.setCurrentWidget(self.history_page)
 
-    def _show_about_dialog(self) -> None:
-        dialog = AboutDialog(self)
-        dialog.version_center_requested.connect(lambda: self.stack.setCurrentWidget(self.about_page))
-        dialog.exec()
+    def _show_about(self) -> None:
+        self.stack.setCurrentWidget(self.about_page)
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():

@@ -17,7 +17,7 @@ logger = logging.getLogger("tube_player.update")
 
 REPO_SLUG = "davidchiu66/Tube_Ultimate_Player"
 REPO_URL = f"https://github.com/{REPO_SLUG}"
-LATEST_RELEASE_API = f"https://api.github.com/repos/{REPO_SLUG}/releases/latest"
+RELEASES_API = f"https://api.github.com/repos/{REPO_SLUG}/releases"
 
 
 @dataclass(slots=True)
@@ -86,7 +86,10 @@ class UpdateService:
         return "installer", "安装包版"
 
     def fetch_latest_release(self) -> ReleaseInfo:
-        payload = self._read_json(LATEST_RELEASE_API)
+        releases = self._read_json(RELEASES_API)
+        if not isinstance(releases, list) or not releases:
+            raise RuntimeError("未获取到可用的版本发布信息")
+        payload = self._select_release_payload(releases)
         assets = [
             ReleaseAsset(
                 name=str(asset.get("name", "")),
@@ -105,6 +108,14 @@ class UpdateService:
             prerelease=bool(payload.get("prerelease", False)),
             assets=assets,
         )
+
+    @staticmethod
+    def _select_release_payload(releases: list[dict]) -> dict:
+        for release in releases:
+            if release.get("draft"):
+                continue
+            return release
+        raise RuntimeError("没有找到可用的版本发布信息")
 
     def check_for_updates(self) -> UpdateCheckResult:
         release = self.fetch_latest_release()
