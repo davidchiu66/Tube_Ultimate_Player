@@ -15,6 +15,7 @@ THIRDPART_DIR = ROOT / "3rdpart"
 VERSION_FILE = ROOT / "app_version.txt"
 RELEASE_NAME = "Tube_Ultimate_Player"
 MIN_DLL_SIZE = 10 * 1024 * 1024
+ICON_FILE = ROOT / "docs" / "assets" / "icons" / "app-icon.ico"
 
 
 def read_version() -> str:
@@ -33,10 +34,14 @@ def run_pyinstaller() -> None:
             "--name",
             RELEASE_NAME,
             "--windowed",
+            "--icon",
+            str(ICON_FILE),
             "--add-data",
             f"{ROOT / 'resources'};resources",
             "--add-data",
             f"{ROOT / 'config'};config",
+            "--add-data",
+            f"{ROOT / 'docs' / 'assets' / 'icons'};docs/assets/icons",
             str(ROOT / "main.py"),
         ],
         check=True,

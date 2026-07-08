@@ -18,19 +18,20 @@ from PySide6.QtWidgets import (
 )
 
 from services.config_service import ConfigService, detect_browser_cookie_sources
+from services.runtime_install_service import RuntimeStatus
 
 
 class SettingsPage(QWidget):
     settings_saved = Signal()
+    install_node_requested = Signal()
+    open_node_site_requested = Signal()
 
     def __init__(self, config: ConfigService) -> None:
         super().__init__()
         self.config = config
 
         self.active_proxy_label = QLabel()
-        self.system_hint_label = QLabel(
-            "读取顺序：系统代理优先；未检测到系统代理时使用下方配置代理。"
-        )
+        self.system_hint_label = QLabel("代理读取顺序：优先使用系统代理；未检测到系统代理时再使用此处配置。")
         self.system_hint_label.setObjectName("MetaLabel")
 
         self.proxy_edit = QLineEdit()
@@ -38,9 +39,7 @@ class SettingsPage(QWidget):
 
         self.cookie_edit = QTextEdit()
         self.cookie_edit.setMinimumHeight(150)
-        self.cookie_edit.setPlaceholderText(
-            "Netscape cookies.txt 内容，或浏览器请求头中的 Cookie: a=b; c=d"
-        )
+        self.cookie_edit.setPlaceholderText("粘贴 Netscape cookies.txt 内容，或浏览器请求头里的 Cookie: a=b; c=d")
 
         self.cookie_browser_combo = QComboBox()
 
@@ -55,11 +54,28 @@ class SettingsPage(QWidget):
         self.js_runtime_combo.addItem("QuickJS", "quickjs")
         self.js_runtime_combo.addItem("Bun", "bun")
 
+        self.js_runtime_status_label = QLabel()
+        self.js_runtime_status_label.setObjectName("MetaLabel")
+        self.install_node_button = QPushButton("安装 Node.js")
+        self.open_node_site_button = QPushButton("打开官网")
+        self.install_node_button.clicked.connect(self.install_node_requested.emit)
+        self.open_node_site_button.clicked.connect(self.open_node_site_requested.emit)
+        js_actions = QHBoxLayout()
+        js_actions.setContentsMargins(0, 0, 0, 0)
+        js_actions.setSpacing(8)
+        js_actions.addWidget(self.install_node_button)
+        js_actions.addWidget(self.open_node_site_button)
+        js_actions.addStretch(1)
+        self.js_runtime_progress_label = QLabel()
+        self.js_runtime_progress_label.setObjectName("MetaLabel")
+
         self.download_dir_edit = QLineEdit()
         self.download_dir_edit.setPlaceholderText(self.config.download_dir())
         browse_download_dir = QPushButton("浏览")
         browse_download_dir.clicked.connect(self._browse_download_dir)
         download_dir_row = QHBoxLayout()
+        download_dir_row.setContentsMargins(0, 0, 0, 0)
+        download_dir_row.setSpacing(8)
         download_dir_row.addWidget(self.download_dir_edit, 1)
         download_dir_row.addWidget(browse_download_dir)
 
@@ -68,6 +84,8 @@ class SettingsPage(QWidget):
         browse_ffmpeg_dir = QPushButton("浏览")
         browse_ffmpeg_dir.clicked.connect(self._browse_ffmpeg_dir)
         ffmpeg_dir_row = QHBoxLayout()
+        ffmpeg_dir_row.setContentsMargins(0, 0, 0, 0)
+        ffmpeg_dir_row.setSpacing(8)
         ffmpeg_dir_row.addWidget(self.ffmpeg_dir_edit, 1)
         ffmpeg_dir_row.addWidget(browse_ffmpeg_dir)
 
@@ -76,12 +94,18 @@ class SettingsPage(QWidget):
         self.max_downloads_spin.setValue(1)
 
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         form.addRow("当前有效代理", self.active_proxy_label)
         form.addRow("配置代理", self.proxy_edit)
         form.addRow("从浏览器读取 Cookie", self.cookie_browser_combo)
         form.addRow("浏览器 Profile", self.cookie_profile_edit)
         form.addRow("Cookie 内容", self.cookie_edit)
         form.addRow("JS Runtime", self.js_runtime_combo)
+        form.addRow("运行时状态", self.js_runtime_status_label)
+        form.addRow("", js_actions)
+        form.addRow("", self.js_runtime_progress_label)
         form.addRow("视频保存路径", download_dir_row)
         form.addRow("同时下载视频数", self.max_downloads_spin)
         form.addRow("FFmpeg 目录", ffmpeg_dir_row)
@@ -121,10 +145,13 @@ class SettingsPage(QWidget):
         runtime = str(self.config.get("youtube.js_runtime", "auto") or "")
         runtime_index = self.js_runtime_combo.findData(runtime)
         self.js_runtime_combo.setCurrentIndex(runtime_index if runtime_index >= 0 else 0)
-        self.download_dir_edit.setText(str(self.config.get("download.save_dir", self.config.download_dir()) or self.config.download_dir()))
+        self.download_dir_edit.setText(
+            str(self.config.get("download.save_dir", self.config.download_dir()) or self.config.download_dir())
+        )
         self.ffmpeg_dir_edit.setText(str(self.config.get("download.ffmpeg_dir", "") or ""))
         self.max_downloads_spin.setValue(self.config.download_max_concurrent())
         self.refresh_active_proxy()
+        self.js_runtime_progress_label.clear()
 
     def save(self) -> None:
         cookie_path = self._cookie_file_path()
@@ -146,11 +173,29 @@ class SettingsPage(QWidget):
         self.config.save()
         self.config.download_dir()
         self.refresh_active_proxy()
+        self.js_runtime_progress_label.clear()
         self.settings_saved.emit()
 
     def refresh_active_proxy(self) -> None:
         source, proxy = self.config.effective_proxy()
         self.active_proxy_label.setText(f"{source}: {proxy}" if proxy else source)
+
+    def set_runtime_status(self, status: RuntimeStatus) -> None:
+        self.js_runtime_status_label.setText(status.display_text)
+        self.install_node_button.setVisible(not status.available)
+        self.open_node_site_button.setVisible(not status.available)
+        if status.available:
+            self.js_runtime_progress_label.clear()
+
+    def set_runtime_install_busy(self, busy: bool, text: str = "") -> None:
+        self.install_node_button.setEnabled(not busy)
+        self.open_node_site_button.setEnabled(not busy)
+        self.reload_button.setEnabled(not busy)
+        if text:
+            self.js_runtime_progress_label.setText(text)
+
+    def set_runtime_install_progress(self, text: str) -> None:
+        self.js_runtime_progress_label.setText(text)
 
     def _populate_cookie_browser_combo(self, selected: str) -> None:
         self.cookie_browser_combo.blockSignals(True)

@@ -1,1 +1,2 @@
 PySide6>=6.6
+qtawesome>=1.3

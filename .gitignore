@@ -24,6 +24,8 @@ build/
 *.msi
 *.exe
 *.zip
+*.7z
 
 # Local app data exports
 runtime/
+3rdpart/

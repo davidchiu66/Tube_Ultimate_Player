@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app_paths import APP_NAME, ensure_runtime_dirs, resource_path
+from app_paths import APP_NAME, asset_path, ensure_runtime_dirs, resource_path
 from services.logging_service import setup_logging
 from ui.main_window import MainWindow
 
@@ -19,6 +20,7 @@ def main() -> int:
     logger.info("application starting")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    _load_app_icon(app)
     _load_stylesheet(app)
     try:
         window = MainWindow()
@@ -33,12 +35,25 @@ def main() -> int:
 
 
 def _load_stylesheet(app: QApplication) -> None:
-    path = resource_path("qss", "dark.qss")
-    try:
-        with path.open("r", encoding="utf-8") as file:
-            app.setStyleSheet(file.read())
-    except OSError:
-        pass
+    for name in ("dark_theme.qss", "dark.qss"):
+        path = resource_path("qss", name)
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                app.setStyleSheet(file.read())
+                return
+        except OSError:
+            continue
+
+
+def _load_app_icon(app: QApplication) -> None:
+    for path in (
+        asset_path("icons", "app-icon.ico"),
+        asset_path("icons", "app-icon-256.png"),
+        asset_path("icons", "app-icon.png"),
+    ):
+        if path.exists():
+            app.setWindowIcon(QIcon(str(path)))
+            return
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ BASE_DIR = APP_DIR
 THIRDPART_DIR = _pick_existing(APP_DIR / "3rdpart", BUNDLE_DIR / "3rdpart", SOURCE_DIR / "3rdpart")
 RESOURCE_DIR = _pick_existing(APP_DIR / "resources", BUNDLE_DIR / "resources", SOURCE_DIR / "resources")
 DEFAULT_CONFIG_DIR = _pick_existing(APP_DIR / "config", BUNDLE_DIR / "config", SOURCE_DIR / "config")
+ASSET_DIR = _pick_existing(APP_DIR / "docs" / "assets", BUNDLE_DIR / "docs" / "assets", SOURCE_DIR / "docs" / "assets")
 
 
 def _runtime_root_candidates() -> list[Path]:
@@ -67,6 +68,7 @@ CACHE_DIR = RUNTIME_ROOT / "cache"
 DATA_DIR = RUNTIME_ROOT / "data"
 LOG_DIR = RUNTIME_ROOT / "logs"
 DOWNLOAD_DIR = RUNTIME_ROOT / "downloads"
+UPDATE_DIR = RUNTIME_ROOT / "updates"
 
 
 def ensure_runtime_dirs() -> None:
@@ -78,6 +80,7 @@ def ensure_runtime_dirs() -> None:
         CACHE_DIR / "cookies",
         LOG_DIR,
         DOWNLOAD_DIR,
+        UPDATE_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -94,8 +97,29 @@ def resource_path(*parts: str) -> Path:
     return RESOURCE_DIR.joinpath(*parts)
 
 
+def asset_path(*parts: str) -> Path:
+    return ASSET_DIR.joinpath(*parts)
+
+
 def runtime_path(*parts: str) -> Path:
     return RUNTIME_ROOT.joinpath(*parts)
+
+
+def app_version_path() -> Path:
+    candidates = (
+        APP_DIR / "app_version.txt",
+        SOURCE_DIR / "app_version.txt",
+        BUNDLE_DIR / "app_version.txt",
+    )
+    return _pick_existing(*candidates)
+
+
+def read_app_version(default: str = "0.0.0-dev") -> str:
+    path = app_version_path()
+    try:
+        return path.read_text(encoding="utf-8").strip() or default
+    except OSError:
+        return default
 
 
 def add_thirdpart_dll_directory() -> None:
