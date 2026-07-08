@@ -28,4 +28,7 @@ build/
 
 # Local app data exports
 runtime/
-3rdpart/
+
+# Dynamically downloaded third-party binaries
+3rdpart/libmpv-2.dll
+3rdpart/yt-dlp.exe

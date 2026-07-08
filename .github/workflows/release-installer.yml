@@ -67,14 +67,12 @@ jobs:
           & $sevenZip x $archive "-o$extractDir" -y
           if ($LASTEXITCODE -ne 0) { throw "Failed to extract libmpv archive" }
 
+          $dll = Get-ChildItem -Path $extractDir -Recurse -Filter "libmpv-2.dll" |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll was not found in the SourceForge archive" }
           New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
-          foreach ($name in @("libmpv-2.dll", "libEGL.dll", "libGLESv2.dll")) {
-            $dll = Get-ChildItem -Path $extractDir -Recurse -Filter $name |
-              Sort-Object Length -Descending |
-              Select-Object -First 1
-            if (-not $dll) { throw "$name was not found in the SourceForge archive" }
-            Copy-Item -LiteralPath $dll.FullName -Destination ("3rdpart/" + $name) -Force
-          }
+          Copy-Item -LiteralPath $dll.FullName -Destination "3rdpart/libmpv-2.dll" -Force
 
       - name: Verify libmpv payload
         shell: powershell
