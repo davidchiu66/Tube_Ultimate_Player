@@ -43,7 +43,9 @@ class DownloadManager(QObject):
         self._workers: dict[str, DownloadWorker] = {}
         self._max_concurrent = self.config.download_max_concurrent()
         self._load_tasks()
+        self._deduplicate_tasks()
         self._import_completed_files()
+        self._deduplicate_tasks()
 
     def tasks(self) -> list[DownloadTask]:
         return list(self._tasks)
@@ -226,9 +228,11 @@ class DownloadManager(QObject):
         save_dir = Path(task.save_dir)
         if not save_dir.exists():
             return ""
-        marker = f" [{task.video_id}]"
+        markers = [f" [{candidate}]" for candidate in _video_id_candidates(task.video_id)]
         for path in save_dir.iterdir():
-            if path.is_file() and marker in path.name and path.suffix.lower() not in (".part", ".ytdl"):
+            if not path.is_file() or path.suffix.lower() in (".part", ".ytdl"):
+                continue
+            if any(marker in path.name for marker in markers):
                 return str(path)
         return ""
 
@@ -284,12 +288,39 @@ class DownloadManager(QObject):
         logger.info("download tasks loaded count=%s file=%s", len(self._tasks), TASKS_FILE)
         self._save_tasks()
 
+    def _deduplicate_tasks(self) -> None:
+        if len(self._tasks) < 2:
+            return
+
+        kept: list[DownloadTask] = []
+        removed = 0
+        for task in self._tasks:
+            duplicate_index = _find_duplicate_task_index(kept, task)
+            if duplicate_index < 0:
+                kept.append(task)
+                continue
+
+            winner = _prefer_task(kept[duplicate_index], task)
+            if winner is task:
+                kept[duplicate_index] = task
+            removed += 1
+
+        if removed:
+            self._tasks = kept
+            logger.info("download tasks deduplicated removed=%s remaining=%s", removed, len(self._tasks))
+            self._save_tasks()
+
     def _import_completed_files(self) -> None:
         save_dir = Path(self.config.download_dir())
         if not save_dir.exists():
             return
 
-        existing_ids = {task.video_id for task in self._tasks if task.video_id}
+        existing_ids = {_normalized_video_id(task.video_id) for task in self._tasks if task.video_id}
+        existing_paths = {
+            str(Path(task.output_path)).lower()
+            for task in self._tasks
+            if task.output_path
+        }
         imported = 0
         transient_suffixes = (".part", ".ytdl", ".tmp", ".temp")
         try:
@@ -305,7 +336,9 @@ class DownloadManager(QObject):
             if not match:
                 continue
             video_id = match.group("video_id")
-            if video_id in existing_ids:
+            normalized_video_id = _normalized_video_id(video_id)
+            normalized_path = str(path).lower()
+            if normalized_video_id in existing_ids or normalized_path in existing_paths:
                 continue
             title = path.stem[: match.start()].strip() or path.stem
             url = _url_from_video_id(video_id)
@@ -320,7 +353,8 @@ class DownloadManager(QObject):
                 output_path=str(path),
             )
             self._tasks.append(task)
-            existing_ids.add(video_id)
+            existing_ids.add(normalized_video_id)
+            existing_paths.add(normalized_path)
             imported += 1
 
         if imported:
@@ -341,6 +375,10 @@ class DownloadManager(QObject):
 
 def _url_from_video_id(video_id: str) -> str:
     raw = str(video_id or "").strip()
+    if raw.startswith("BV"):
+        return f"https://www.bilibili.com/video/{raw}"
+    if raw.startswith("av") and raw[2:].isdigit():
+        return f"https://www.bilibili.com/video/{raw}"
     if raw.startswith("bilibili:BV"):
         body = raw[len("bilibili:") :]
         if ":p" in body:
@@ -357,3 +395,77 @@ def _url_from_video_id(video_id: str) -> str:
         if aid.isdigit():
             return f"https://www.bilibili.com/video/av{aid}"
     return f"https://www.youtube.com/watch?v={raw}"
+
+
+def _normalized_video_id(video_id: str) -> str:
+    raw = str(video_id or "").strip()
+    if raw.startswith("bilibili:"):
+        raw = raw[len("bilibili:") :]
+    if raw.startswith("BV"):
+        return raw.split(":p", 1)[0]
+    if raw.startswith("av"):
+        return raw.split(":p", 1)[0]
+    return raw
+
+
+def _video_id_candidates(video_id: str) -> list[str]:
+    raw = str(video_id or "").strip()
+    if not raw:
+        return []
+
+    candidates: list[str] = []
+    for value in (raw, _normalized_video_id(raw)):
+        value = str(value).strip()
+        if not value or value in candidates:
+            continue
+        candidates.append(value)
+        if value.startswith("bilibili:"):
+            stripped = value[len("bilibili:") :]
+            if stripped and stripped not in candidates:
+                candidates.append(stripped)
+        if ":p" in value:
+            trimmed = value.split(":p", 1)[0]
+            if trimmed and trimmed not in candidates:
+                candidates.append(trimmed)
+    return candidates
+
+
+def _find_duplicate_task_index(tasks: list[DownloadTask], candidate: DownloadTask) -> int:
+    candidate_norm = _normalized_video_id(candidate.video_id)
+    candidate_path = _normalized_existing_path(candidate.output_path)
+    for index, current in enumerate(tasks):
+        current_norm = _normalized_video_id(current.video_id)
+        current_path = _normalized_existing_path(current.output_path)
+        if candidate_norm and current_norm and candidate_norm == current_norm:
+            return index
+        if candidate_path and current_path and candidate_path == current_path:
+            return index
+    return -1
+
+
+def _prefer_task(left: DownloadTask, right: DownloadTask) -> DownloadTask:
+    left_score = _task_preference_score(left)
+    right_score = _task_preference_score(right)
+    if right_score > left_score:
+        return right
+    return left
+
+
+def _task_preference_score(task: DownloadTask) -> tuple[int, int, int, float]:
+    local_path = 1 if task.output_path and Path(task.output_path).exists() else 0
+    completed = 1 if task.status == STATUS_COMPLETED else 0
+    non_local_quality = 1 if task.quality_label != "Local" else 0
+    progress = float(task.progress or 0.0)
+    return (completed, local_path, non_local_quality, progress)
+
+
+def _normalized_existing_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        if Path(raw).exists():
+            return str(Path(raw).resolve()).lower()
+    except OSError:
+        return raw.lower()
+    return raw.lower()

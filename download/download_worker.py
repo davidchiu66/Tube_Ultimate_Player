@@ -284,10 +284,11 @@ def _downloaded_bytes(task: DownloadTask) -> int:
     if not task.video_id or not save_dir.exists():
         return 0
 
+    candidates = _video_id_candidates(task.video_id)
     total = 0
     try:
         for path in save_dir.iterdir():
-            if not path.is_file() or task.video_id not in path.name:
+            if not path.is_file() or not any(candidate in path.name for candidate in candidates):
                 continue
             total += path.stat().st_size
     except OSError:
@@ -300,11 +301,12 @@ def _find_downloaded_file(task: DownloadTask) -> str:
     if not task.video_id or not save_dir.exists():
         return ""
 
+    candidates = _video_id_candidates(task.video_id)
     transient_suffixes = (".part", ".ytdl", ".tmp", ".temp")
     try:
         for path in save_dir.iterdir():
             lower_name = path.name.lower()
-            if not path.is_file() or task.video_id not in path.name:
+            if not path.is_file() or not any(candidate in path.name for candidate in candidates):
                 continue
             if lower_name.endswith(transient_suffixes):
                 continue
@@ -312,6 +314,23 @@ def _find_downloaded_file(task: DownloadTask) -> str:
     except OSError:
         return ""
     return ""
+
+
+def _video_id_candidates(video_id: str) -> list[str]:
+    raw = str(video_id or "").strip()
+    if not raw:
+        return []
+
+    candidates: list[str] = [raw]
+    if raw.startswith("bilibili:"):
+        raw = raw[len("bilibili:") :]
+        if raw not in candidates:
+            candidates.append(raw)
+    if raw.startswith("BV") or raw.startswith("av"):
+        trimmed = raw.split(":p", 1)[0]
+        if trimmed and trimmed not in candidates:
+            candidates.append(trimmed)
+    return candidates
 
 
 def _format_speed(bytes_per_second: float) -> str:

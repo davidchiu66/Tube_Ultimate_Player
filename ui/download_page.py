@@ -189,13 +189,15 @@ class DownloadPage(QWidget):
         save_dir = Path(task.save_dir)
         if not save_dir.exists():
             return ""
-        marker = f" [{task.video_id}]"
+        markers = [f" [{candidate}]" for candidate in _video_id_candidates(task.video_id)]
         transient_suffixes = (".part", ".ytdl", ".tmp", ".temp")
         try:
             for path in save_dir.iterdir():
-                if not path.is_file() or marker not in path.name:
+                if not path.is_file():
                     continue
                 if path.name.lower().endswith(transient_suffixes):
+                    continue
+                if not any(marker in path.name for marker in markers):
                     continue
                 task.output_path = str(path)
                 return task.output_path
@@ -215,3 +217,20 @@ class DownloadPage(QWidget):
             if task_row == row:
                 return task_id
         return ""
+
+
+def _video_id_candidates(video_id: str) -> list[str]:
+    raw = str(video_id or "").strip()
+    if not raw:
+        return []
+
+    candidates: list[str] = [raw]
+    if raw.startswith("bilibili:"):
+        raw = raw[len("bilibili:") :]
+        if raw not in candidates:
+            candidates.append(raw)
+    if raw.startswith("BV") or raw.startswith("av"):
+        trimmed = raw.split(":p", 1)[0]
+        if trimmed and trimmed not in candidates:
+            candidates.append(trimmed)
+    return candidates
