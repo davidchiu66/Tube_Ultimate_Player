@@ -42,6 +42,36 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS playlist_library (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    source_url TEXT,
+    source_type TEXT NOT NULL DEFAULT 'manual',
+    auto_play_next INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_library_updated_at ON playlist_library(updated_at);
+
+CREATE TABLE IF NOT EXISTS playlist_item (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_key TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    webpage_url TEXT NOT NULL,
+    uploader TEXT,
+    duration INTEGER DEFAULT 0,
+    thumbnail TEXT,
+    position INTEGER NOT NULL,
+    availability TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_item_key_position ON playlist_item(playlist_key, position);
 """
 
 

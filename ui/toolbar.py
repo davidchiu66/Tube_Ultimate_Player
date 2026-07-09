@@ -150,14 +150,20 @@ def _draw_info_icon(painter: QPainter, size: float) -> None:
 class ToolbarButton(QPushButton):
     def __init__(self, text: str, icon_name: str, tooltip: str, parent=None) -> None:
         super().__init__(text, parent)
+        self.full_text = text
         self.setObjectName("ToolbarButton")
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(36)
-        self.setMinimumWidth(84)
+        self.setMinimumWidth(72)
         self.setIcon(_make_icon(icon_name, 18))
         self.setIconSize(QSize(18, 18))
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+
+    def set_compact_mode(self, icon_only: bool) -> None:
+        self.setText("" if icon_only else self.full_text)
+        self.setMinimumWidth(42 if icon_only else 72)
+        self.setMaximumWidth(46 if icon_only else 118)
 
 
 class SearchBox(QFrame):
@@ -176,10 +182,10 @@ class SearchBox(QFrame):
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("ToolbarSearchEdit")
         self.search_edit.setFixedHeight(36)
-        self.search_edit.setPlaceholderText("搜索 YouTube 视频")
+        self.search_edit.setPlaceholderText("搜索视频（YouTube / Bilibili）")
         self.search_edit.setClearButtonEnabled(False)
         self.search_edit.setFrame(False)
-        self.search_edit.setMinimumWidth(420)
+        self.search_edit.setMinimumWidth(120)
         self.search_edit.installEventFilter(self)
 
         self.trailing_icon = QPushButton()
@@ -201,6 +207,10 @@ class SearchBox(QFrame):
         layout.addWidget(self.search_edit, 1)
         layout.addWidget(separator)
         layout.addWidget(self.trailing_icon)
+
+    def set_compact_mode(self, compact: bool) -> None:
+        self.leading_icon.setVisible(not compact)
+        self.search_edit.setMinimumWidth(120 if compact else 220)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self.search_edit:
@@ -232,6 +242,7 @@ class PlayerToolbar(QWidget):
         self.setObjectName("PlayerToolbar")
         self.setFixedHeight(52)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._compact_mode: str | None = None
 
         self.search_box = SearchBox(self)
         self.search_edit = self.search_box.search_edit
@@ -273,6 +284,10 @@ class PlayerToolbar(QWidget):
 
         self._setup_shortcuts()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._update_responsive_mode()
+
     def set_search_text(self, text: str) -> None:
         self.search_edit.setText(text)
 
@@ -293,3 +308,24 @@ class PlayerToolbar(QWidget):
         shortcut = QShortcut(QKeySequence(sequence), self)
         shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         shortcut.activated.connect(callback)
+
+    def _update_responsive_mode(self) -> None:
+        width = self.width()
+        mode = "icon" if width < 1220 else "full"
+        if mode == self._compact_mode:
+            return
+        self._compact_mode = mode
+        icon_only = mode == "icon"
+        self.search_box.set_compact_mode(icon_only)
+        for button in (
+            self.search_button,
+            self.url_button,
+            self.home_button,
+            self.player_button,
+            self.download_button,
+            self.favorite_button,
+            self.history_button,
+            self.settings_button,
+            self.about_button,
+        ):
+            button.set_compact_mode(icon_only)

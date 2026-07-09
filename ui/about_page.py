@@ -44,7 +44,7 @@ class AboutPage(QWidget):
         self.status_label.setObjectName("MetaLabel")
 
         self.description_label = QLabel(
-            "基于 PySide6、yt-dlp 与 libmpv 的桌面 YouTube 播放器，支持首页浏览、搜索、收藏、历史与下载。"
+            "基于 PySide6、yt-dlp 与 libmpv 的桌面视频播放器，支持 YouTube / Bilibili 首页浏览、搜索、收藏、历史与下载。"
         )
         self.description_label.setWordWrap(True)
 

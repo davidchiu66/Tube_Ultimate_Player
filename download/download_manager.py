@@ -25,7 +25,7 @@ from services.config_service import ConfigService
 
 logger = logging.getLogger("tube_player.download")
 TASKS_FILE = DATA_DIR / "download_tasks.json"
-VIDEO_ID_IN_FILENAME_RE = re.compile(r"\[(?P<video_id>[0-9A-Za-z_-]{11})\]")
+VIDEO_ID_IN_FILENAME_RE = re.compile(r"\[(?P<video_id>[0-9A-Za-z:_-]{6,128})\]")
 
 
 class DownloadManager(QObject):
@@ -308,8 +308,9 @@ class DownloadManager(QObject):
             if video_id in existing_ids:
                 continue
             title = path.stem[: match.start()].strip() or path.stem
+            url = _url_from_video_id(video_id)
             task = DownloadTask(
-                url=f"https://www.youtube.com/watch?v={video_id}",
+                url=url,
                 video_id=video_id,
                 title=title,
                 quality_label="Local",
@@ -336,3 +337,23 @@ class DownloadManager(QObject):
             )
         except OSError:
             logger.exception("failed to save download tasks file=%s", TASKS_FILE)
+
+
+def _url_from_video_id(video_id: str) -> str:
+    raw = str(video_id or "").strip()
+    if raw.startswith("bilibili:BV"):
+        body = raw[len("bilibili:") :]
+        if ":p" in body:
+            bvid, page = body.split(":p", 1)
+            if page.isdigit():
+                return f"https://www.bilibili.com/video/{bvid}?p={page}"
+        return f"https://www.bilibili.com/video/{body}"
+    if raw.startswith("bilibili:av"):
+        aid = raw[len("bilibili:av") :]
+        if ":p" in aid:
+            aid, page = aid.split(":p", 1)
+            if page.isdigit():
+                return f"https://www.bilibili.com/video/av{aid}?p={page}"
+        if aid.isdigit():
+            return f"https://www.bilibili.com/video/av{aid}"
+    return f"https://www.youtube.com/watch?v={raw}"

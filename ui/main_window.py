@@ -2,20 +2,31 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QThreadPool, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
+from PySide6.QtWidgets import (
+    QInputDialog,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app_paths import APP_NAME, UPDATE_DIR, asset_path
 from database.favorite_repository import FavoriteRepository
 from database.history_repository import HistoryRepository
+from database.playlist_repository import PlaylistRepository
 from database.sqlite_manager import SQLiteManager
 from download.download_manager import DownloadManager
 from player.mpv_player import MpvPlayer
-from resolver.models import HomeVideo, VideoInfo, VideoQuality
-from resolver.youtube_resolver import YoutubeResolver
+from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, SavedPlaylist, VideoInfo, VideoQuality
+from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
+from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
 from services.runtime_install_service import RuntimeInstallService
 from services.update_service import REPO_URL, UpdateCheckResult, UpdateService
 from ui.about_page import AboutPage
@@ -24,11 +35,14 @@ from ui.favorite_page import FavoritePage
 from ui.history_page import HistoryPage
 from ui.home_page import HomePage
 from ui.player_page import PlayerPage
+from ui.playlist_page import PlaylistPage
 from ui.settings_page import SettingsPage
 from ui.toolbar import PlayerToolbar
 from ui.toast import Toast
 from ui.url_dialog import UrlPlayDialog
+from workers.archive_extract_worker import ArchiveExtractWorker
 from workers.home_worker import HomeWorker
+from workers.playlist_worker import PlaylistWorker
 from workers.resolver_worker import ResolverWorker
 from workers.search_worker import SearchWorker
 from workers.update_check_worker import UpdateCheckWorker
@@ -43,21 +57,28 @@ class MainWindow(QMainWindow):
         super().__init__()
         logger.info("main window initializing")
         self.setWindowTitle(APP_NAME)
-        self.resize(1180, 760)
+        self._resize_for_available_screen()
         self._apply_window_icon()
 
         self.config = ConfigService()
         self.db = SQLiteManager()
         self.history = HistoryRepository(self.db)
         self.favorites = FavoriteRepository(self.db)
-        self.resolver = YoutubeResolver(self.config)
+        self.playlists = PlaylistRepository(self.db)
+        self.resolver = SiteResolver(self.config)
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
+        self.ffmpeg_install_service = FfmpegInstallService(self.config)
         self.thread_pool = QThreadPool.globalInstance()
         self.download_manager = DownloadManager(self.config, self.thread_pool)
 
         self.current_video: VideoInfo | None = None
         self.current_quality_label = ""
+        self.current_playlist: PlaylistInfo | None = None
+        self.current_playlist_index = -1
+        self.current_playlist_key = ""
+        self.current_playlist_auto_play = True
+        self._pending_playlist_video_id = ""
         self._home_cache: list[HomeVideo] = []
         self._home_page = 1
         self._home_has_next = False
@@ -65,6 +86,8 @@ class MainWindow(QMainWindow):
         self._search_page = 1
         self._last_update_result: UpdateCheckResult | None = None
         self._pending_node_installer_path = ""
+        self._pending_ffmpeg_info: FfmpegInstallInfo | None = None
+        self._ffmpeg_progress_dialog: QProgressDialog | None = None
 
         self.top_bar_widget = PlayerToolbar(self)
         self.url_edit = self.top_bar_widget.search_edit
@@ -81,6 +104,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.home_page = HomePage()
         self.player_page = PlayerPage()
+        self.playlist_page = PlaylistPage()
         self.download_page = DownloadPage()
         self.favorite_page = FavoritePage(self.favorites)
         self.history_page = HistoryPage(self.history)
@@ -89,6 +113,7 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.player_page)
+        self.stack.addWidget(self.playlist_page)
         self.stack.addWidget(self.download_page)
         self.stack.addWidget(self.favorite_page)
         self.stack.addWidget(self.history_page)
@@ -106,6 +131,7 @@ class MainWindow(QMainWindow):
         self.mpv = MpvPlayer(self.player_page.video_widget, self.config)
         self._connect_signals()
         self._restore_download_tasks()
+        self._refresh_saved_playlists()
         self.player_page.set_volume(int(self.config.get("player.volume", 80)))
         self.player_page.set_speed(float(self.config.get("player.speed", 1.0)))
         self._sync_about_page()
@@ -113,6 +139,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.home_page)
         self._refresh_favorite_views()
         QTimer.singleShot(0, self.load_home)
+        QTimer.singleShot(1200, self._maybe_prompt_ffmpeg_install)
         logger.info("main window initialized")
 
     def _connect_signals(self) -> None:
@@ -129,7 +156,13 @@ class MainWindow(QMainWindow):
         self.home_page.refresh_requested.connect(self._refresh_home_page)
         self.home_page.play_requested.connect(self.play_url)
         self.home_page.favorite_requested.connect(self._favorite_home_video)
+        self.home_page.download_requested.connect(self._download_home_video)
         self.home_page.page_requested.connect(self._load_page)
+        self.playlist_page.back_requested.connect(self._show_player_page)
+        self.playlist_page.play_entry_requested.connect(self._play_playlist_from_page)
+        self.playlist_page.download_entries_requested.connect(self._download_playlist_entries)
+        self.playlist_page.save_requested.connect(self._save_active_playlist)
+        self.playlist_page.auto_play_changed.connect(self._set_playlist_auto_play)
         self.favorite_page.play_requested.connect(self.play_url)
         self.favorite_page.remove_requested.connect(self._remove_favorite)
         self.history_page.play_requested.connect(self.play_url)
@@ -152,6 +185,12 @@ class MainWindow(QMainWindow):
         self.player_page.fullscreen_requested.connect(self._toggle_fullscreen)
         self.player_page.download_requested.connect(self._download_current_video)
         self.player_page.favorite_requested.connect(self._favorite_current_video)
+        self.player_page.playlist_entry_requested.connect(self._play_playlist_index)
+        self.player_page.playlist_download_requested.connect(self._download_playlist_entries)
+        self.player_page.playlist_save_requested.connect(self._save_active_playlist)
+        self.player_page.playlist_load_requested.connect(self._load_saved_playlist)
+        self.player_page.playlist_delete_requested.connect(self._delete_saved_playlist)
+        self.player_page.playlist_auto_play_changed.connect(self._set_playlist_auto_play)
 
         self.download_page.pause_requested.connect(self.download_manager.pause_task)
         self.download_page.start_requested.connect(self.download_manager.start_task)
@@ -165,6 +204,7 @@ class MainWindow(QMainWindow):
         self.mpv.position_changed.connect(self.player_page.update_position)
         self.mpv.duration_changed.connect(self.player_page.update_duration)
         self.mpv.pause_changed.connect(self.player_page.set_paused)
+        self.mpv.playback_finished.connect(self._handle_playback_finished)
 
     def _apply_window_icon(self) -> None:
         for path in (
@@ -175,6 +215,16 @@ class MainWindow(QMainWindow):
             if path.exists():
                 self.setWindowIcon(QIcon(str(path)))
                 return
+
+    def _resize_for_available_screen(self) -> None:
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1180, 760)
+            return
+        available = screen.availableGeometry()
+        width = min(1180, max(900, available.width() - 80))
+        height = min(760, max(560, available.height() - 80))
+        self.resize(width, height)
 
     def _restore_download_tasks(self) -> None:
         for task in self.download_manager.tasks():
@@ -207,12 +257,18 @@ class MainWindow(QMainWindow):
     def play_url(self, url: str | None = None) -> None:
         target = (url or "").strip()
         if not target:
-            QMessageBox.information(self, "提示", "请输入 YouTube URL")
+            QMessageBox.information(self, "提示", "请输入要播放的视频 URL")
             return
         if not target.startswith(("http://", "https://")):
             QMessageBox.warning(self, "URL 无效", "请输入完整的 http:// 或 https:// 地址")
             return
 
+        kind = self.resolver.detect_url_kind(target)
+        if kind in ("playlist", "video_with_playlist"):
+            self._load_playlist(target, auto_play_current=(kind == "video_with_playlist"))
+            return
+
+        self._clear_playlist_context()
         logger.info("play url requested: %s", target)
         self.stack.setCurrentWidget(self.player_page)
         self.player_page.set_loading(True, "正在解析视频地址，请稍候...")
@@ -223,6 +279,22 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self.player_page.set_loading(False))
         self.thread_pool.start(worker)
 
+    def _load_playlist(self, url: str, auto_play_current: bool = False) -> None:
+        logger.info("playlist load requested url=%s auto_play_current=%s", url, auto_play_current)
+        self._pending_playlist_video_id = ""
+        if auto_play_current:
+            self._pending_playlist_video_id = str((parse_qs(urlparse(url).query).get("v") or [""])[0]).strip()
+        self.stack.setCurrentWidget(self.playlist_page)
+        self.playlist_page.set_loading(
+            True,
+            f"正在获取 {self._site_label_for_url(url)} 播放列表内容，请稍候...",
+        )
+        worker = PlaylistWorker(self.resolver, url)
+        worker.signals.success.connect(self._playlist_loaded)
+        worker.signals.error.connect(self._playlist_failed)
+        worker.signals.finished.connect(lambda: self.playlist_page.set_loading(False))
+        self.thread_pool.start(worker)
+
     def load_home(self) -> None:
         self._start_home_load(1)
 
@@ -230,8 +302,9 @@ class MainWindow(QMainWindow):
         logger.info("home load requested page=%s", page)
         self._home_page = max(1, page)
         self.stack.setCurrentWidget(self.home_page)
-        self.home_page.set_home_context(self._home_page, False)
-        self.home_page.set_loading(True, f"正在获取 YouTube 首页推荐（第 {self._home_page} 页），请稍候...")
+        source_label = self.resolver.home_source_label()
+        self.home_page.set_home_context(self._home_page, False, source_label=source_label)
+        self.home_page.set_loading(True, f"正在获取 {source_label} 首页内容（第 {self._home_page} 页），请稍候...")
         worker = HomeWorker(self.resolver, page=self._home_page, page_size=56)
         worker.signals.success.connect(self._home_loaded)
         worker.signals.error.connect(self._home_failed)
@@ -260,15 +333,24 @@ class MainWindow(QMainWindow):
         logger.info("search requested keyword=%s page=%s", keyword, page)
         self.stack.setCurrentWidget(self.home_page)
         self.home_page.set_search_context(keyword, page, has_next=False)
+        source_label = self.resolver.home_source_label()
         self.home_page.set_loading(
             True,
-            f"正在搜索 YouTube：{keyword}（第 {page} 页），请稍候，这一步通常会比首页加载稍慢一些...",
+            f"正在搜索 {source_label}：{keyword}（第 {page} 页），请稍候，这一步通常会比首页加载稍慢一些...",
         )
-        worker = SearchWorker(self.resolver, keyword, page=page, page_size=45)
+        worker = SearchWorker(self.resolver, keyword, page=page, page_size=56)
         worker.signals.success.connect(self._search_loaded)
         worker.signals.error.connect(self._search_failed)
         worker.signals.finished.connect(lambda: self.home_page.set_loading(False))
         self.thread_pool.start(worker)
+
+    @staticmethod
+    def _site_label_for_url(url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        host = parsed.netloc.lower()
+        if host.endswith("bilibili.com") or host.endswith("b23.tv"):
+            return "Bilibili"
+        return "YouTube"
 
     def _refresh_home_page(self) -> None:
         if self.home_page.mode() == "search" and self._search_keyword:
@@ -281,6 +363,7 @@ class MainWindow(QMainWindow):
         self._home_cache = list(videos)
         self._home_has_next = has_next
         self.home_page.set_videos(videos, mode="home", page=self._home_page, has_next=has_next)
+        self.home_page.set_home_context(self._home_page, has_next, source_label=self.resolver.home_source_label())
         self.home_page.set_favorite_ids(self.favorites.favorite_ids())
 
     def _home_failed(self, message: str) -> None:
@@ -308,6 +391,194 @@ class MainWindow(QMainWindow):
         logger.error("search failed keyword=%s page=%s: %s", self._search_keyword, self._search_page, message)
         self.home_page.set_error(message)
 
+    def _playlist_loaded(self, playlist: PlaylistInfo) -> None:
+        logger.info("playlist loaded title=%s count=%s", playlist.title, len(playlist.entries))
+        if not playlist.entries:
+            QMessageBox.information(self, "提示", "该播放列表中没有可用的视频。")
+            return
+
+        initial_index = self._find_playlist_index(playlist, self._pending_playlist_video_id)
+        self._pending_playlist_video_id = ""
+        self._activate_playlist(playlist, current_index=initial_index, playlist_key="")
+        self.stack.setCurrentWidget(self.playlist_page)
+        if initial_index >= 0:
+            self._play_playlist_entry(playlist, initial_index)
+
+    def _playlist_failed(self, message: str) -> None:
+        self._pending_playlist_video_id = ""
+        logger.error("playlist load failed: %s", message)
+        QMessageBox.critical(self, "播放列表解析失败", message)
+
+    def _activate_playlist(
+        self,
+        playlist: PlaylistInfo,
+        *,
+        current_index: int = -1,
+        playlist_key: str = "",
+        auto_play_next: bool = True,
+    ) -> None:
+        self.current_playlist = playlist
+        self.current_playlist_index = current_index
+        self.current_playlist_key = playlist_key
+        self.current_playlist_auto_play = auto_play_next
+        self.playlist_page.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
+        self.player_page.set_playlist_context(playlist, current_index=current_index, auto_play_next=auto_play_next)
+        self._refresh_saved_playlists(current_key=playlist_key)
+
+    def _clear_playlist_context(self) -> None:
+        self.current_playlist = None
+        self.current_playlist_index = -1
+        self.current_playlist_key = ""
+        self.current_playlist_auto_play = True
+        self.player_page.clear_playlist_context()
+
+    def _play_playlist_from_page(self, playlist: PlaylistInfo, index: int) -> None:
+        self._activate_playlist(
+            playlist,
+            current_index=index,
+            playlist_key=self.current_playlist_key,
+            auto_play_next=self.current_playlist_auto_play,
+        )
+        self._play_playlist_entry(playlist, index)
+
+    def _play_playlist_index(self, index: int) -> None:
+        if self.current_playlist is None:
+            return
+        self._play_playlist_entry(self.current_playlist, index)
+
+    def _play_playlist_entry(self, playlist: PlaylistInfo, index: int) -> None:
+        if not (0 <= index < len(playlist.entries)):
+            return
+        entry = playlist.entries[index]
+        logger.info("playlist play requested playlist=%s index=%s title=%s", playlist.title, index, entry.title)
+        self.current_playlist = playlist
+        self.current_playlist_index = index
+        self.playlist_page.set_current_index(index)
+        self.player_page.set_playlist_current_index(index)
+        self.stack.setCurrentWidget(self.player_page)
+        self.player_page.set_loading(True, f"正在解析播放列表第 {index + 1} 条视频，请稍候...")
+
+        worker = ResolverWorker(entry.webpage_url, self.resolver)
+        worker.signals.success.connect(self._resolved)
+        worker.signals.error.connect(self._resolve_failed)
+        worker.signals.finished.connect(lambda: self.player_page.set_loading(False))
+        self.thread_pool.start(worker)
+
+    def _download_playlist_entries(self, entries: list[PlaylistEntry]) -> None:
+        if not entries:
+            return
+        for entry in entries:
+            self._enqueue_download(
+                VideoInfo(
+                    video_id=entry.video_id,
+                    title=entry.title,
+                    uploader=entry.uploader,
+                    duration=entry.duration,
+                    webpage_url=entry.webpage_url,
+                    thumbnail=entry.thumbnail,
+                ),
+                "Auto",
+            )
+        self.toast.show_message(f"已处理 {len(entries)} 条下载任务")
+
+    def _save_active_playlist(self) -> None:
+        playlist = self.current_playlist
+        if playlist is None or not playlist.entries:
+            QMessageBox.information(self, "提示", "当前没有可保存的播放列表。")
+            return
+        default_name = playlist.title or "我的播放列表"
+        name, ok = QInputDialog.getText(self, "保存播放列表", "请输入播放列表名称：", text=default_name)
+        if not ok:
+            return
+        playlist_name = str(name or "").strip()
+        if not playlist_name:
+            QMessageBox.information(self, "提示", "播放列表名称不能为空。")
+            return
+        playlist_key = self.playlists.save_playlist(
+            name=playlist_name,
+            entries=playlist.entries,
+            source_url=playlist.webpage_url,
+            source_type=playlist.source_type,
+            auto_play_next=self.current_playlist_auto_play,
+            playlist_key=self.current_playlist_key or None,
+        )
+        self.current_playlist_key = playlist_key
+        self._refresh_saved_playlists(current_key=playlist_key)
+        self.toast.show_message(f"已保存播放列表：{playlist_name}")
+
+    def _load_saved_playlist(self, playlist_key: str) -> None:
+        saved = self.playlists.get_playlist(playlist_key)
+        if saved is None:
+            QMessageBox.warning(self, "提示", "没有找到对应的已保存播放列表。")
+            self._refresh_saved_playlists()
+            return
+        playlist = self._saved_to_playlist(saved)
+        self._activate_playlist(
+            playlist,
+            current_index=0 if playlist.entries else -1,
+            playlist_key=saved.playlist_key,
+            auto_play_next=saved.auto_play_next,
+        )
+        self.stack.setCurrentWidget(self.playlist_page)
+
+    def _delete_saved_playlist(self, playlist_key: str) -> None:
+        saved = self.playlists.get_playlist(playlist_key)
+        if saved is None:
+            self._refresh_saved_playlists()
+            return
+        answer = QMessageBox.question(self, "删除播放列表", f"确定删除“{saved.name}”吗？")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.playlists.delete_playlist(playlist_key)
+        if self.current_playlist_key == playlist_key:
+            self.current_playlist_key = ""
+        self._refresh_saved_playlists()
+        self.toast.show_message(f"已删除播放列表：{saved.name}")
+
+    def _set_playlist_auto_play(self, enabled: bool) -> None:
+        self.current_playlist_auto_play = bool(enabled)
+        if self.current_playlist:
+            self.playlist_page.set_playlist(
+                self.current_playlist,
+                current_index=self.current_playlist_index,
+                auto_play_next=self.current_playlist_auto_play,
+            )
+            self.player_page.set_playlist_context(
+                self.current_playlist,
+                current_index=self.current_playlist_index,
+                auto_play_next=self.current_playlist_auto_play,
+            )
+        if self.current_playlist_key:
+            self.playlists.set_auto_play_next(self.current_playlist_key, self.current_playlist_auto_play)
+            self._refresh_saved_playlists(current_key=self.current_playlist_key)
+
+    def _refresh_saved_playlists(self, current_key: str = "") -> None:
+        playlists = self.playlists.all_playlists()
+        selected_key = current_key or self.current_playlist_key
+        self.player_page.set_playlist_saved_items(playlists, selected_key)
+
+    def _saved_to_playlist(self, saved: SavedPlaylist) -> PlaylistInfo:
+        return PlaylistInfo(
+            playlist_id=saved.playlist_key,
+            title=saved.name,
+            webpage_url=saved.source_url,
+            source_site=self._site_label_for_url(saved.source_url).lower(),
+            uploader="",
+            thumbnail=saved.entries[0].thumbnail if saved.entries else "",
+            entry_count=len(saved.entries),
+            source_type=saved.source_type,
+            entries=list(saved.entries),
+        )
+
+    @staticmethod
+    def _find_playlist_index(playlist: PlaylistInfo, video_id: str) -> int:
+        if not video_id:
+            return -1
+        for index, entry in enumerate(playlist.entries):
+            if entry.video_id == video_id:
+                return index
+        return -1
+
     def _resolved(self, video: VideoInfo) -> None:
         self.current_video = video
         quality = self._select_default_quality(video)
@@ -322,6 +593,13 @@ class MainWindow(QMainWindow):
         )
         self.player_page.update_video_info(video, quality.label)
         self.player_page.set_favorite_state(self.favorites.is_favorite(video.video_id), available=True)
+        if self.current_playlist:
+            self.player_page.set_playlist_context(
+                self.current_playlist,
+                current_index=self.current_playlist_index,
+                auto_play_next=self.current_playlist_auto_play,
+            )
+            self.playlist_page.set_current_index(self.current_playlist_index)
 
         try:
             self.mpv.load(quality.video_url, quality.audio_url, headers=video.http_headers)
@@ -398,8 +676,33 @@ class MainWindow(QMainWindow):
         if not self.current_video:
             QMessageBox.information(self, "提示", "当前没有可下载的视频。")
             return
-        self.download_manager.enqueue(self.current_video, self.current_quality_label)
-        self.stack.setCurrentWidget(self.download_page)
+        self._enqueue_download(self.current_video, self.current_quality_label)
+
+    def _download_home_video(self, video: HomeVideo) -> None:
+        if not video.webpage_url:
+            self.toast.show_message("下载失败：视频地址不可用")
+            return
+        self._enqueue_download(
+            VideoInfo(
+                video_id=video.video_id,
+                title=video.title,
+                uploader=video.uploader,
+                duration=video.duration,
+                webpage_url=video.webpage_url,
+                thumbnail=video.thumbnail,
+            ),
+            "Auto",
+        )
+
+    def _enqueue_download(self, video: VideoInfo, quality_label: str) -> None:
+        try:
+            task = self.download_manager.enqueue(video, quality_label)
+        except Exception:
+            logger.exception("download enqueue failed title=%s", video.title)
+            self.toast.show_message(f"下载失败：{video.title or video.webpage_url}")
+            return
+        if task is None:
+            self.toast.show_message(f"下载失败：{video.title or video.webpage_url}")
 
     def _favorite_current_video(self) -> None:
         if not self.current_video:
@@ -432,6 +735,7 @@ class MainWindow(QMainWindow):
         logger.info("play local file requested: %s", path)
         self.current_video = None
         self.current_quality_label = ""
+        self._clear_playlist_context()
         self.stack.setCurrentWidget(self.player_page)
         try:
             self.mpv.load(path)
@@ -453,15 +757,32 @@ class MainWindow(QMainWindow):
             self.player_page.set_fullscreen(False)
         self._show_home()
 
+    def _handle_playback_finished(self) -> None:
+        if self.current_playlist is None or not self.current_playlist_auto_play:
+            return
+        next_index = self.current_playlist_index + 1
+        if next_index >= len(self.current_playlist.entries):
+            return
+        logger.info("playlist autoplay next index=%s", next_index)
+        self._play_playlist_entry(self.current_playlist, next_index)
+
     def _settings_saved(self) -> None:
         logger.info("settings saved")
         self.mpv.apply_network_options()
-        self.resolver = YoutubeResolver(self.config)
+        self.resolver = SiteResolver(self.config)
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
+        self.ffmpeg_install_service = FfmpegInstallService(self.config)
         self.download_manager.reload_settings()
+        self._home_cache = []
+        self._home_page = 1
+        self._home_has_next = False
+        self._search_keyword = ""
+        self._search_page = 1
         self._refresh_runtime_status()
         self._sync_about_page()
+        if self.stack.currentWidget() is self.home_page:
+            self.load_home()
 
     def _show_home(self) -> None:
         self.stack.setCurrentWidget(self.home_page)
@@ -472,9 +793,13 @@ class MainWindow(QMainWindow):
                 page=self._home_page,
                 has_next=self._home_has_next,
             )
+            self.home_page.set_home_context(self._home_page, self._home_has_next, source_label=self.resolver.home_source_label())
             self.home_page.set_favorite_ids(self.favorites.favorite_ids())
         else:
             self.load_home()
+
+    def _show_player_page(self) -> None:
+        self.stack.setCurrentWidget(self.player_page)
 
     def _show_favorites(self) -> None:
         self.favorite_page.refresh()
@@ -654,6 +979,96 @@ class MainWindow(QMainWindow):
             f"{message}\n\n将为你打开 Node.js 官网下载页。",
         )
         self.runtime_install_service.open_official_site()
+
+    def _maybe_prompt_ffmpeg_install(self) -> None:
+        if self.ffmpeg_install_service.is_available():
+            return
+        answer = QMessageBox.question(
+            self,
+            "FFmpeg 未配置",
+            "未检测到可用的 FFmpeg。\n\n下载高质量视频时通常需要 FFmpeg 合并音频和视频。是否现在下载并安装？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_ffmpeg_install()
+
+    def _start_ffmpeg_install(self) -> None:
+        info = self.ffmpeg_install_service.install_info()
+        self._pending_ffmpeg_info = info
+        self._show_ffmpeg_progress("正在下载 FFmpeg...", 0.0, indeterminate=True)
+
+        worker = UpdateDownloadWorker(self.update_service, info.url, info.archive_path, info.archive_path.name)
+        worker.signals.progress.connect(self._ffmpeg_download_progress)
+        worker.signals.success.connect(self._ffmpeg_download_success)
+        worker.signals.error.connect(self._ffmpeg_download_failed)
+        self.thread_pool.start(worker)
+
+    def _ffmpeg_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
+        if total > 0:
+            message = f"正在下载 FFmpeg：{_format_bytes(downloaded)} / {_format_bytes(total)}  {speed_text}"
+            self._show_ffmpeg_progress(message, percent)
+        else:
+            message = f"正在下载 FFmpeg：{_format_bytes(downloaded)}  {speed_text}"
+            self._show_ffmpeg_progress(message, 0.0, indeterminate=True)
+
+    def _ffmpeg_download_success(self, path: str) -> None:
+        logger.info("ffmpeg archive downloaded path=%s", path)
+        info = self._pending_ffmpeg_info or self.ffmpeg_install_service.install_info()
+        self._show_ffmpeg_progress("FFmpeg 下载完成，正在解压...", 0.0, indeterminate=True)
+
+        worker = ArchiveExtractWorker(Path(path), info.extract_dir)
+        worker.signals.success.connect(self._ffmpeg_extract_success)
+        worker.signals.error.connect(self._ffmpeg_extract_failed)
+        self.thread_pool.start(worker)
+
+    def _ffmpeg_download_failed(self, message: str) -> None:
+        logger.error("ffmpeg download failed: %s", message)
+        self._close_ffmpeg_progress()
+        QMessageBox.warning(self, "FFmpeg 下载失败", message)
+
+    def _ffmpeg_extract_success(self, _extract_dir: str) -> None:
+        ffmpeg_dir = self.ffmpeg_install_service.locate_extracted_ffmpeg_dir()
+        if not ffmpeg_dir:
+            self._close_ffmpeg_progress()
+            QMessageBox.warning(self, "FFmpeg 安装失败", "已解压 FFmpeg，但没有找到 ffmpeg.exe。")
+            return
+
+        self.config.set("download.ffmpeg_dir", ffmpeg_dir)
+        self.config.save()
+        self.settings_page.ffmpeg_dir_edit.setText(ffmpeg_dir)
+        self.download_manager.reload_settings()
+        self._close_ffmpeg_progress()
+        QMessageBox.information(self, "FFmpeg 已安装", f"FFmpeg 已安装并写入设置：\n{ffmpeg_dir}")
+
+    def _ffmpeg_extract_failed(self, message: str) -> None:
+        logger.error("ffmpeg extract failed: %s", message)
+        self._close_ffmpeg_progress()
+        QMessageBox.warning(self, "FFmpeg 解压失败", message)
+
+    def _show_ffmpeg_progress(self, message: str, percent: float, indeterminate: bool = False) -> None:
+        if self._ffmpeg_progress_dialog is None:
+            dialog = QProgressDialog("正在准备 FFmpeg...", "", 0, 100, self)
+            dialog.setWindowTitle("安装 FFmpeg")
+            dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            dialog.setCancelButton(None)
+            dialog.setAutoClose(False)
+            dialog.setAutoReset(False)
+            self._ffmpeg_progress_dialog = dialog
+        dialog = self._ffmpeg_progress_dialog
+        dialog.setLabelText(message)
+        if indeterminate:
+            dialog.setRange(0, 0)
+        else:
+            dialog.setRange(0, 100)
+            dialog.setValue(int(max(0, min(100, percent))))
+        dialog.show()
+
+    def _close_ffmpeg_progress(self) -> None:
+        if self._ffmpeg_progress_dialog is not None:
+            self._ffmpeg_progress_dialog.close()
+            self._ffmpeg_progress_dialog.deleteLater()
+            self._ffmpeg_progress_dialog = None
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:

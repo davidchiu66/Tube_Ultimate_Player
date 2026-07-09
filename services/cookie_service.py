@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
+import shutil
+import sqlite3
+import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app_paths import CACHE_DIR, RUNTIME_ROOT
 
@@ -10,7 +16,16 @@ class CookieFormatError(RuntimeError):
     pass
 
 
-def prepare_cookie_file(cookie_path: str) -> str:
+@dataclass
+class CookieRecord:
+    name: str
+    value: str
+    domain: str
+    path: str = "/"
+    secure: bool = False
+
+
+def prepare_cookie_file(cookie_path: str, target_url: str = "") -> str:
     path = Path(cookie_path)
     if not path.is_absolute():
         path = RUNTIME_ROOT / path
@@ -28,7 +43,31 @@ def prepare_cookie_file(cookie_path: str) -> str:
             "也可以在文件中放入浏览器请求头里的 Cookie: name=value; name2=value2。"
         )
 
-    return str(_write_netscape_cookie_file(cookies))
+    return str(_write_netscape_cookie_file(cookies, target_url))
+
+
+def load_cookie_header(cookie_path: str, target_url: str) -> str:
+    path = Path(cookie_path)
+    if not path.is_absolute():
+        path = RUNTIME_ROOT / path
+    if not path.exists():
+        return ""
+
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    if _looks_like_netscape_cookie_file(text):
+        return _cookie_header_from_netscape(text, target_url)
+
+    pairs = _parse_raw_cookie_text(text)
+    return "; ".join(f"{name}={value}" for name, value in pairs)
+
+
+def load_browser_cookie_header(browser_spec: str, target_url: str) -> str:
+    spec = str(browser_spec or "").strip()
+    if not spec:
+        return ""
+    if spec.startswith("firefox"):
+        return _load_firefox_cookie_header(spec, target_url)
+    return ""
 
 
 def _looks_like_netscape_cookie_file(text: str) -> bool:
@@ -86,11 +125,12 @@ def _extract_cookie_header_value(text: str) -> str:
     return "\n".join(cookie_lines) if cookie_lines else text
 
 
-def _write_netscape_cookie_file(cookies: list[tuple[str, str]]) -> Path:
+def _write_netscape_cookie_file(cookies: list[tuple[str, str]], target_url: str = "") -> Path:
     target_dir = CACHE_DIR / "cookies"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "yt_dlp_cookies.txt"
     expires = int(time.time()) + 365 * 24 * 60 * 60
+    domain, include_subdomains = _cookie_domain_for_url(target_url)
 
     lines = [
         "# Netscape HTTP Cookie File",
@@ -98,19 +138,130 @@ def _write_netscape_cookie_file(cookies: list[tuple[str, str]]) -> Path:
     ]
     for name, value in cookies:
         if name.startswith("__Host-"):
-            domain = "youtube.com"
-            include_subdomains = "FALSE"
+            row_domain = domain.lstrip(".") if domain else "youtube.com"
+            row_include_subdomains = "FALSE"
             secure = "TRUE"
         else:
-            domain = ".youtube.com"
-            include_subdomains = "TRUE"
+            row_domain = domain or ".youtube.com"
+            row_include_subdomains = include_subdomains
             secure = "TRUE" if name.startswith("__Secure-") else "FALSE"
         clean_value = value.replace("\t", "").replace("\r", "").replace("\n", "")
         lines.append(
-            f"{domain}\t{include_subdomains}\t/\t{secure}\t{expires}\t{name}\t{clean_value}"
+            f"{row_domain}\t{row_include_subdomains}\t/\t{secure}\t{expires}\t{name}\t{clean_value}"
         )
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
+
+
+def _cookie_header_from_netscape(text: str, target_url: str) -> str:
+    host = (urlparse(target_url).hostname or "").lower()
+    pairs: list[str] = []
+    seen: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = raw_line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain = parts[0].strip().lower()
+        if host and not _domain_matches(host, domain):
+            continue
+        name = parts[5].strip()
+        value = parts[6].strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
+
+
+def _load_firefox_cookie_header(browser_spec: str, target_url: str) -> str:
+    host = (urlparse(target_url).hostname or "").lower()
+    profile = browser_spec.split(":", 1)[1].strip() if ":" in browser_spec else ""
+    profile_dir = _resolve_firefox_profile_dir(profile)
+    if profile_dir is None:
+        return ""
+
+    cookie_db = profile_dir / "cookies.sqlite"
+    if not cookie_db.exists():
+        return ""
+
+    fd, temp_path = tempfile.mkstemp(suffix=".sqlite")
+    os.close(fd)
+    try:
+        shutil.copy2(cookie_db, temp_path)
+        conn = sqlite3.connect(temp_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT name, value, host, path, isSecure
+                FROM moz_cookies
+                ORDER BY host, name
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except OSError:
+        return ""
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+    pairs: list[str] = []
+    seen: set[str] = set()
+    for name, value, domain, _path, _secure in rows:
+        cookie_name = str(name or "").strip()
+        cookie_value = str(value or "").strip()
+        cookie_domain = str(domain or "").strip().lower()
+        if not cookie_name or not cookie_value:
+            continue
+        if host and not _domain_matches(host, cookie_domain):
+            continue
+        if cookie_name in seen:
+            continue
+        seen.add(cookie_name)
+        pairs.append(f"{cookie_name}={cookie_value}")
+    return "; ".join(pairs)
+
+
+def _resolve_firefox_profile_dir(profile: str) -> Path | None:
+    root = Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "Profiles"
+    if not root.exists():
+        return None
+    if profile:
+        target = root / profile
+        return target if target.exists() else None
+    for candidate in root.iterdir():
+        if (candidate / "cookies.sqlite").exists():
+            return candidate
+    return None
+
+
+def _cookie_domain_for_url(target_url: str) -> tuple[str, str]:
+    host = (urlparse(target_url).hostname or "").lower()
+    if not host:
+        return ".youtube.com", "TRUE"
+    if host.endswith("youtu.be") or host.endswith("youtube-nocookie.com"):
+        return ".youtube.com", "TRUE"
+    if host.endswith("youtube.com"):
+        return ".youtube.com", "TRUE"
+    if host.endswith("bilibili.com"):
+        return ".bilibili.com", "TRUE"
+    labels = [part for part in host.split(".") if part]
+    if len(labels) >= 2:
+        return "." + ".".join(labels[-2:]), "TRUE"
+    return host, "FALSE"
+
+
+def _domain_matches(host: str, domain: str) -> bool:
+    if not domain:
+        return False
+    clean_domain = domain.lstrip(".").lower()
+    clean_host = host.lstrip(".").lower()
+    return clean_host == clean_domain or clean_host.endswith("." + clean_domain)
 
 
 _NON_COOKIE_HEADER_NAMES = {

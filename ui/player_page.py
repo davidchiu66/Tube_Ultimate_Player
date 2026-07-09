@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtGui import QCursor, QKeySequence, QPixmap, QShortcut
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QComboBox,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from resolver.models import VideoInfo
+from ui.playlist_overlay import PlaylistOverlay
 
 
 class PlayerPage(QWidget):
@@ -29,6 +30,12 @@ class PlayerPage(QWidget):
     fullscreen_requested = Signal()
     download_requested = Signal()
     favorite_requested = Signal()
+    playlist_entry_requested = Signal(int)
+    playlist_download_requested = Signal(object)
+    playlist_save_requested = Signal()
+    playlist_load_requested = Signal(str)
+    playlist_delete_requested = Signal(str)
+    playlist_auto_play_changed = Signal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -71,7 +78,7 @@ class PlayerPage(QWidget):
         layout.addWidget(self.video_widget, 1)
         self.setMouseTracking(True)
 
-        self.title_label = QLabel("请输入 YouTube URL 开始播放")
+        self.title_label = QLabel("请输入视频 URL 开始播放")
         self.title_label.setObjectName("TitleLabel")
         self.title_label.setWordWrap(True)
 
@@ -177,6 +184,9 @@ class PlayerPage(QWidget):
         self._controls_animation.setDuration(220)
         self._controls_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+        self.playlist_overlay = PlaylistOverlay(self)
+        self.playlist_overlay.hide()
+
         self.play_button.clicked.connect(self.play_pause_requested)
         self.stop_button.clicked.connect(self.stop_requested)
         self.download_button.clicked.connect(self.download_requested)
@@ -186,14 +196,23 @@ class PlayerPage(QWidget):
         self.quality_combo.currentTextChanged.connect(self._emit_quality)
         self.subtitle_combo.currentIndexChanged.connect(self._emit_subtitle)
         self.fullscreen_button.clicked.connect(self.fullscreen_requested)
+        self.playlist_overlay.entry_activated.connect(self.playlist_entry_requested)
+        self.playlist_overlay.download_entries_requested.connect(self.playlist_download_requested)
+        self.playlist_overlay.save_requested.connect(self.playlist_save_requested)
+        self.playlist_overlay.load_saved_requested.connect(self.playlist_load_requested)
+        self.playlist_overlay.delete_saved_requested.connect(self.playlist_delete_requested)
+        self.playlist_overlay.auto_play_changed.connect(self.playlist_auto_play_changed)
         self.installEventFilter(self)
         self._install_mouse_tracking(self.control_panel)
+        self._install_mouse_tracking(self.playlist_overlay)
+        self._setup_keyboard_shortcuts()
         self._update_playback_buttons()
         self._position_control_panel(animated=False)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_control_panel(animated=False)
+        self.playlist_overlay.relayout(self.rect())
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self.video_widget:
@@ -322,6 +341,19 @@ class PlayerPage(QWidget):
         self.fullscreen_button.setText("退出全屏" if fullscreen else "全屏")
         self._show_controls()
 
+    def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = True) -> None:
+        self.playlist_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
+        self.playlist_overlay.relayout(self.rect())
+
+    def clear_playlist_context(self) -> None:
+        self.playlist_overlay.set_playlist(None)
+
+    def set_playlist_saved_items(self, playlists, current_key: str = "") -> None:
+        self.playlist_overlay.set_saved_playlists(playlists, current_key=current_key)
+
+    def set_playlist_current_index(self, index: int) -> None:
+        self.playlist_overlay.set_current_index(index)
+
     def update_position(self, seconds: float) -> None:
         self.position_label.setText(format_seconds(int(seconds)))
         if self._duration > 0 and not self._seeking:
@@ -416,6 +448,7 @@ class PlayerPage(QWidget):
     def _handle_mouse_move(self, watched: QWidget, local_pos: QPoint) -> None:
         pos_in_self = watched.mapTo(self, local_pos)
         self._show_cursor()
+        self.playlist_overlay.handle_pointer(pos_in_self)
         if self._auto_hide_enabled:
             self._idle_timer.start()
             if self._is_in_control_hot_zone(pos_in_self):
@@ -426,6 +459,7 @@ class PlayerPage(QWidget):
             return
         self._controls_visible = False
         self._position_control_panel(animated=True)
+        self.playlist_overlay.handle_idle_timeout()
         self._set_cursor_hidden(True)
 
     def _is_in_control_hot_zone(self, pos: QPoint) -> bool:
@@ -443,7 +477,7 @@ class PlayerPage(QWidget):
 
     def _set_cursor_hidden(self, hidden: bool) -> None:
         cursor = QCursor(Qt.CursorShape.BlankCursor if hidden else Qt.CursorShape.ArrowCursor)
-        for widget in (self, self.video_widget, self.control_panel):
+        for widget in (self, self.video_widget, self.control_panel, self.playlist_overlay):
             widget.setCursor(cursor)
 
     def _install_mouse_tracking(self, widget: QWidget) -> None:
@@ -452,6 +486,27 @@ class PlayerPage(QWidget):
         for child in widget.findChildren(QWidget):
             child.setMouseTracking(True)
             child.installEventFilter(self)
+
+    def _setup_keyboard_shortcuts(self) -> None:
+        for sequence in ("Space",):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(self._shortcut_play_pause)
+
+        for sequence in ("Return", "Enter"):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(self._shortcut_fullscreen)
+
+    def _shortcut_play_pause(self) -> None:
+        if self.isVisible() and self._has_media and not self._loading:
+            self.play_pause_requested.emit()
+
+    def _shortcut_fullscreen(self) -> None:
+        if self.isVisible() and self._has_media and not self._loading:
+            self.fullscreen_requested.emit()
 
     @staticmethod
     def _control_group(label_text: str, widget: QWidget) -> QHBoxLayout:

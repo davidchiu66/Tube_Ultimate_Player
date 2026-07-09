@@ -102,11 +102,11 @@ def build_download_command(
     cookie_browser = config.explicit_cookie_browser()
     cookie_file = config.cookie_file()
     if force_cookie_file and cookie_file:
-        command.extend(["--cookies", prepare_cookie_file(cookie_file)])
+        command.extend(["--cookies", prepare_cookie_file(cookie_file, task.url)])
     elif cookie_browser:
         command.extend(["--cookies-from-browser", cookie_browser])
     elif cookie_file:
-        command.extend(["--cookies", prepare_cookie_file(cookie_file)])
+        command.extend(["--cookies", prepare_cookie_file(cookie_file, task.url)])
     elif auto_cookie_browser := config.auto_cookie_browser():
         command.extend(["--cookies-from-browser", auto_cookie_browser])
 

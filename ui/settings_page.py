@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -37,9 +39,24 @@ class SettingsPage(QWidget):
         self.proxy_edit = QLineEdit()
         self.proxy_edit.setPlaceholderText("http://127.0.0.1:7890 / socks5://127.0.0.1:1080")
 
+        self.default_home_group = QButtonGroup(self)
+        self.default_home_bilibili = QRadioButton("Bilibili")
+        self.default_home_youtube = QRadioButton("YouTube")
+        self.default_home_group.addButton(self.default_home_bilibili)
+        self.default_home_group.addButton(self.default_home_youtube)
+        default_home_row = QHBoxLayout()
+        default_home_row.setContentsMargins(0, 0, 0, 0)
+        default_home_row.setSpacing(16)
+        default_home_row.addWidget(self.default_home_bilibili)
+        default_home_row.addWidget(self.default_home_youtube)
+        default_home_row.addStretch(1)
+
         self.cookie_edit = QTextEdit()
         self.cookie_edit.setMinimumHeight(150)
-        self.cookie_edit.setPlaceholderText("粘贴 Netscape cookies.txt 内容，或浏览器请求头里的 Cookie: a=b; c=d")
+        self.cookie_edit.setPlaceholderText(
+            "粘贴 Netscape cookies.txt 内容，或浏览器请求头里的 Cookie: a=b; c=d\n"
+            "可用于 YouTube / Bilibili；程序会按目标站点自动转换。"
+        )
 
         self.cookie_browser_combo = QComboBox()
 
@@ -97,6 +114,7 @@ class SettingsPage(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
+        form.addRow("默认首页", default_home_row)
         form.addRow("当前有效代理", self.active_proxy_label)
         form.addRow("配置代理", self.proxy_edit)
         form.addRow("从浏览器读取 Cookie", self.cookie_browser_combo)
@@ -135,6 +153,9 @@ class SettingsPage(QWidget):
 
     def load(self) -> None:
         self.config.load()
+        default_home = self.config.default_home_source()
+        self.default_home_bilibili.setChecked(default_home != "youtube")
+        self.default_home_youtube.setChecked(default_home == "youtube")
         self.proxy_edit.setText(str(self.config.get("youtube.proxy", "") or ""))
         self.cookie_edit.setPlainText(self._read_cookie_text())
         browser = str(self.config.get("youtube.cookie_browser", "") or "")
@@ -159,6 +180,7 @@ class SettingsPage(QWidget):
         cookie_path.write_text(self.cookie_edit.toPlainText().strip(), encoding="utf-8")
 
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
+        self.config.set("content.default_home", "youtube" if self.default_home_youtube.isChecked() else "bilibili")
         cookie_browser = self.cookie_browser_combo.currentData() or ""
         self.config.set("youtube.cookie_browser", cookie_browser)
         self.config.set(

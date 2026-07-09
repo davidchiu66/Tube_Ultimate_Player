@@ -244,3 +244,70 @@ QDialog {
     border: 1px solid #3ea6ff;
     border-radius: 8px;
 }
+
+#PlaylistOverlay {
+    background: rgba(18, 18, 18, 242);
+    border: 1px solid #2b2b2b;
+    border-radius: 10px;
+}
+
+#PlaylistOverlayList {
+    background: #181818;
+    border: 0;
+    padding: 0;
+    outline: none;
+}
+
+#PlaylistOverlayList::item {
+    border: 0;
+    padding: 0;
+    margin: 0;
+}
+
+#PlaylistOverlayList::item:selected {
+    background: transparent;
+}
+
+#PlaylistOverlayItem {
+    background: #1d1d1d;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+}
+
+#PlaylistOverlayItem[selected="true"] {
+    background: #222830;
+    border: 1px solid #5b8fd6;
+}
+
+#PlaylistOverlayItem[active="true"] {
+    background: #262626;
+    border: 1px solid #3ea6ff;
+}
+
+#PlaylistOverlayItem[active="true"][selected="true"] {
+    background: #243140;
+    border: 1px solid #3ea6ff;
+}
+
+#PlaylistOverlayThumb {
+    background: #090909;
+    border: 1px solid #2f2f2f;
+    border-radius: 6px;
+    color: #9a9a9a;
+}
+
+#PlaylistOverlayTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f4f4f4;
+}
+
+#PlaylistOverlayMeta {
+    font-size: 12px;
+    color: #9a9a9a;
+}
+
+#PlaylistOverlayIndex {
+    font-size: 12px;
+    color: #8c8c8c;
+}

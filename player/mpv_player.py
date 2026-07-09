@@ -23,6 +23,7 @@ class MpvPlayer(QObject):
     position_changed = Signal(float)
     duration_changed = Signal(float)
     pause_changed = Signal(bool)
+    playback_finished = Signal()
     error = Signal(str)
 
     def __init__(self, video_widget: QWidget, config: ConfigService) -> None:
@@ -40,6 +41,7 @@ class MpvPlayer(QObject):
 
         self._duration = 0.0
         self._last_pause: bool | None = None
+        self._last_eof = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._poll_properties)
@@ -55,6 +57,7 @@ class MpvPlayer(QObject):
         start_position: float | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
+        self._last_eof = False
         self.apply_network_options(headers or {})
         self.set_property_string("audio-files", audio_url or "")
         self.set_property_string(
@@ -74,6 +77,7 @@ class MpvPlayer(QObject):
         self.set_property_string("pause", "no" if paused else "yes")
 
     def stop(self) -> None:
+        self._last_eof = False
         self.command("stop")
 
     def seek(self, seconds: float) -> None:
@@ -207,6 +211,11 @@ class MpvPlayer(QObject):
         if paused != self._last_pause:
             self._last_pause = paused
             self.pause_changed.emit(paused)
+
+        eof_reached = self.get_bool("eof-reached")
+        if eof_reached and not self._last_eof:
+            self.playback_finished.emit()
+        self._last_eof = eof_reached
 
     def _bind_api(self) -> None:
         self._lib.mpv_create.restype = ctypes.c_void_p

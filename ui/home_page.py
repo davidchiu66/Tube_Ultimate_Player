@@ -28,6 +28,7 @@ class HomeVideoCard(QFrame):
     clicked = Signal(object)
     double_clicked = Signal(object)
     favorite_requested = Signal(object)
+    download_requested = Signal(object)
 
     def __init__(self, video: HomeVideo, network: QNetworkAccessManager) -> None:
         super().__init__()
@@ -42,6 +43,9 @@ class HomeVideoCard(QFrame):
         self.favorite_button = QPushButton("收藏")
         self.favorite_button.setFixedHeight(28)
         self.favorite_button.clicked.connect(lambda: self.favorite_requested.emit(self.video))
+        self.download_button = QPushButton("下载")
+        self.download_button.setFixedHeight(28)
+        self.download_button.clicked.connect(lambda: self.download_requested.emit(self.video))
 
         self.thumbnail_label = QLabel()
         self.thumbnail_label.setObjectName("HomeThumbnail")
@@ -59,13 +63,15 @@ class HomeVideoCard(QFrame):
             meta.append(video.uploader)
         if video.duration:
             meta.append(format_seconds(video.duration))
-        self.meta_label = QLabel(" | ".join(meta) if meta else video.video_id)
+        self.meta_label = QLabel(" | ".join(meta) if meta else video.source_site.title())
         self.meta_label.setObjectName("MetaLabel")
         self.meta_label.setFixedHeight(22)
 
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
         action_row.addWidget(self.favorite_button)
+        action_row.addWidget(self.download_button)
         action_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -126,6 +132,7 @@ class HomePage(QWidget):
     refresh_requested = Signal()
     play_requested = Signal(str)
     favorite_requested = Signal(object)
+    download_requested = Signal(object)
     page_requested = Signal(int)
 
     def __init__(self) -> None:
@@ -148,7 +155,7 @@ class HomePage(QWidget):
         self.next_button = QPushButton("下一页")
         self.page_label = QLabel("")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label = QLabel("正在加载 YouTube 首页...")
+        self.status_label = QLabel("正在加载首页内容...")
         self.status_label.setObjectName("MetaLabel")
         self.loading_bar = QProgressBar()
         self.loading_bar.setRange(0, 0)
@@ -173,6 +180,7 @@ class HomePage(QWidget):
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setWidget(self.grid_host)
 
         layout = QVBoxLayout(self)
@@ -212,12 +220,12 @@ class HomePage(QWidget):
         if loading:
             self.status_label.setText(message or "正在加载内容，请稍等...")
 
-    def set_home_context(self, page: int = 1, has_next: bool = False) -> None:
+    def set_home_context(self, page: int = 1, has_next: bool = False, source_label: str = "首页") -> None:
         self._mode = "home"
         self._keyword = ""
         self._page = max(1, page)
         self._has_next = has_next
-        self.title_label.setText("首页")
+        self.title_label.setText(f"{source_label} 首页")
         self._update_pagination()
 
     def set_search_context(self, keyword: str, page: int, has_next: bool) -> None:
@@ -249,6 +257,7 @@ class HomePage(QWidget):
             card.clicked.connect(self._select_card)
             card.double_clicked.connect(self._play_card)
             card.favorite_requested.connect(self.favorite_requested)
+            card.download_requested.connect(self.download_requested)
             card.set_favorite(video.video_id in self._favorite_ids)
             self._cards.append(card)
 

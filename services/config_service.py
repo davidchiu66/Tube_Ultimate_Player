@@ -104,6 +104,13 @@ class ConfigService:
             path = RUNTIME_ROOT / path
         return str(path)
 
+    def default_home_source(self) -> str:
+        value = str(self.get("content.default_home", "bilibili") or "bilibili").strip().lower()
+        return value if value in {"youtube", "bilibili"} else "bilibili"
+
+    def default_home_label(self) -> str:
+        return "Bilibili" if self.default_home_source() == "bilibili" else "YouTube"
+
     def cookie_browser(self) -> str:
         browser = str(self.get("youtube.cookie_browser", "") or "").strip()
         profile = str(self.get("youtube.cookie_browser_profile", "") or "").strip()

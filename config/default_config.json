@@ -19,6 +19,9 @@
     "thumbnail_ttl_days": 30,
     "subtitle_ttl_days": 30
   },
+  "content": {
+    "default_home": "bilibili"
+  },
   "download": {
     "save_dir": "",
     "max_concurrent": 1,

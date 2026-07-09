@@ -9,9 +9,61 @@ class HomeVideo:
     video_id: str
     title: str
     webpage_url: str
+    source_site: str = "youtube"
     uploader: str = ""
     duration: int = 0
     thumbnail: str = ""
+
+
+@dataclass
+class PlaylistEntry:
+    playlist_id: str
+    video_id: str
+    title: str
+    webpage_url: str
+    source_site: str = "youtube"
+    uploader: str = ""
+    duration: int = 0
+    thumbnail: str = ""
+    position: int = 0
+    availability: str = ""
+
+    def to_home_video(self) -> HomeVideo:
+        return HomeVideo(
+            video_id=self.video_id,
+            title=self.title,
+            webpage_url=self.webpage_url,
+            source_site=self.source_site,
+            uploader=self.uploader,
+            duration=self.duration,
+            thumbnail=self.thumbnail,
+        )
+
+
+@dataclass
+class PlaylistInfo:
+    playlist_id: str
+    title: str
+    webpage_url: str
+    source_site: str = "youtube"
+    uploader: str = ""
+    thumbnail: str = ""
+    entry_count: int = 0
+    source_type: str = "playlist"
+    current_video_id: str = ""
+    entries: list[PlaylistEntry] = field(default_factory=list)
+
+
+@dataclass
+class SavedPlaylist:
+    playlist_key: str
+    name: str
+    source_url: str = ""
+    source_type: str = "manual"
+    auto_play_next: bool = True
+    created_at: str = ""
+    updated_at: str = ""
+    entries: list[PlaylistEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +102,7 @@ class SubtitleInfo:
 class VideoInfo:
     video_id: str
     title: str
+    source_site: str = "youtube"
     description: str = ""
     uploader: str = ""
     channel_id: str = ""

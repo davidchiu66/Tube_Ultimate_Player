@@ -1,0 +1,167 @@
+这份文档将 yt-dlp 的帮助文件整理并翻译为中文，按功能模块分类，旨在为您的二次开发（如编写 GUI 封装、自动化脚本、批处理工具等）提供详尽的参数参考。
+yt-dlp 命令行参数中文参考手册
+基本用法:
+yt-dlp.exe [选项] URL [URL...]
+1. 常规选项
+-h, --help: 打印帮助文本并退出
+--version: 打印程序版本并退出
+-U, --update: 更新到最新稳定版
+--no-update: 不检查更新 (默认)
+--update-to [CHANNEL]@[TAG]: 升级/降级到特定版本。CHANNEL 可以是 stable, nightly, master。
+-i, --ignore-errors: 忽略下载和后处理错误。
+--no-abort-on-error: 遇到下载错误时继续处理下一个视频 (默认)。
+--abort-on-error: 遇到错误时中止所有下载。
+--list-extractors: 列出所有支持的提取器并退出。
+--extractor-descriptions: 输出所有提取器的描述并退出。
+--use-extractors NAMES (--ies): 指定使用的提取器，逗号分隔。支持正则、"all"、"default" 和 "end"。前缀 "-" 表示排除。
+--default-search PREFIX: 为未限定的 URL 使用此前缀。
+--ignore-config: 不加载任何配置文件 (别名: --no-config)。
+--config-locations PATH: 指定配置文件路径。
+--plugin-dirs DIR: 额外搜索插件的目录路径。
+--js-runtimes RUNTIME[:PATH]: 启用额外的 JS 运行时 (按优先级: deno, node, quickjs, bun)。默认仅启用 deno。
+--flat-playlist: 不提取播放列表的具体 URL 条目（仅提取元数据）。
+--live-from-start: 从头下载直播流（实验性，支持 YouTube, Twitch 等）。
+--wait-for-video MIN[-MAX]: 等待计划直播流可用，指定重试间隔秒数。
+--mark-watched: 标记视频为已观看。
+--color [STREAM:]POLICY: 控制输出中的颜色代码 (always, auto, never)。
+--alias ALIASES OPTIONS: 为选项字符串创建别名。
+-t, --preset-alias PRESET: 应用预定义选项集。可用预设: mp3, aac, mp4, mkv, sleep。
+2. 网络选项
+--proxy URL: 使用指定的 HTTP/HTTPS/SOCKS 代理。例如 socks5://user:pass@127.0.0.1:1080/。
+--socket-timeout SECONDS: 放弃前的等待时间（秒）。
+--source-address IP: 绑定的客户端 IP 地址。
+--impersonate CLIENT[:OS]: 模拟客户端请求 (如 chrome, chrome-110)。强制模拟可能影响下载速度和稳定性。
+-4, --force-ipv4 / -6, --force-ipv6: 强制通过 IPv4 / IPv6 建立连接。
+--enable-file-urls: 允许 file:// URL（默认禁用）。
+3. 地理限制
+--geo-verification-proxy URL: 用于验证 IP 地址的代理（用于绕过地理限制）。
+--xff VALUE: 伪造 X-Forwarded-For HTTP 头以绕过地理限制。支持 "default", "never", CIDR 格式 IP 或 ISO 3166-2 国家代码。
+4. 视频选择
+-I, --playlist-items ITEM_SPEC: 指定下载的播放列表项索引，支持范围 (如 1:3,7,-5::2)。
+--min-filesize SIZE / --max-filesize SIZE: 文件大小限制，小于/大于指定大小则中止 (如 50k, 44.6M)。
+--date DATE: 仅下载特定日期上传的视频 (格式如 YYYYMMDD 或 today-2weeks)。
+--datebefore DATE / --dateafter DATE: 下载特定日期之前/之后的视频。
+--match-filters FILTER: 通用视频过滤器。可比较字段，使用 ! 检查字段是否存在，使用 & 检查多个条件。例如 --match-filters "like_count>?100"。
+--break-match-filters FILTER: 类似 match-filters，但当视频被拒绝时停止整个下载过程。
+--no-playlist / --yes-playlist: URL 同时指向视频和播放列表时，仅下载视频 / 下载播放列表。
+--age-limit YEARS: 仅下载适合特定年龄的视频。
+--download-archive FILE: 记录已下载视频的 ID 到文件中，避免重复下载。
+--max-downloads NUMBER: 下载指定数量的文件后中止。
+--break-on-existing: 遇到 archive 文件中已存在的视频时停止下载。
+--skip-playlist-after-errors N: 允许 N 次失败后跳过播放列表剩余部分。
+5. 下载选项
+-N, --concurrent-fragments N: 并发下载的分片数量 (默认 1)。
+-r, --limit-rate RATE: 最大下载速率 (如 50K, 4.2M)。
+--throttled-rate RATE: 假设被限速的最小下载速率，低于此值将重新提取视频数据。
+-R, --retries RETRIES: 重试次数 (默认 10) 或 "infinite"。
+--fragment-retries RETRIES: 分片重试次数 (默认 10)。
+--retry-sleep [TYPE:]EXPR: 重试之间的睡眠时间。支持线性或指数退避。
+--skip-unavailable-fragments: 跳过不可用的分片 (默认)。
+--keep-fragments: 下载完成后保留分片。
+--buffer-size SIZE: 下载缓冲区大小 (默认 1024)。
+--playlist-random: 随机顺序下载播放列表。
+--lazy-playlist: 边接收边处理播放列表条目。
+--hls-use-mpegts: 为 HLS 视频使用 mpegts 容器（直播默认开启）。
+--download-sections REGEX: 仅下载匹配正则表达式的章节。* 前缀表示时间范围 (如 *10:15-inf)。需要 ffmpeg。
+--downloader [PROTO:]NAME: 指定外部下载器 (支持 native, aria2c, axel, curl, ffmpeg, httpie, wget)。
+--downloader-args NAME:ARGS: 传递给外部下载器的参数。
+6. 文件系统选项
+-a, --batch-file FILE: 包含待下载 URL 的文件 (一行一个)。
+-P, --paths [TYPES:]PATH: 文件下载路径。支持 home (默认) 和 temp 路径。
+-o, --output [TYPES:]TEMPLATE: 输出文件名模板。（二次开发核心功能，详见官方 OUTPUT TEMPLATE 文档）
+--output-na-placeholder TEXT: 模板中不可用字段的占位符 (默认: "NA")。
+--restrict-filenames: 限制文件名仅使用 ASCII，避免空格和 &。
+--windows-filenames: 强制文件名兼容 Windows。
+--trim-filenames LENGTH: 限制文件名长度 (不含扩展名)。
+-w, --no-overwrites / --force-overwrites: 不覆盖 / 强制覆盖已有文件。
+-c, --continue: 恢复部分下载的文件 (默认)。
+--mtime: 使用 Last-modified 头设置文件修改时间。
+--write-info-json: 将视频元数据写入 .info.json 文件。
+--load-info-json FILE: 加载之前保存的 JSON 视频信息文件。
+--cookies FILE: 读取/写入 Netscape 格式的 cookies 文件。
+--cookies-from-browser BROWSER[+KEYRING][:PROFILE][::CONTAINER]: 从浏览器加载 cookies (支持 chrome, edge, firefox 等)。
+--cache-dir DIR: 文件系统缓存目录。
+7. 缩略图与快捷方式选项
+--write-thumbnail / --write-all-thumbnails: 写入缩略图 / 所有格式的缩略图。
+--list-thumbnails: 列出可用的缩略图。
+--write-link / --write-url-link / --write-webloc-link / --write-desktop-link: 写入互联网快捷方式文件。
+8. 详细程度与模拟选项
+-q, --quiet: 安静模式。
+-s, --simulate: 模拟模式，不下载视频也不写磁盘。
+--skip-download: 不下载视频，但写入相关文件 (如元数据)。
+-O, --print [WHEN:]TEMPLATE: 打印字段或模板到屏幕。暗示 --quiet 和 --simulate。（极适用于二次开发中获取视频信息）
+-j, --dump-json: 安静模式，打印每个视频的 JSON 信息。
+-J, --dump-single-json: 打印整个 URL 或播放列表的单行 JSON 信息。
+--newline: 将进度条作为新行输出。
+--no-progress: 不打印进度条。
+-v, --verbose: 打印调试信息。
+9. 变通方案
+--encoding ENCODING: 强制指定编码 (实验性)。
+--no-check-certificates: 禁用 HTTPS 证书验证。
+--prefer-insecure: 使用未加密连接检索视频信息。
+--add-headers FIELD:VALUE: 添加自定义 HTTP 头。
+--sleep-requests SECONDS / --sleep-interval SECONDS / --max-sleep-interval SECONDS: 在请求/下载前后休眠指定秒数。
+10. 视频格式选项
+-f, --format FORMAT: 视频格式代码，选择特定清晰度/编码。
+-S, --format-sort SORTORDER: 按字段对格式进行排序。例如 -S res:1080。
+--video-multistreams / --audio-multistreams: 允许合并多个视频流/音频流。
+--prefer-free-formats: 优先选择开源容器格式。
+--check-formats: 确保所选格式可实际下载。
+-F, --list-formats: 列出所有可用格式。
+--merge-output-format FORMAT: 合并格式时使用的容器 (如 mp4/mkv)。
+11. 字幕选项
+--write-subs: 写入字幕文件。
+--write-auto-subs: 写入自动生成的字幕。
+--list-subs: 列出可用的字幕。
+--sub-format FORMAT: 字幕格式偏好 (如 srt 或 ass/srt)。
+--sub-langs LANGS: 要下载的字幕语言 (支持正则或 all)。如 --sub-langs "en.*,ja"。
+12. 身份验证选项
+-u, --username USERNAME / -p, --password PASSWORD: 账号 ID 和密码。
+-2, --twofactor TWOFACTOR: 双因素认证代码。
+-n, --netrc: 使用 .netrc 认证。
+--video-password PASSWORD: 视频专属密码。
+--ap-mso MSO 等: Adobe Pass (电视提供商) 认证选项。
+--client-certificate CERTFILE: 客户端证书路径。
+13. 后处理选项
+-x, --extract-audio: 提取音频 (需要 ffmpeg)。
+--audio-format FORMAT: 指定音频转换格式 (aac, flac, mp3, opus, wav 等)。
+--audio-quality QUALITY: 指定音频质量 (0 最好到 10 最差，或指定位率如 128K)。
+--remux-video FORMAT: 将视频重封装到其他容器 (无需重编码)。
+--recode-video FORMAT: 重新编码视频到其他格式。
+--postprocessor-args NAME:ARGS: 传递给后处理器的参数 (别名: --ppa)。
+--embed-subs: 将字幕嵌入视频 (支持 mp4, webm, mkv)。
+--embed-thumbnail: 将缩略图作为封面艺术嵌入视频。
+--embed-metadata: 将元数据嵌入视频文件 (别名: --add-metadata)。
+--embed-chapters: 添加章节标记到视频文件。
+--embed-info-json: 将 infojson 作为附件嵌入 mkv/mka。
+--parse-metadata [WHEN:]FROM:TO: 解析额外元数据 (如标题/艺术家)。
+--replace-in-metadata: 使用正则表达式替换元数据字段中的文本。
+--concat-playlist POLICY: 拼接播放列表中的视频 (never, always, multi_video)。
+--ffmpeg-location PATH: ffmpeg 二进制文件的位置。
+--exec [WHEN:]CMD: 在特定阶段执行命令。
+--convert-subs FORMAT / --convert-thumbnails FORMAT: 转换字幕/缩略图格式。
+--split-chapters / --remove-chapters REGEX: 根据章节拆分视频 / 移除匹配正则的章节。
+--force-keyframes-at-cuts: 在裁剪/拆分时强制关键帧 (需重编码，较慢但画质更好)。
+--use-postprocessor NAME[:ARGS]: 启用插件后处理器。
+14. SponsorBlock 选项
+--sponsorblock-mark CATS: 根据 SponsorBlock API 创建章节 (类别如 sponsor, intro, outro 等)。
+--sponsorblock-remove CATS: 从视频文件中移除 SponsorBlock 标记的片段。
+--sponsorblock-chapter-title TEMPLATE: 创建的 SponsorBlock 章节标题模板。
+--sponsorblock-api URL: SponsorBlock API 位置，默认 https://sponsor.ajay.app。
+15. 提取器选项
+--extractor-retries RETRIES: 提取器错误重试次数 (默认 3)。
+--allow-dynamic-mpd: 处理动态 DASH 清单 (默认)。
+--hls-split-discontinuity: 在广告等中断处将 HLS 播放列表拆分为不同格式。
+--extractor-args IE_KEY:ARGS: 向特定提取器传递参数。
+16. 预设别名
+为方便使用而预定义的别名：
+-t mp3: -f 'ba[acodec^=mp3]/ba/b' -x --audio-format mp3
+-t aac: -f 'ba[acodec^=aac]/ba[acodec^=mp4a.40.]/ba/b' -x --audio-format aac
+-t mp4: --merge-output-format mp4 --remux-video mp4 -S vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac
+-t mkv: --merge-output-format mkv --remux-video mkv
+-t sleep: --sleep-subtitles 5 --sleep-requests 0.75 --sleep-interval 10 --max-sleep-interval 20
+💡 二次开发建议
+获取结构化数据：如果您需要在代码中获取视频信息而不是下载视频，请大量使用 -j (单视频) 或 -J (播放列表) 或 --print 选项。这比解析控制台文本输出要可靠得多。
+避免重复下载：在开发批量下载工具时，务必利用 --download-archive 选项，实现状态持久化。
+外部依赖：后处理（提取音频、嵌入字幕/元数据、视频转码）强依赖 ffmpeg 和 ffprobe，请确保在您的运行环境中配置了 --ffmpeg-location 或将其加入了系统 PATH。
+模板引擎：yt-dlp 的 -o (输出路径) 和 --print 支持强大的 Python 风格字符串格式化。在进行 GUI 封装时，可以将这部分配置暴露给高级用户。
