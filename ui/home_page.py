@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QPixmap
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -17,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from resolver.models import HomeVideo
 from ui.player_page import format_seconds
+from ui.thumbnail_cache import ThumbnailCache
 
 
 CARD_SIZE = 220
@@ -30,10 +30,11 @@ class HomeVideoCard(QFrame):
     favorite_requested = Signal(object)
     download_requested = Signal(object)
 
-    def __init__(self, video: HomeVideo, network: QNetworkAccessManager) -> None:
+    def __init__(self, video: HomeVideo, network: QNetworkAccessManager, thumbnail_cache: ThumbnailCache) -> None:
         super().__init__()
         self.video = video
         self._network = network
+        self._thumbnail_cache = thumbnail_cache
 
         self.setObjectName("HomeVideoCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -105,27 +106,14 @@ class HomeVideoCard(QFrame):
         self.favorite_button.setEnabled(not favorite)
 
     def _load_thumbnail(self) -> None:
-        if not self.video.thumbnail:
-            self.thumbnail_label.setText("无封面")
-            return
-        reply = self._network.get(QNetworkRequest(QUrl(self.video.thumbnail)))
-        reply.finished.connect(lambda: self._thumbnail_finished(reply))
-
-    @Slot()
-    def _thumbnail_finished(self, reply: QNetworkReply) -> None:
-        data = reply.readAll()
-        pixmap = QPixmap()
-        if pixmap.loadFromData(data):
-            self.thumbnail_label.setPixmap(
-                pixmap.scaled(
-                    self.thumbnail_label.size(),
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        else:
-            self.thumbnail_label.setText("封面加载失败")
-        reply.deleteLater()
+        self._thumbnail_cache.load(
+            self._network,
+            self.video.thumbnail,
+            self.thumbnail_label.size(),
+            self.thumbnail_label,
+            empty_text="无封面",
+            error_text="封面加载失败",
+        )
 
 
 class HomePage(QWidget):
@@ -142,10 +130,17 @@ class HomePage(QWidget):
         self._cards: list[HomeVideoCard] = []
         self._favorite_ids: set[str] = set()
         self._network = QNetworkAccessManager(self)
+        self._thumbnail_cache = ThumbnailCache(self)
         self._mode = "home"
         self._keyword = ""
         self._page = 1
         self._has_next = False
+        self._last_columns = 0
+
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(80)
+        self._relayout_timer.timeout.connect(self._relayout_cards_if_needed)
 
         self.title_label = QLabel("首页")
         self.title_label.setObjectName("PageTitle")
@@ -200,7 +195,7 @@ class HomePage(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._relayout_cards()
+        self._relayout_timer.start()
 
     def mode(self) -> str:
         return self._mode
@@ -253,7 +248,7 @@ class HomePage(QWidget):
 
         self._clear_cards()
         for video in videos:
-            card = HomeVideoCard(video, self._network)
+            card = HomeVideoCard(video, self._network, self._thumbnail_cache)
             card.clicked.connect(self._select_card)
             card.double_clicked.connect(self._play_card)
             card.favorite_requested.connect(self.favorite_requested)
@@ -261,6 +256,7 @@ class HomePage(QWidget):
             card.set_favorite(video.video_id in self._favorite_ids)
             self._cards.append(card)
 
+        self._last_columns = 0
         self._relayout_cards()
         if self._mode == "search":
             self.status_label.setText(f"搜索“{keyword}”第 {page} 页，共加载 {len(videos)} 个视频")
@@ -320,6 +316,7 @@ class HomePage(QWidget):
 
     def _clear_cards(self) -> None:
         self._selected_card = None
+        self._last_columns = 0
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
@@ -327,14 +324,25 @@ class HomePage(QWidget):
                 widget.deleteLater()
         self._cards.clear()
 
-    def _relayout_cards(self) -> None:
+    def _calculate_columns(self) -> int:
+        viewport_width = max(1, self.scroll_area.viewport().width() - 8)
+        return max(1, (viewport_width + GRID_SPACING) // (CARD_SIZE + GRID_SPACING))
+
+    def _relayout_cards_if_needed(self) -> None:
+        columns = self._calculate_columns()
+        if columns == self._last_columns:
+            return
+        self._relayout_cards(columns)
+
+    def _relayout_cards(self, columns: int | None = None) -> None:
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
         if not self._cards:
+            self._last_columns = 0
             return
 
-        viewport_width = max(1, self.scroll_area.viewport().width() - 8)
-        columns = max(1, (viewport_width + GRID_SPACING) // (CARD_SIZE + GRID_SPACING))
+        resolved_columns = columns or self._calculate_columns()
+        self._last_columns = resolved_columns
         for index, card in enumerate(self._cards):
-            row, col = divmod(index, columns)
+            row, col = divmod(index, resolved_columns)
             self.grid_layout.addWidget(card, row, col)

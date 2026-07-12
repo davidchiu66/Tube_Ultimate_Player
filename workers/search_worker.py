@@ -5,7 +5,7 @@ import traceback
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
-from resolver.youtube_resolver import YoutubeResolver
+from resolver.site_resolver import SiteResolver
 
 
 logger = logging.getLogger("tube_player.worker")
@@ -20,16 +20,18 @@ class SearchWorkerSignals(QObject):
 class SearchWorker(QRunnable):
     def __init__(
         self,
-        resolver: YoutubeResolver,
+        resolver: SiteResolver,
         keyword: str,
         page: int = 1,
         page_size: int = 45,
+        force_refresh: bool = False,
     ) -> None:
         super().__init__()
         self.resolver = resolver
         self.keyword = keyword
         self.page = page
         self.page_size = page_size
+        self.force_refresh = force_refresh
         self.signals = SearchWorkerSignals()
 
     @Slot()
@@ -41,7 +43,12 @@ class SearchWorker(QRunnable):
                 self.page,
                 self.page_size,
             )
-            videos, has_next = self.resolver.search_videos(self.keyword, self.page, self.page_size)
+            videos, has_next = self.resolver.search_videos(
+                self.keyword,
+                self.page,
+                self.page_size,
+                force_refresh=self.force_refresh,
+            )
             logger.info(
                 "search worker success keyword=%s page=%s count=%s has_next=%s",
                 self.keyword,

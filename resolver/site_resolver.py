@@ -8,6 +8,8 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
+from pathlib import Path
 
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
 from resolver.youtube_resolver import YoutubeResolver
@@ -26,6 +28,9 @@ _WBI_MIXIN_KEY = [
 _INVALID_WBI_CHARS = str.maketrans("", "", "!'()*")
 _BILIBILI_HOME_PAGE_LIMIT = 30
 _BILIBILI_SEARCH_PAGE_LIMIT = 45
+_HOME_CACHE_TTL_SECONDS = 300.0
+_SEARCH_CACHE_TTL_SECONDS = 1800.0
+_MAX_PAGE_CACHE_ITEMS = 48
 
 
 class SiteResolver:
@@ -33,6 +38,7 @@ class SiteResolver:
         self.config = config
         self.youtube = YoutubeResolver(config)
         self.bilibili = BilibiliResolver(config, self.youtube)
+        self._page_cache: OrderedDict[str, tuple[float, list[HomeVideo], bool]] = OrderedDict()
 
     def home_source(self) -> str:
         return self.config.default_home_source()
@@ -53,15 +59,86 @@ class SiteResolver:
             return self.bilibili.resolve_playlist(url)
         return self.youtube.resolve_playlist(url)
 
-    def fetch_home_videos(self, page: int = 1, page_size: int = 56) -> tuple[list[HomeVideo], bool]:
-        if self.home_source() == "bilibili":
-            return self.bilibili.fetch_home_videos(page, page_size)
-        return self.youtube.fetch_home_videos(page, page_size)
+    def fetch_home_videos(
+        self,
+        page: int = 1,
+        page_size: int = 56,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[list[HomeVideo], bool]:
+        source = self.home_source()
+        key = self._cache_key("home", source, "", page, page_size)
+        if not force_refresh and (cached := self._cache_lookup(key, _HOME_CACHE_TTL_SECONDS)):
+            return cached
+        if source == "bilibili":
+            result = self.bilibili.fetch_home_videos(page, page_size)
+        else:
+            result = self.youtube.fetch_home_videos(page, page_size)
+        self._cache_store(key, result)
+        return result
 
-    def search_videos(self, keyword: str, page: int = 1, page_size: int = 56) -> tuple[list[HomeVideo], bool]:
-        if self.home_source() == "bilibili":
-            return self.bilibili.search_videos(keyword, page, page_size)
-        return self.youtube.search_videos(keyword, page, page_size)
+    def search_videos(
+        self,
+        keyword: str,
+        page: int = 1,
+        page_size: int = 56,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[list[HomeVideo], bool]:
+        source = self.home_source()
+        query = str(keyword or "").strip()
+        key = self._cache_key("search", source, query, page, page_size)
+        if not force_refresh and (cached := self._cache_lookup(key, _SEARCH_CACHE_TTL_SECONDS)):
+            return cached
+        if source == "bilibili":
+            result = self.bilibili.search_videos(query, page, page_size)
+        else:
+            result = self.youtube.search_videos(query, page, page_size)
+        self._cache_store(key, result)
+        return result
+
+    def _cache_key(self, mode: str, source: str, keyword: str, page: int, page_size: int) -> str:
+        fingerprint = self._config_fingerprint()
+        normalized = keyword.strip().lower()
+        return f"{mode}|{source}|{normalized}|{int(page)}|{int(page_size)}|{fingerprint}"
+
+    def _config_fingerprint(self) -> str:
+        cookie_file = self.config.cookie_file()
+        cookie_stamp = ""
+        if cookie_file:
+            path = Path(cookie_file)
+            try:
+                stat = path.stat()
+                cookie_stamp = f"{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}"
+            except OSError:
+                cookie_stamp = str(path)
+        proxy_label, proxy_value = self.config.effective_proxy()
+        payload = {
+            "default_home": self.config.default_home_source(),
+            "cookie_browser": self.config.cookie_browser(),
+            "cookie_file": cookie_stamp,
+            "proxy_label": proxy_label,
+            "proxy_value": proxy_value,
+        }
+        return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def _cache_lookup(self, key: str, ttl_seconds: float) -> tuple[list[HomeVideo], bool] | None:
+        cached = self._page_cache.get(key)
+        if cached is None:
+            return None
+        cached_at, videos, has_next = cached
+        if time.time() - cached_at > ttl_seconds:
+            self._page_cache.pop(key, None)
+            return None
+        self._page_cache.move_to_end(key)
+        return list(videos), has_next
+
+    def _cache_store(self, key: str, result: tuple[list[HomeVideo], bool]) -> None:
+        videos, has_next = result
+        self._page_cache[key] = (time.time(), list(videos), has_next)
+        self._page_cache.move_to_end(key)
+        while len(self._page_cache) > _MAX_PAGE_CACHE_ITEMS:
+            self._page_cache.popitem(last=False)
 
 
 class BilibiliResolver:

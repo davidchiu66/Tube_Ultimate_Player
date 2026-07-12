@@ -4,17 +4,7 @@ from math import cos, pi, sin
 from typing import Callable
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import (
-    QColor,
-    QFont,
-    QIcon,
-    QKeySequence,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QShortcut,
-)
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
 
 try:
@@ -56,6 +46,7 @@ def _draw_fallback_icon(name: str, size: int) -> QIcon:
         "fa5s.history": _draw_history_icon,
         "fa5s.cog": _draw_cog_icon,
         "fa5s.info-circle": _draw_info_icon,
+        "fa5s.thumbtack": _draw_thumbtack_icon,
     }
     drawer = draw_map.get(name, _draw_info_icon)
     drawer(painter, float(size))
@@ -65,10 +56,7 @@ def _draw_fallback_icon(name: str, size: int) -> QIcon:
 
 def _draw_search_icon(painter: QPainter, size: float) -> None:
     painter.drawEllipse(QRectF(size * 0.14, size * 0.14, size * 0.48, size * 0.48))
-    painter.drawLine(
-        QPointF(size * 0.54, size * 0.54),
-        QPointF(size * 0.82, size * 0.82),
-    )
+    painter.drawLine(QPointF(size * 0.54, size * 0.54), QPointF(size * 0.82, size * 0.82))
 
 
 def _draw_link_icon(painter: QPainter, size: float) -> None:
@@ -145,6 +133,14 @@ def _draw_info_icon(painter: QPainter, size: float) -> None:
     painter.drawEllipse(QRectF(size * 0.13, size * 0.13, size * 0.74, size * 0.74))
     painter.drawPoint(QPointF(size * 0.5, size * 0.33))
     painter.drawLine(QPointF(size * 0.5, size * 0.43), QPointF(size * 0.5, size * 0.67))
+
+
+def _draw_thumbtack_icon(painter: QPainter, size: float) -> None:
+    painter.drawLine(QPointF(size * 0.5, size * 0.50), QPointF(size * 0.5, size * 0.84))
+    painter.drawLine(QPointF(size * 0.33, size * 0.24), QPointF(size * 0.67, size * 0.24))
+    painter.drawLine(QPointF(size * 0.28, size * 0.24), QPointF(size * 0.72, size * 0.42))
+    painter.drawLine(QPointF(size * 0.72, size * 0.24), QPointF(size * 0.28, size * 0.42))
+    painter.drawLine(QPointF(size * 0.38, size * 0.42), QPointF(size * 0.62, size * 0.42))
 
 
 class ToolbarButton(QPushButton):
@@ -236,6 +232,7 @@ class PlayerToolbar(QWidget):
     history_clicked = Signal()
     settings_clicked = Signal()
     about_clicked = Signal()
+    topmost_clicked = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -255,6 +252,8 @@ class PlayerToolbar(QWidget):
         self.history_button = ToolbarButton("历史", "fa5s.history", "查看播放历史", self)
         self.settings_button = ToolbarButton("设置", "fa5s.cog", "打开设置", self)
         self.about_button = ToolbarButton("关于", "fa5s.info-circle", "查看应用信息", self)
+        self.topmost_button = ToolbarButton("置顶", "fa5s.thumbtack", "窗口置顶", self)
+        self.topmost_button.setCheckable(True)
 
         self.search_box.trailing_icon.clicked.connect(self._emit_search)
         self.search_button.clicked.connect(self._emit_search)
@@ -266,6 +265,7 @@ class PlayerToolbar(QWidget):
         self.history_button.clicked.connect(self.history_clicked.emit)
         self.settings_button.clicked.connect(self.settings_clicked.emit)
         self.about_button.clicked.connect(self.about_clicked.emit)
+        self.topmost_button.clicked.connect(self.topmost_clicked.emit)
         self.search_edit.returnPressed.connect(self._emit_search)
 
         layout = QHBoxLayout(self)
@@ -281,6 +281,7 @@ class PlayerToolbar(QWidget):
         layout.addWidget(self.history_button)
         layout.addWidget(self.settings_button)
         layout.addWidget(self.about_button)
+        layout.addWidget(self.topmost_button)
 
         self._setup_shortcuts()
 
@@ -290,6 +291,10 @@ class PlayerToolbar(QWidget):
 
     def set_search_text(self, text: str) -> None:
         self.search_edit.setText(text)
+
+    def set_topmost_state(self, enabled: bool) -> None:
+        self.topmost_button.setChecked(enabled)
+        self.topmost_button.setToolTip("取消置顶" if enabled else "窗口置顶")
 
     def _emit_search(self) -> None:
         self.search_requested.emit(self.search_edit.text().strip())
@@ -327,5 +332,6 @@ class PlayerToolbar(QWidget):
             self.history_button,
             self.settings_button,
             self.about_button,
+            self.topmost_button,
         ):
             button.set_compact_mode(icon_only)

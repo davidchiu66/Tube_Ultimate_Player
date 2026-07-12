@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QObject, QThreadPool, Signal
+from PySide6.QtCore import QObject, QThreadPool, QTimer, Signal
 
 from app_paths import DATA_DIR
 from download.command_builder import build_download_task
@@ -41,11 +41,18 @@ class DownloadManager(QObject):
         self.thread_pool = thread_pool
         self._tasks: list[DownloadTask] = []
         self._workers: dict[str, DownloadWorker] = {}
+        self._task_index: dict[str, DownloadTask] = {}
+        self._url_index: dict[str, DownloadTask] = {}
         self._max_concurrent = self.config.download_max_concurrent()
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(1200)
+        self._save_timer.timeout.connect(self._save_tasks)
         self._load_tasks()
         self._deduplicate_tasks()
         self._import_completed_files()
         self._deduplicate_tasks()
+        self._rebuild_indexes()
 
     def tasks(self) -> list[DownloadTask]:
         return list(self._tasks)
@@ -62,6 +69,7 @@ class DownloadManager(QObject):
 
         task = build_download_task(video, quality_label, self.config)
         self._tasks.append(task)
+        self._register_task(task)
         logger.info(
             "download queued task_id=%s title=%s quality=%s format=%s",
             task.task_id,
@@ -115,6 +123,7 @@ class DownloadManager(QObject):
         if worker:
             worker.stop()
         self._tasks = [item for item in self._tasks if item.task_id != task_id]
+        self._unregister_task(task)
         self.task_removed.emit(task_id)
         self._save_tasks()
         self._schedule()
@@ -164,7 +173,7 @@ class DownloadManager(QObject):
         task.eta_text = eta
         task.touch()
         self.task_changed.emit(task)
-        self._save_tasks()
+        self._schedule_save()
 
     def _completed(self, task_id: str, output_path: str) -> None:
         self._workers.pop(task_id, None)
@@ -210,16 +219,10 @@ class DownloadManager(QObject):
         self._schedule()
 
     def _find(self, task_id: str) -> DownloadTask | None:
-        for task in self._tasks:
-            if task.task_id == task_id:
-                return task
-        return None
+        return self._task_index.get(task_id)
 
     def _find_by_url(self, url: str) -> DownloadTask | None:
-        for task in self._tasks:
-            if task.url == url and task.status != STATUS_DELETED:
-                return task
-        return None
+        return self._url_index.get(url)
 
     @staticmethod
     def _find_downloaded_file(task: DownloadTask) -> str:
@@ -285,6 +288,7 @@ class DownloadManager(QObject):
             tasks.append(task)
 
         self._tasks = tasks
+        self._rebuild_indexes()
         logger.info("download tasks loaded count=%s file=%s", len(self._tasks), TASKS_FILE)
         self._save_tasks()
 
@@ -307,6 +311,7 @@ class DownloadManager(QObject):
 
         if removed:
             self._tasks = kept
+            self._rebuild_indexes()
             logger.info("download tasks deduplicated removed=%s remaining=%s", removed, len(self._tasks))
             self._save_tasks()
 
@@ -353,6 +358,7 @@ class DownloadManager(QObject):
                 output_path=str(path),
             )
             self._tasks.append(task)
+            self._register_task(task)
             existing_ids.add(normalized_video_id)
             existing_paths.add(normalized_path)
             imported += 1
@@ -363,14 +369,41 @@ class DownloadManager(QObject):
 
     def _save_tasks(self) -> None:
         try:
+            self._save_timer.stop()
             TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
             payload = [task.to_dict() for task in self._tasks if task.status != STATUS_DELETED]
-            TASKS_FILE.write_text(
+            temp_path = TASKS_FILE.with_suffix(".tmp")
+            temp_path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            temp_path.replace(TASKS_FILE)
         except OSError:
             logger.exception("failed to save download tasks file=%s", TASKS_FILE)
+
+    def _schedule_save(self) -> None:
+        self._save_timer.start()
+
+    def flush(self) -> None:
+        if self._save_timer.isActive():
+            self._save_tasks()
+
+    def _rebuild_indexes(self) -> None:
+        self._task_index = {}
+        self._url_index = {}
+        for task in self._tasks:
+            self._register_task(task)
+
+    def _register_task(self, task: DownloadTask) -> None:
+        self._task_index[task.task_id] = task
+        if task.status != STATUS_DELETED and task.url:
+            self._url_index[task.url] = task
+
+    def _unregister_task(self, task: DownloadTask) -> None:
+        self._task_index.pop(task.task_id, None)
+        current = self._url_index.get(task.url)
+        if current is task:
+            self._url_index.pop(task.url, None)
 
 
 def _url_from_video_id(video_id: str) -> str:

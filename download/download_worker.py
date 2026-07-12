@@ -126,7 +126,7 @@ class DownloadWorker(QRunnable):
 
         returncode = self._process.wait()
         if not output_path or not Path(output_path).exists():
-            resolved_output_path = _find_downloaded_file(self.task)
+            resolved_output_path = estimator.resolve_output_path()
             if resolved_output_path:
                 if output_path:
                     logger.warning(
@@ -217,9 +217,10 @@ class _FileProgressEstimator:
         self.last_bytes: int | None = None
         self.last_time: float | None = None
         self.last_percent = 0.0
+        self._matcher = _DownloadFileMatcher(task)
 
     def poll(self, now: float) -> tuple[float, str, str, int] | None:
-        current_bytes = _downloaded_bytes(self.task)
+        current_bytes = self._matcher.downloaded_bytes()
         if current_bytes <= 0:
             return None
 
@@ -253,6 +254,9 @@ class _FileProgressEstimator:
         self.task.eta_text = eta_text
         return percent, speed_text, eta_text, current_bytes
 
+    def resolve_output_path(self) -> str:
+        return self._matcher.find_completed_file()
+
 
 def _read_output_lines(process: subprocess.Popen[str], output_queue: Queue[str]) -> None:
     stdout = process.stdout
@@ -280,40 +284,67 @@ def _read_output_lines(process: subprocess.Popen[str], output_queue: Queue[str])
 
 
 def _downloaded_bytes(task: DownloadTask) -> int:
-    save_dir = Path(task.save_dir)
-    if not task.video_id or not save_dir.exists():
-        return 0
-
-    candidates = _video_id_candidates(task.video_id)
-    total = 0
-    try:
-        for path in save_dir.iterdir():
-            if not path.is_file() or not any(candidate in path.name for candidate in candidates):
-                continue
-            total += path.stat().st_size
-    except OSError:
-        return 0
-    return total
+    return _DownloadFileMatcher(task).downloaded_bytes()
 
 
 def _find_downloaded_file(task: DownloadTask) -> str:
-    save_dir = Path(task.save_dir)
-    if not task.video_id or not save_dir.exists():
+    return _DownloadFileMatcher(task).find_completed_file()
+
+
+class _DownloadFileMatcher:
+    _TRANSIENT_SUFFIXES = (".part", ".ytdl", ".tmp", ".temp")
+
+    def __init__(self, task: DownloadTask) -> None:
+        self.task = task
+        self._save_dir = Path(task.save_dir)
+        self._candidates = _video_id_candidates(task.video_id)
+        self._matched_paths: list[Path] = []
+
+    def downloaded_bytes(self) -> int:
+        total = 0
+        for path in self._existing_paths(include_transient=True):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def find_completed_file(self) -> str:
+        for path in self._existing_paths(include_transient=False):
+            return str(path)
         return ""
 
-    candidates = _video_id_candidates(task.video_id)
-    transient_suffixes = (".part", ".ytdl", ".tmp", ".temp")
-    try:
-        for path in save_dir.iterdir():
-            lower_name = path.name.lower()
-            if not path.is_file() or not any(candidate in path.name for candidate in candidates):
+    def _existing_paths(self, *, include_transient: bool) -> list[Path]:
+        if not self.task.video_id or not self._save_dir.exists():
+            return []
+
+        existing: list[Path] = []
+        for path in self._matched_paths:
+            if not path.exists() or not path.is_file():
                 continue
-            if lower_name.endswith(transient_suffixes):
+            if not include_transient and path.name.lower().endswith(self._TRANSIENT_SUFFIXES):
                 continue
-            return str(path)
-    except OSError:
-        return ""
-    return ""
+            existing.append(path)
+        if existing:
+            self._matched_paths = existing
+            return existing
+
+        try:
+            paths = list(self._save_dir.iterdir())
+        except OSError:
+            return []
+
+        matched: list[Path] = []
+        for path in paths:
+            if not path.is_file():
+                continue
+            if not any(candidate in path.name for candidate in self._candidates):
+                continue
+            matched.append(path)
+        self._matched_paths = matched
+        if include_transient:
+            return list(matched)
+        return [path for path in matched if not path.name.lower().endswith(self._TRANSIENT_SUFFIXES)]
 
 
 def _video_id_candidates(video_id: str) -> list[str]:

@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         self.current_playlist_key = ""
         self.current_playlist_auto_play = True
         self._pending_playlist_video_id = ""
+        self._playback_return_widget: QWidget | None = None
         self._home_cache: list[HomeVideo] = []
         self._home_page = 1
         self._home_has_next = False
@@ -100,6 +101,8 @@ class MainWindow(QMainWindow):
         self.history_nav = self.top_bar_widget.history_button
         self.settings_nav = self.top_bar_widget.settings_button
         self.about_nav = self.top_bar_widget.about_button
+        self.topmost_nav = self.top_bar_widget.topmost_button
+        self._is_topmost = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
 
         self.stack = QStackedWidget()
         self.home_page = HomePage()
@@ -140,6 +143,7 @@ class MainWindow(QMainWindow):
         self._refresh_favorite_views()
         QTimer.singleShot(0, self.load_home)
         QTimer.singleShot(1200, self._maybe_prompt_ffmpeg_install)
+        self.top_bar_widget.set_topmost_state(self._is_topmost)
         logger.info("main window initialized")
 
     def _connect_signals(self) -> None:
@@ -152,6 +156,7 @@ class MainWindow(QMainWindow):
         self.history_nav.clicked.connect(self._show_history)
         self.settings_nav.clicked.connect(lambda: self.stack.setCurrentWidget(self.settings_page))
         self.about_nav.clicked.connect(self._show_about)
+        self.top_bar_widget.topmost_clicked.connect(self._toggle_topmost)
 
         self.home_page.refresh_requested.connect(self._refresh_home_page)
         self.home_page.play_requested.connect(self.play_url)
@@ -268,6 +273,7 @@ class MainWindow(QMainWindow):
             self._load_playlist(target, auto_play_current=(kind == "video_with_playlist"))
             return
 
+        self._remember_playback_return_widget()
         self._clear_playlist_context()
         logger.info("play url requested: %s", target)
         self.stack.setCurrentWidget(self.player_page)
@@ -298,14 +304,14 @@ class MainWindow(QMainWindow):
     def load_home(self) -> None:
         self._start_home_load(1)
 
-    def _start_home_load(self, page: int) -> None:
+    def _start_home_load(self, page: int, *, force_refresh: bool = False) -> None:
         logger.info("home load requested page=%s", page)
         self._home_page = max(1, page)
         self.stack.setCurrentWidget(self.home_page)
         source_label = self.resolver.home_source_label()
         self.home_page.set_home_context(self._home_page, False, source_label=source_label)
         self.home_page.set_loading(True, f"正在获取 {source_label} 首页内容（第 {self._home_page} 页），请稍候...")
-        worker = HomeWorker(self.resolver, page=self._home_page, page_size=56)
+        worker = HomeWorker(self.resolver, page=self._home_page, page_size=56, force_refresh=force_refresh)
         worker.signals.success.connect(self._home_loaded)
         worker.signals.error.connect(self._home_failed)
         worker.signals.finished.connect(lambda: self.home_page.set_loading(False))
@@ -329,7 +335,7 @@ class MainWindow(QMainWindow):
         self._search_page = max(1, page)
         self._start_search(self._search_keyword, self._search_page)
 
-    def _start_search(self, keyword: str, page: int) -> None:
+    def _start_search(self, keyword: str, page: int, *, force_refresh: bool = False) -> None:
         logger.info("search requested keyword=%s page=%s", keyword, page)
         self.stack.setCurrentWidget(self.home_page)
         self.home_page.set_search_context(keyword, page, has_next=False)
@@ -338,7 +344,7 @@ class MainWindow(QMainWindow):
             True,
             f"正在搜索 {source_label}：{keyword}（第 {page} 页），请稍候，这一步通常会比首页加载稍慢一些...",
         )
-        worker = SearchWorker(self.resolver, keyword, page=page, page_size=56)
+        worker = SearchWorker(self.resolver, keyword, page=page, page_size=56, force_refresh=force_refresh)
         worker.signals.success.connect(self._search_loaded)
         worker.signals.error.connect(self._search_failed)
         worker.signals.finished.connect(lambda: self.home_page.set_loading(False))
@@ -354,9 +360,9 @@ class MainWindow(QMainWindow):
 
     def _refresh_home_page(self) -> None:
         if self.home_page.mode() == "search" and self._search_keyword:
-            self._start_search(self._search_keyword, self.home_page.page())
+            self._start_search(self._search_keyword, self.home_page.page(), force_refresh=True)
             return
-        self._start_home_load(self.home_page.page())
+        self._start_home_load(self.home_page.page(), force_refresh=True)
 
     def _home_loaded(self, videos: list[HomeVideo], has_next: bool) -> None:
         logger.info("home loaded page=%s count=%s has_next=%s", self._home_page, len(videos), has_next)
@@ -451,6 +457,7 @@ class MainWindow(QMainWindow):
             return
         entry = playlist.entries[index]
         logger.info("playlist play requested playlist=%s index=%s title=%s", playlist.title, index, entry.title)
+        self._remember_playback_return_widget()
         self.current_playlist = playlist
         self.current_playlist_index = index
         self.playlist_page.set_current_index(index)
@@ -733,6 +740,7 @@ class MainWindow(QMainWindow):
 
     def play_local_file(self, path: str) -> None:
         logger.info("play local file requested: %s", path)
+        self._remember_playback_return_widget()
         self.current_video = None
         self.current_quality_label = ""
         self._clear_playlist_context()
@@ -755,7 +763,7 @@ class MainWindow(QMainWindow):
             self.showNormal()
             self.top_bar_widget.show()
             self.player_page.set_fullscreen(False)
-        self._show_home()
+        self._return_after_stop()
 
     def _handle_playback_finished(self) -> None:
         if self.current_playlist is None or not self.current_playlist_auto_play:
@@ -798,6 +806,34 @@ class MainWindow(QMainWindow):
         else:
             self.load_home()
 
+    def _remember_playback_return_widget(self, widget: QWidget | None = None) -> None:
+        self._playback_return_widget = widget or self.stack.currentWidget()
+
+    def _return_after_stop(self) -> None:
+        target = self._playback_return_widget
+        self._playback_return_widget = None
+        if target is None:
+            self._show_home()
+            return
+        if target is self.home_page:
+            self.stack.setCurrentWidget(self.home_page)
+            return
+        if target is self.download_page:
+            self.stack.setCurrentWidget(self.download_page)
+            return
+        if target is self.favorite_page:
+            self.favorite_page.refresh()
+            self.stack.setCurrentWidget(self.favorite_page)
+            return
+        if target is self.history_page:
+            self.history_page.refresh()
+            self.stack.setCurrentWidget(self.history_page)
+            return
+        if target in {self.player_page, self.playlist_page, self.settings_page, self.about_page}:
+            self.stack.setCurrentWidget(target)
+            return
+        self._show_home()
+
     def _show_player_page(self) -> None:
         self.stack.setCurrentWidget(self.player_page)
 
@@ -824,6 +860,21 @@ class MainWindow(QMainWindow):
             self.top_bar_widget.hide()
             self.showFullScreen()
             self.player_page.set_fullscreen(True)
+
+    def _toggle_topmost(self) -> None:
+        self._set_topmost(not self._is_topmost)
+
+    def _set_topmost(self, enabled: bool) -> None:
+        self._is_topmost = bool(enabled)
+        was_fullscreen = self.isFullScreen()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, self._is_topmost)
+        if was_fullscreen:
+            self.showFullScreen()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        self.top_bar_widget.set_topmost_state(self._is_topmost)
 
     def _check_updates(self) -> None:
         logger.info("manual update check requested")
@@ -1074,6 +1125,7 @@ class MainWindow(QMainWindow):
         try:
             logger.info("main window closing")
             self.config.save()
+            self.download_manager.flush()
             self.mpv.shutdown()
         finally:
             super().closeEvent(event)

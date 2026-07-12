@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSize, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QPixmap
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSize, QTimer, Qt, Signal
+from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
+from ui.thumbnail_cache import ThumbnailCache
 
 
 ITEM_HEIGHT = 92
@@ -27,11 +27,19 @@ PANEL_WIDTH = 430
 
 
 class PlaylistItemWidget(QFrame):
-    def __init__(self, entry: PlaylistEntry, index: int, network: QNetworkAccessManager, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        entry: PlaylistEntry,
+        index: int,
+        network: QNetworkAccessManager,
+        thumbnail_cache: ThumbnailCache,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.index = index
         self._network = network
+        self._thumbnail_cache = thumbnail_cache
         self.setObjectName("PlaylistOverlayItem")
         self.setFixedHeight(ITEM_HEIGHT)
 
@@ -102,27 +110,14 @@ class PlaylistItemWidget(QFrame):
         self.title_label.setText(elide_two_lines(self.title_label, self.entry.title, width))
 
     def _load_thumbnail(self) -> None:
-        if not self.entry.thumbnail:
-            self.thumbnail_label.setText("无封面")
-            return
-        reply = self._network.get(QNetworkRequest(QUrl(self.entry.thumbnail)))
-        reply.finished.connect(lambda: self._thumbnail_finished(reply))
-
-    @Slot()
-    def _thumbnail_finished(self, reply: QNetworkReply) -> None:
-        data = reply.readAll()
-        pixmap = QPixmap()
-        if pixmap.loadFromData(data):
-            self.thumbnail_label.setPixmap(
-                pixmap.scaled(
-                    self.thumbnail_label.size(),
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        else:
-            self.thumbnail_label.setText("封面失败")
-        reply.deleteLater()
+        self._thumbnail_cache.load(
+            self._network,
+            self.entry.thumbnail,
+            self.thumbnail_label.size(),
+            self.thumbnail_label,
+            empty_text="无封面",
+            error_text="封面失败",
+        )
 
 
 class PlaylistOverlay(QFrame):
@@ -144,6 +139,7 @@ class PlaylistOverlay(QFrame):
         self._saved_playlists: list[SavedPlaylist] = []
         self._open = False
         self._network = QNetworkAccessManager(self)
+        self._thumbnail_cache = ThumbnailCache(self)
 
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -245,7 +241,7 @@ class PlaylistOverlay(QFrame):
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setSizeHint(self._item_size_hint())
             self.list_widget.addItem(item)
-            widget = PlaylistItemWidget(entry, index, self._network, self.list_widget)
+            widget = PlaylistItemWidget(entry, index, self._network, self._thumbnail_cache, self.list_widget)
             self.list_widget.setItemWidget(item, widget)
         self.set_current_index(current_index)
         self._sync_selection_visuals()
