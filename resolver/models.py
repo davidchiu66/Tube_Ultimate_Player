@@ -106,6 +106,8 @@ class VideoInfo:
     description: str = ""
     uploader: str = ""
     channel_id: str = ""
+    creator_id: str = ""
+    creator_url: str = ""
     duration: int = 0
     upload_date: str = ""
     webpage_url: str = ""

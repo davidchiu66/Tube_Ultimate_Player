@@ -110,6 +110,10 @@ class SettingsPage(QWidget):
         self.max_downloads_spin.setRange(1, 10)
         self.max_downloads_spin.setValue(1)
 
+        self.dlna_media_server_port_spin = QSpinBox()
+        self.dlna_media_server_port_spin.setRange(1, 65535)
+        self.dlna_media_server_port_spin.setValue(8899)
+
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(12)
@@ -127,6 +131,7 @@ class SettingsPage(QWidget):
         form.addRow("视频保存路径", download_dir_row)
         form.addRow("同时下载视频数", self.max_downloads_spin)
         form.addRow("FFmpeg 目录", ffmpeg_dir_row)
+        form.addRow("DLNA 媒体服务端口", self.dlna_media_server_port_spin)
 
         self.save_button = QPushButton("保存设置")
         self.reload_button = QPushButton("重新读取")
@@ -171,6 +176,7 @@ class SettingsPage(QWidget):
         )
         self.ffmpeg_dir_edit.setText(str(self.config.get("download.ffmpeg_dir", "") or ""))
         self.max_downloads_spin.setValue(self.config.download_max_concurrent())
+        self.dlna_media_server_port_spin.setValue(self.config.dlna_media_server_port())
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
 
@@ -192,6 +198,7 @@ class SettingsPage(QWidget):
         self.config.set("download.save_dir", self.download_dir_edit.text().strip() or self.config.download_dir())
         self.config.set("download.ffmpeg_dir", self.ffmpeg_dir_edit.text().strip())
         self.config.set("download.max_concurrent", self.max_downloads_spin.value())
+        self.config.set("dlna.media_server_port", self.dlna_media_server_port_spin.value())
         self.config.save()
         self.config.download_dir()
         self.refresh_active_proxy()

@@ -5,7 +5,9 @@ from pathlib import Path
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -23,6 +25,7 @@ from download.models import (
     STATUS_QUEUED,
     DownloadTask,
 )
+from resolver.source_utils import source_site_label
 
 
 STATUS_TEXT = {
@@ -44,14 +47,19 @@ class DownloadPage(QWidget):
         super().__init__()
         self._rows: dict[str, int] = {}
         self._tasks: dict[str, DownloadTask] = {}
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索标题、来源或视频 ID")
+        self.search_edit.setClearButtonEnabled(True)
 
         title = QLabel("\u4e0b\u8f7d\u5217\u8868")
         title.setObjectName("PageTitle")
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
+        self.table.setObjectName("LibraryTable")
         self.table.setHorizontalHeaderLabels(
             [
                 "\u6807\u9898",
+                "来源",
                 "\u6e05\u6670\u5ea6",
                 "\u72b6\u6001",
                 "\u8fdb\u5ea6",
@@ -62,19 +70,31 @@ class DownloadPage(QWidget):
             ]
         )
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self._double_clicked)
-        self.table.setColumnWidth(0, 320)
-        self.table.setColumnWidth(3, 150)
-        self.table.setColumnWidth(7, 280)
+        self.table.setColumnWidth(1, 90)
+        self.table.setColumnWidth(2, 90)
+        self.table.setColumnWidth(4, 150)
+        self.table.setColumnWidth(8, 280)
         self.table.verticalHeader().setDefaultSectionSize(40)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(self.search_edit, 1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         layout.addWidget(title)
+        layout.addLayout(search_row)
         layout.addWidget(self.table, 1)
+
+        self.search_edit.textChanged.connect(self._apply_filter)
 
     def add_task(self, task: DownloadTask) -> None:
         if task.task_id in self._rows:
@@ -89,7 +109,8 @@ class DownloadPage(QWidget):
         progress = QProgressBar()
         progress.setRange(0, 100)
         progress.setTextVisible(True)
-        self.table.setCellWidget(row, 3, progress)
+        self.table.setCellWidget(row, 4, progress)
+        progress.setObjectName("LibraryProgress")
 
         actions = QWidget()
         action_layout = QHBoxLayout(actions)
@@ -102,6 +123,7 @@ class DownloadPage(QWidget):
         for button in (pause_button, start_button, delete_button, play_button):
             button.setMinimumWidth(56)
             button.setFixedHeight(28)
+            button.setObjectName("LibraryActionButton")
         pause_button.clicked.connect(lambda _=False, task_id=task.task_id: self.pause_requested.emit(task_id))
         start_button.clicked.connect(lambda _=False, task_id=task.task_id: self.start_requested.emit(task_id))
         delete_button.clicked.connect(lambda _=False, task_id=task.task_id: self.delete_requested.emit(task_id))
@@ -110,7 +132,7 @@ class DownloadPage(QWidget):
         action_layout.addWidget(start_button)
         action_layout.addWidget(delete_button)
         action_layout.addWidget(play_button)
-        self.table.setCellWidget(row, 7, actions)
+        self.table.setCellWidget(row, 8, actions)
 
         self.update_task(task)
 
@@ -123,6 +145,7 @@ class DownloadPage(QWidget):
         display_path = self._local_file_path(task) if task.status == STATUS_COMPLETED else ""
         values = [
             task.title,
+            source_site_label(task.source_site, task.url),
             task.quality_label,
             STATUS_TEXT.get(task.status, task.status),
             "",
@@ -131,21 +154,21 @@ class DownloadPage(QWidget):
             display_path or task.output_path or task.save_dir,
         ]
         for col, value in enumerate(values):
-            if col == 3:
+            if col == 4:
                 continue
             item = self.table.item(row, col)
             if item is None:
                 item = QTableWidgetItem()
                 self.table.setItem(row, col, item)
             item.setText(str(value or ""))
-            if col in (1, 2, 4, 5):
+            if col in (1, 2, 3, 5, 6):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        progress = self.table.cellWidget(row, 3)
+        progress = self.table.cellWidget(row, 4)
         if isinstance(progress, QProgressBar):
             progress.setValue(int(max(0, min(100, task.progress))))
 
-        actions = self.table.cellWidget(row, 7)
+        actions = self.table.cellWidget(row, 8)
         if actions:
             buttons = actions.findChildren(QPushButton)
             if len(buttons) >= 4:
@@ -154,6 +177,7 @@ class DownloadPage(QWidget):
                 start_button.setEnabled(task.status in (STATUS_PAUSED, STATUS_FAILED))
                 delete_button.setEnabled(True)
                 play_button.setEnabled(task.status == STATUS_COMPLETED and bool(self._local_file_path(task)))
+        self._apply_filter()
 
     def remove_task(self, task_id: str) -> None:
         row = self._rows.pop(task_id, None)
@@ -164,6 +188,23 @@ class DownloadPage(QWidget):
         for item_id, item_row in list(self._rows.items()):
             if item_row > row:
                 self._rows[item_id] = item_row - 1
+
+    def _apply_filter(self, _text: str = "") -> None:
+        query = self.search_edit.text().strip().casefold()
+        for task_id, row in self._rows.items():
+            task = self._tasks.get(task_id)
+            if task is None:
+                self.table.setRowHidden(row, True)
+                continue
+            haystack = " ".join(
+                (
+                    task.title,
+                    source_site_label(task.source_site, task.url),
+                    task.url,
+                    task.video_id,
+                )
+            ).casefold()
+            self.table.setRowHidden(row, bool(query and query not in haystack))
 
     def _double_clicked(self, row: int, _column: int) -> None:
         task_id = self._task_id_for_row(row)

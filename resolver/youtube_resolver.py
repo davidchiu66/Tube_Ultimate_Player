@@ -238,6 +238,65 @@ class YoutubeResolver:
         )
         return paged, has_next
 
+    def fetch_creator_videos(
+        self,
+        video: VideoInfo,
+        limit: int = 50,
+    ) -> tuple[str, list[PlaylistEntry]]:
+        creator_url = _creator_videos_url(video)
+        if not creator_url:
+            raise RuntimeError("当前视频缺少可用的制作者主页")
+
+        limit = max(1, min(50, int(limit)))
+        command = self._build_home_command(creator_url, limit)
+        result = self._run_ytdlp(command, creator_url, "creator-videos")
+        if result.returncode != 0:
+            result = self._retry_with_alternate_browsers(
+                creator_url,
+                "creator-videos",
+                lambda browser: self._build_home_command(
+                    creator_url,
+                    limit,
+                    override_cookie_browser=browser,
+                ),
+                result,
+            )
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            cookie_file = self.config.cookie_file()
+            if cookie_file:
+                command = self._build_home_command(creator_url, limit, force_cookie_file=True)
+                result = self._run_ytdlp(command, creator_url, "creator-videos-fallback-cookie-file")
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(self._format_error(detail))
+
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"yt-dlp 返回的作者视频 JSON 无法解析: {exc}") from exc
+
+        playlist_id = f"{video.source_site}:creator:{video.creator_id or video.channel_id}"
+        entries: list[PlaylistEntry] = []
+        for index, item in enumerate(info.get("entries") or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            entry = self._parse_playlist_entry(
+                item,
+                playlist_id,
+                index,
+                source_site=video.source_site,
+            )
+            if entry is not None:
+                entries.append(entry)
+        ytdlp_logger.info(
+            "creator videos fetched site=%s creator=%s count=%s",
+            video.source_site,
+            video.creator_id or video.channel_id,
+            len(entries),
+        )
+        return creator_url, entries
+
     def _run_ytdlp(
         self,
         command: list[str],
@@ -446,6 +505,18 @@ class YoutubeResolver:
 
         webpage_url = str(info.get("webpage_url") or "")
         source_site = _detect_source_site(webpage_url)
+        if source_site == "bilibili":
+            creator_id = str(info.get("uploader_id") or info.get("channel_id") or "").strip()
+            creator_url = str(info.get("uploader_url") or info.get("channel_url") or "").strip()
+            if not creator_id and isinstance(info.get("owner"), dict):
+                creator_id = str((info.get("owner") or {}).get("mid") or "").strip()
+            if creator_id and not creator_url:
+                creator_url = f"https://space.bilibili.com/{creator_id}"
+        else:
+            creator_id = str(info.get("channel_id") or info.get("uploader_id") or "").strip()
+            creator_url = str(info.get("channel_url") or info.get("uploader_url") or "").strip()
+            if creator_id and not creator_url:
+                creator_url = f"https://www.youtube.com/channel/{creator_id}"
         video_id = str(info.get("id") or "")
         if source_site == "bilibili":
             video_id = _bilibili_video_key(
@@ -460,7 +531,9 @@ class YoutubeResolver:
             source_site=source_site,
             description=str(info.get("description") or ""),
             uploader=str(info.get("uploader") or ""),
-            channel_id=str(info.get("channel_id") or ""),
+            channel_id=str(info.get("channel_id") or info.get("uploader_id") or ""),
+            creator_id=creator_id,
+            creator_url=creator_url,
             duration=int(info.get("duration") or 0),
             upload_date=str(info.get("upload_date") or ""),
             webpage_url=webpage_url,
@@ -823,6 +896,26 @@ def _is_youtube_host(host: str) -> bool:
 
 def _is_bilibili_host(host: str) -> bool:
     return host.endswith("bilibili.com") or host.endswith("b23.tv")
+
+
+def _creator_videos_url(video: VideoInfo) -> str:
+    raw = str(video.creator_url or "").strip().rstrip("/")
+    if video.source_site == "bilibili":
+        if not raw and video.creator_id:
+            raw = f"https://space.bilibili.com/{video.creator_id}"
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        raw = parsed._replace(query="", fragment="").geturl().rstrip("/")
+        return raw if raw.endswith("/video") else f"{raw}/video"
+
+    if not raw and (video.creator_id or video.channel_id):
+        raw = f"https://www.youtube.com/channel/{video.creator_id or video.channel_id}"
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    raw = parsed._replace(query="", fragment="").geturl().rstrip("/")
+    return raw if raw.endswith("/videos") else f"{raw}/videos"
 
 
 def _detect_source_site(url: str) -> str:

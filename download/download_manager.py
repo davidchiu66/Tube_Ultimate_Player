@@ -20,6 +20,7 @@ from download.models import (
     DownloadTask,
 )
 from resolver.models import VideoInfo
+from resolver.source_utils import detect_source_site
 from services.config_service import ConfigService
 
 
@@ -350,6 +351,7 @@ class DownloadManager(QObject):
             task = DownloadTask(
                 url=url,
                 video_id=video_id,
+                source_site=detect_source_site(url),
                 title=title,
                 quality_label="Local",
                 save_dir=str(save_dir),

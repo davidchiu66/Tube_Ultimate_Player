@@ -245,6 +245,60 @@ QDialog {
     border-radius: 8px;
 }
 
+QTableWidget#LibraryTable {
+    background: #090909;
+    color: #f5f5f5;
+    border: 1px solid #c9a227;
+    gridline-color: #5b4610;
+    alternate-background-color: #090909;
+}
+
+QTableWidget#LibraryTable::item {
+    background: #090909;
+    color: #f5f5f5;
+    border-bottom: 1px solid #3f310d;
+    padding: 6px;
+}
+
+QTableWidget#LibraryTable::item:selected {
+    background: #2b2108;
+    color: #fff3c4;
+}
+
+QTableWidget#LibraryTable QHeaderView::section {
+    background: #17130a;
+    color: #f5d66f;
+    border: 1px solid #8f711a;
+    padding: 6px;
+}
+
+QPushButton#LibraryActionButton {
+    background: #0d0d0d;
+    color: #f5f5f5;
+    border: 1px solid #c9a227;
+    border-radius: 5px;
+    padding: 4px 10px;
+}
+
+QPushButton#LibraryActionButton:hover {
+    background: #2b2108;
+    color: #fff3c4;
+    border-color: #f0c94b;
+}
+
+QProgressBar#LibraryProgress {
+    background: #0d0d0d;
+    color: #f5f5f5;
+    border: 1px solid #c9a227;
+    border-radius: 5px;
+    text-align: center;
+}
+
+QProgressBar#LibraryProgress::chunk {
+    background: #c9a227;
+    border-radius: 4px;
+}
+
 #PlaylistOverlay {
     background: rgba(18, 18, 18, 242);
     border: 1px solid #2b2b2b;

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt
+from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QInputDialog,
@@ -21,6 +22,9 @@ from database.favorite_repository import FavoriteRepository
 from database.history_repository import HistoryRepository
 from database.playlist_repository import PlaylistRepository
 from database.sqlite_manager import SQLiteManager
+from dlna.controller import DlnaController, build_didl_lite
+from dlna.media_server import DlnaMediaServer, DlnaMediaSource, mime_type_for_extension, mime_type_for_file
+from dlna.models import DlnaDevice
 from download.download_manager import DownloadManager
 from player.mpv_player import MpvPlayer
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, SavedPlaylist, VideoInfo, VideoQuality
@@ -30,6 +34,7 @@ from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallServ
 from services.runtime_install_service import RuntimeInstallService
 from services.update_service import REPO_URL, UpdateCheckResult, UpdateService
 from ui.about_page import AboutPage
+from ui.cast_dialog import DlnaCastDialog
 from ui.download_page import DownloadPage
 from ui.favorite_page import FavoritePage
 from ui.history_page import HistoryPage
@@ -41,6 +46,8 @@ from ui.toolbar import PlayerToolbar
 from ui.toast import Toast
 from ui.url_dialog import UrlPlayDialog
 from workers.archive_extract_worker import ArchiveExtractWorker
+from workers.creator_videos_worker import CreatorVideosWorker
+from workers.dlna_worker import DlnaActionWorker
 from workers.home_worker import HomeWorker
 from workers.playlist_worker import PlaylistWorker
 from workers.resolver_worker import ResolverWorker
@@ -69,10 +76,13 @@ class MainWindow(QMainWindow):
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
+        self.dlna_controller = DlnaController()
+        self.dlna_media_server = DlnaMediaServer()
         self.thread_pool = QThreadPool.globalInstance()
         self.download_manager = DownloadManager(self.config, self.thread_pool)
 
         self.current_video: VideoInfo | None = None
+        self.current_local_media_path = ""
         self.current_quality_label = ""
         self.current_playlist: PlaylistInfo | None = None
         self.current_playlist_index = -1
@@ -80,6 +90,32 @@ class MainWindow(QMainWindow):
         self.current_playlist_auto_play = True
         self._pending_playlist_video_id = ""
         self._playback_return_widget: QWidget | None = None
+        self._playback_finished = False
+        self._was_maximized_before_fullscreen: bool | None = None
+        self._creator_playlist_generation = 0
+        self._creator_playlist_workers: dict[tuple[int, str], CreatorVideosWorker] = {}
+        self._dlna_device: DlnaDevice | None = None
+        self._dlna_device_cache: dict[str, DlnaDevice] = {}
+        self._dlna_remote_paused = False
+        self._dlna_cast_pending = False
+        self._dlna_pending_cast_request_id = 0
+        self._dlna_action_sequence = 0
+        self._dlna_action_workers: dict[int, tuple[DlnaActionWorker, DlnaDevice, str]] = {}
+        self._dlna_stop_notify_requests: set[int] = set()
+        self._dlna_position_request_id = 0
+        self._dlna_last_position = 0.0
+        self._dlna_position_offset = 0.0
+        self._dlna_pending_position_offset = 0.0
+        self._dlna_seek_supported = True
+        self._dlna_pending_seek_supported = True
+        self._dlna_pending_volume = int(self.config.get("player.volume", 80))
+        self._dlna_volume_timer = QTimer(self)
+        self._dlna_volume_timer.setSingleShot(True)
+        self._dlna_volume_timer.setInterval(180)
+        self._dlna_volume_timer.timeout.connect(self._flush_dlna_volume)
+        self._dlna_position_timer = QTimer(self)
+        self._dlna_position_timer.setInterval(1500)
+        self._dlna_position_timer.timeout.connect(self._poll_dlna_position)
         self._home_cache: list[HomeVideo] = []
         self._home_page = 1
         self._home_has_next = False
@@ -180,13 +216,14 @@ class MainWindow(QMainWindow):
         self.about_page.check_update_requested.connect(self._check_updates)
         self.about_page.upgrade_requested.connect(self._start_upgrade_download)
 
-        self.player_page.play_pause_requested.connect(self.mpv.toggle_pause)
+        self.player_page.play_pause_requested.connect(self._toggle_play_pause)
         self.player_page.stop_requested.connect(self._stop_playback)
-        self.player_page.seek_requested.connect(self.mpv.seek)
+        self.player_page.seek_requested.connect(self._seek_playback)
         self.player_page.volume_changed.connect(self._set_volume)
         self.player_page.speed_changed.connect(self._set_speed)
         self.player_page.quality_changed.connect(self._change_quality)
         self.player_page.subtitle_changed.connect(self._change_subtitle)
+        self.player_page.cast_requested.connect(self._show_cast_dialog)
         self.player_page.fullscreen_requested.connect(self._toggle_fullscreen)
         self.player_page.download_requested.connect(self._download_current_video)
         self.player_page.favorite_requested.connect(self._favorite_current_video)
@@ -208,7 +245,7 @@ class MainWindow(QMainWindow):
 
         self.mpv.position_changed.connect(self.player_page.update_position)
         self.mpv.duration_changed.connect(self.player_page.update_duration)
-        self.mpv.pause_changed.connect(self.player_page.set_paused)
+        self.mpv.pause_changed.connect(self._handle_mpv_pause_changed)
         self.mpv.playback_finished.connect(self._handle_playback_finished)
 
     def _apply_window_icon(self) -> None:
@@ -268,6 +305,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "URL 无效", "请输入完整的 http:// 或 https:// 地址")
             return
 
+        if self._dlna_device is not None or self._dlna_cast_pending:
+            self._stop_dlna_cast(resume_local=False, notify=False)
+
         kind = self.resolver.detect_url_kind(target)
         if kind in ("playlist", "video_with_playlist"):
             self._load_playlist(target, auto_play_current=(kind == "video_with_playlist"))
@@ -275,6 +315,7 @@ class MainWindow(QMainWindow):
 
         self._remember_playback_return_widget()
         self._clear_playlist_context()
+        self.current_local_media_path = ""
         logger.info("play url requested: %s", target)
         self.stack.setCurrentWidget(self.player_page)
         self.player_page.set_loading(True, "正在解析视频地址，请稍候...")
@@ -286,6 +327,8 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def _load_playlist(self, url: str, auto_play_current: bool = False) -> None:
+        self._invalidate_creator_playlist_request()
+        self._remember_playback_return_widget()
         logger.info("playlist load requested url=%s auto_play_current=%s", url, auto_play_current)
         self._pending_playlist_video_id = ""
         if auto_play_current:
@@ -422,7 +465,10 @@ class MainWindow(QMainWindow):
         current_index: int = -1,
         playlist_key: str = "",
         auto_play_next: bool = True,
+        invalidate_creator_request: bool = True,
     ) -> None:
+        if invalidate_creator_request:
+            self._invalidate_creator_playlist_request()
         self.current_playlist = playlist
         self.current_playlist_index = current_index
         self.current_playlist_key = playlist_key
@@ -432,6 +478,7 @@ class MainWindow(QMainWindow):
         self._refresh_saved_playlists(current_key=playlist_key)
 
     def _clear_playlist_context(self) -> None:
+        self._invalidate_creator_playlist_request()
         self.current_playlist = None
         self.current_playlist_index = -1
         self.current_playlist_key = ""
@@ -455,6 +502,8 @@ class MainWindow(QMainWindow):
     def _play_playlist_entry(self, playlist: PlaylistInfo, index: int) -> None:
         if not (0 <= index < len(playlist.entries)):
             return
+        if self._dlna_device is not None or self._dlna_cast_pending:
+            self._stop_dlna_cast(resume_local=False, notify=False)
         entry = playlist.entries[index]
         logger.info("playlist play requested playlist=%s index=%s title=%s", playlist.title, index, entry.title)
         self._remember_playback_return_widget()
@@ -479,6 +528,7 @@ class MainWindow(QMainWindow):
                 VideoInfo(
                     video_id=entry.video_id,
                     title=entry.title,
+                    source_site=entry.source_site,
                     uploader=entry.uploader,
                     duration=entry.duration,
                     webpage_url=entry.webpage_url,
@@ -588,6 +638,7 @@ class MainWindow(QMainWindow):
 
     def _resolved(self, video: VideoInfo) -> None:
         self.current_video = video
+        self.current_local_media_path = ""
         quality = self._select_default_quality(video)
         self.current_quality_label = quality.label
         logger.info(
@@ -610,11 +661,15 @@ class MainWindow(QMainWindow):
 
         try:
             self.mpv.load(quality.video_url, quality.audio_url, headers=video.http_headers)
+            self._set_playback_finished(False)
             self.player_page.set_loading(False)
             self.player_page.set_playback_available(True)
+            self.player_page.set_cast_available(True)
             self.player_page.set_paused(False)
             self.history.record_play(video)
             self.history_page.refresh()
+            if self.current_playlist is None:
+                self._schedule_creator_playlist(video)
         except Exception as exc:
             logger.exception("playback load failed")
             QMessageBox.critical(self, "播放失败", str(exc))
@@ -644,7 +699,7 @@ class MainWindow(QMainWindow):
         if not quality:
             return
 
-        position = self.mpv.position()
+        position = 0.0 if self._playback_finished else self.mpv.position()
         try:
             self.mpv.load(
                 quality.video_url,
@@ -653,6 +708,7 @@ class MainWindow(QMainWindow):
                 headers=self.current_video.http_headers,
             )
             self.current_quality_label = label
+            self._set_playback_finished(False)
         except Exception as exc:
             logger.exception("quality switch failed label=%s", label)
             QMessageBox.critical(self, "切换清晰度失败", str(exc))
@@ -674,6 +730,9 @@ class MainWindow(QMainWindow):
     def _set_volume(self, volume: int) -> None:
         self.config.set("player.volume", volume)
         self.mpv.set_volume(volume)
+        if self._dlna_device is not None:
+            self._dlna_pending_volume = volume
+            self._dlna_volume_timer.start()
 
     def _set_speed(self, speed: float) -> None:
         self.config.set("player.speed", speed)
@@ -693,6 +752,7 @@ class MainWindow(QMainWindow):
             VideoInfo(
                 video_id=video.video_id,
                 title=video.title,
+                source_site=video.source_site,
                 uploader=video.uploader,
                 duration=video.duration,
                 webpage_url=video.webpage_url,
@@ -740,15 +800,20 @@ class MainWindow(QMainWindow):
 
     def play_local_file(self, path: str) -> None:
         logger.info("play local file requested: %s", path)
+        if self._dlna_device is not None or self._dlna_cast_pending:
+            self._stop_dlna_cast(resume_local=False, notify=False)
         self._remember_playback_return_widget()
         self.current_video = None
+        self.current_local_media_path = str(Path(path).resolve())
         self.current_quality_label = ""
         self._clear_playlist_context()
         self.stack.setCurrentWidget(self.player_page)
         try:
             self.mpv.load(path)
+            self._set_playback_finished(False)
             self.player_page.update_local_file_info(path)
             self.player_page.set_playback_available(True)
+            self.player_page.set_cast_available(True)
             self.player_page.set_paused(False)
             self.player_page.set_download_available(False)
         except Exception as exc:
@@ -757,25 +822,440 @@ class MainWindow(QMainWindow):
 
     def _stop_playback(self) -> None:
         logger.info("stop playback requested")
+        if self._dlna_device is not None or self._dlna_cast_pending:
+            self._stop_dlna_cast(resume_local=False, notify=False)
+        self._invalidate_creator_playlist_request()
         self.mpv.stop()
+        self._set_playback_finished(False)
         self.player_page.set_playback_available(False)
         if self.isFullScreen():
-            self.showNormal()
-            self.top_bar_widget.show()
-            self.player_page.set_fullscreen(False)
+            self._leave_player_fullscreen()
         self._return_after_stop()
 
     def _handle_playback_finished(self) -> None:
-        if self.current_playlist is None or not self.current_playlist_auto_play:
+        if self.current_playlist is not None and self.current_playlist_auto_play:
+            next_index = self.current_playlist_index + 1
+            if next_index < len(self.current_playlist.entries):
+                logger.info("playlist autoplay next index=%s", next_index)
+                self._play_playlist_entry(self.current_playlist, next_index)
+                return
+        logger.info("playback reached end; waiting for replay")
+        self._set_playback_finished(True)
+
+    def _toggle_play_pause(self) -> None:
+        try:
+            if self._dlna_device is not None:
+                action = "play" if self._dlna_remote_paused else "pause"
+                self._start_dlna_action(self._dlna_device, action)
+                return
+            if self._playback_finished:
+                logger.info("restart playback requested")
+                self.mpv.restart()
+                self._set_playback_finished(False)
+                self.player_page.update_position(0.0)
+                self.player_page.set_paused(False)
+                return
+            self.mpv.toggle_pause()
+        except Exception as exc:
+            logger.exception("play/pause command failed")
+            QMessageBox.warning(self, "播放控制失败", str(exc))
+
+    def _handle_mpv_pause_changed(self, paused: bool) -> None:
+        if self._dlna_device is not None:
+            self.player_page.set_paused(self._dlna_remote_paused)
             return
-        next_index = self.current_playlist_index + 1
-        if next_index >= len(self.current_playlist.entries):
+        self.player_page.set_paused(paused)
+
+    def _seek_playback(self, seconds: float) -> None:
+        if self._dlna_device is not None:
+            if not self._dlna_seek_supported:
+                self.toast.show_message("当前实时封装投屏暂不支持拖动进度")
+                return
+            self._start_dlna_action(self._dlna_device, "seek", seconds)
             return
-        logger.info("playlist autoplay next index=%s", next_index)
-        self._play_playlist_entry(self.current_playlist, next_index)
+        self.mpv.seek(seconds)
+
+    def _set_playback_finished(self, finished: bool) -> None:
+        self._playback_finished = finished
+        self.player_page.set_playback_finished(finished)
+
+    def _show_cast_dialog(self) -> None:
+        if self._dlna_device is not None:
+            self._stop_dlna_cast(resume_local=True, notify=True)
+            return
+        if self._dlna_cast_pending:
+            self.toast.show_message("正在连接投屏设备，请稍候")
+            return
+        if self.current_video is None and self.current_local_media_path:
+            self._show_local_cast_dialog()
+            return
+        video = self.current_video
+        if video is None:
+            self.toast.show_message("当前媒体暂不支持投屏")
+            return
+        quality = video.qualities.get(self.current_quality_label)
+        if quality is None:
+            self.toast.show_message("当前清晰度没有可投屏媒体地址")
+            return
+        ffmpeg_path = ""
+        if quality.audio_url:
+            ffmpeg_dir = self.ffmpeg_install_service.effective_ffmpeg_dir()
+            if ffmpeg_dir:
+                executable = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
+                candidate = Path(ffmpeg_dir) / executable
+                if candidate.is_file():
+                    ffmpeg_path = str(candidate)
+            if not ffmpeg_path:
+                self.toast.show_message("当前视频为分离音视频流，投屏前需要在设置中配置 FFmpeg")
+                return
+
+        device = self._select_dlna_device(video.title)
+        if device is None:
+            return
+
+        position = self.mpv.position()
+        _, proxy = self.config.effective_proxy()
+        source = DlnaMediaSource(
+            title=video.title,
+            video_url=quality.video_url,
+            audio_url=quality.audio_url,
+            headers=dict(video.http_headers),
+            mime_type=mime_type_for_extension(quality.ext),
+            video_codec=quality.vcodec,
+            audio_codec=quality.acodec,
+            ffmpeg_path=ffmpeg_path,
+            proxy=proxy,
+            start_position=position if quality.audio_url else 0.0,
+        )
+        try:
+            media_url = self.dlna_media_server.register_source(
+                source,
+                device.host,
+                preferred_port=self.config.dlna_media_server_port(),
+            )
+        except Exception as exc:
+            logger.exception("DLNA media server preparation failed")
+            self.toast.show_message(f"投屏媒体服务启动失败：{exc}")
+            return
+        metadata = build_didl_lite(video.title, media_url, source.output_mime_type)
+        remote_seek = 0.0 if source.requires_mux else position
+        self._dlna_cast_pending = True
+        self._dlna_pending_cast_request_id = self._dlna_action_sequence + 1
+        self._dlna_pending_position_offset = position if source.requires_mux else 0.0
+        self._dlna_pending_seek_supported = not source.requires_mux
+        request_id = self._start_dlna_action(device, "cast", media_url, metadata, remote_seek, video_id=video.video_id)
+        if request_id != self._dlna_pending_cast_request_id:
+            logger.warning("DLNA cast request sequence changed expected=%s actual=%s", self._dlna_pending_cast_request_id, request_id)
+            self._dlna_pending_cast_request_id = request_id
+        self.toast.show_message(f"正在投屏到 {device.friendly_name}...")
+
+    def _show_local_cast_dialog(self) -> None:
+        local_path = Path(self.current_local_media_path)
+        if not local_path.is_file():
+            self.toast.show_message("当前本地媒体文件不可用，无法投屏")
+            return
+
+        title = local_path.name
+        device = self._select_dlna_device(title)
+        if device is None:
+            return
+
+        position = self.mpv.position()
+        source = DlnaMediaSource(
+            title=title,
+            video_url="",
+            file_path=str(local_path),
+            mime_type=mime_type_for_file(local_path),
+        )
+        try:
+            media_url = self.dlna_media_server.register_source(
+                source,
+                device.host,
+                preferred_port=self.config.dlna_media_server_port(),
+            )
+        except Exception as exc:
+            logger.exception("DLNA local media server preparation failed path=%s", local_path)
+            self.toast.show_message(f"投屏媒体服务启动失败：{exc}")
+            return
+
+        metadata = build_didl_lite(title, media_url, source.output_mime_type)
+        self._dlna_cast_pending = True
+        self._dlna_pending_cast_request_id = self._dlna_action_sequence + 1
+        self._dlna_pending_position_offset = 0.0
+        self._dlna_pending_seek_supported = True
+        media_key = self._current_dlna_media_key()
+        request_id = self._start_dlna_action(device, "cast", media_url, metadata, position, video_id=media_key)
+        if request_id != self._dlna_pending_cast_request_id:
+            logger.warning(
+                "DLNA local cast request sequence changed expected=%s actual=%s",
+                self._dlna_pending_cast_request_id,
+                request_id,
+            )
+            self._dlna_pending_cast_request_id = request_id
+        self.toast.show_message(f"正在投屏到 {device.friendly_name}...")
+
+    def _select_dlna_device(self, title: str) -> DlnaDevice | None:
+        dialog = DlnaCastDialog(
+            title,
+            discovery_timeout=float(self.config.get("dlna.discovery_timeout", 3.0) or 3.0),
+            cached_devices=list(self._dlna_device_cache.values()),
+            parent=self,
+        )
+        dialog.devices_updated.connect(self._cache_dlna_devices)
+        accepted = bool(dialog.exec())
+        device = dialog.selected_device() if accepted else None
+        dialog.deleteLater()
+        return device
+
+    @staticmethod
+    def _dlna_device_cache_key(device: DlnaDevice) -> str:
+        return device.uuid or device.av_transport_url or device.location or f"{device.host}:{device.friendly_name}"
+
+    def _cache_dlna_devices(self, devices: list[DlnaDevice]) -> None:
+        self._dlna_device_cache = {
+            self._dlna_device_cache_key(device): device
+            for device in devices
+        }
+        logger.info("DLNA device cache updated count=%s", len(self._dlna_device_cache))
+
+    def _forget_cached_dlna_device(self, device: DlnaDevice) -> None:
+        self._dlna_device_cache.pop(self._dlna_device_cache_key(device), None)
+
+    def _current_dlna_media_key(self) -> str:
+        if self.current_video is not None:
+            return f"video:{self.current_video.video_id}"
+        if self.current_local_media_path:
+            return f"file:{Path(self.current_local_media_path)}"
+        return ""
+
+    def _start_dlna_action(
+        self,
+        device: DlnaDevice,
+        action: str,
+        *arguments,
+        video_id: str = "",
+    ) -> int:
+        self._dlna_action_sequence += 1
+        request_id = self._dlna_action_sequence
+        worker = DlnaActionWorker(request_id, self.dlna_controller, device, action, *arguments)
+        worker.signals.success.connect(self._dlna_action_succeeded)
+        worker.signals.error.connect(self._dlna_action_failed)
+        worker.signals.finished.connect(self._dlna_action_finished)
+        self._dlna_action_workers[request_id] = (worker, device, video_id)
+        self.thread_pool.start(worker)
+        return request_id
+
+    @Slot(int, str, object)
+    def _dlna_action_succeeded(self, request_id: int, action: str, result) -> None:
+        context = self._dlna_action_workers.get(request_id)
+        if context is None:
+            return
+        _worker, device, video_id = context
+        if action == "cast":
+            if video_id.startswith("file:"):
+                stale_media = self._current_dlna_media_key() != video_id
+            else:
+                stale_media = self.current_video is None or self.current_video.video_id != video_id
+            if request_id != self._dlna_pending_cast_request_id or stale_media:
+                logger.info("stale DLNA cast succeeded; stopping remote request=%s", request_id)
+                self._start_dlna_action(device, "stop")
+                self.dlna_media_server.stop_streams()
+                return
+            self._dlna_cast_pending = False
+            self._dlna_pending_cast_request_id = 0
+            self._dlna_device = device
+            self._dlna_remote_paused = False
+            self._dlna_last_position = self.mpv.position()
+            self._dlna_position_offset = self._dlna_pending_position_offset
+            self._dlna_seek_supported = self._dlna_pending_seek_supported
+            self.mpv.pause()
+            self.player_page.set_cast_state(
+                True,
+                seek_supported=self._dlna_seek_supported,
+                volume_supported=bool(device.rendering_control_url),
+            )
+            self.player_page.set_paused(False)
+            self._dlna_position_timer.start()
+            self._dlna_pending_volume = self.player_page.volume_slider.value()
+            self._dlna_volume_timer.start()
+            self.toast.show_message(f"已投屏到 {device.friendly_name}")
+            return
+        if action == "pause" and device is self._dlna_device:
+            self._dlna_remote_paused = True
+            self.player_page.set_paused(True)
+        elif action == "play" and device is self._dlna_device:
+            self._dlna_remote_paused = False
+            self.player_page.set_paused(False)
+        elif action == "get_position" and device is self._dlna_device and isinstance(result, tuple):
+            position, duration = result
+            position += self._dlna_position_offset
+            if duration > 0 and self._dlna_position_offset:
+                duration += self._dlna_position_offset
+            self._dlna_last_position = position
+            self.player_page.update_position(position)
+            if duration > 0:
+                self.player_page.update_duration(duration)
+        elif action == "stop" and request_id in self._dlna_stop_notify_requests:
+            self._dlna_stop_notify_requests.discard(request_id)
+            self.toast.show_message(f"已停止向 {device.friendly_name} 投屏")
+
+    @Slot(int, str, str)
+    def _dlna_action_failed(self, request_id: int, action: str, message: str) -> None:
+        context = self._dlna_action_workers.get(request_id)
+        if action == "cast" and request_id == self._dlna_pending_cast_request_id:
+            if context is not None:
+                self._forget_cached_dlna_device(context[1])
+            self._dlna_cast_pending = False
+            self._dlna_pending_cast_request_id = 0
+            self._dlna_pending_position_offset = 0.0
+            self.dlna_media_server.stop_streams()
+        if action == "get_position":
+            logger.warning("DLNA position poll failed: %s", message)
+            return
+        device_name = context[1].friendly_name if context else "DLNA 设备"
+        self.toast.show_message(f"{device_name} 投屏控制失败：{message}")
+
+    @Slot(int)
+    def _dlna_action_finished(self, request_id: int) -> None:
+        self._dlna_action_workers.pop(request_id, None)
+        self._dlna_stop_notify_requests.discard(request_id)
+        if request_id == self._dlna_position_request_id:
+            self._dlna_position_request_id = 0
+
+    def _stop_dlna_cast(self, *, resume_local: bool, notify: bool) -> None:
+        self._dlna_cast_pending = False
+        self._dlna_pending_cast_request_id = 0
+        device = self._dlna_device
+        self._dlna_device = None
+        self._dlna_position_timer.stop()
+        self._dlna_volume_timer.stop()
+        self._dlna_position_request_id = 0
+        if device is not None:
+            request_id = self._start_dlna_action(device, "stop")
+            if notify:
+                self._dlna_stop_notify_requests.add(request_id)
+        self.dlna_media_server.stop_streams()
+        self._dlna_remote_paused = False
+        self.player_page.set_cast_state(False)
+        if resume_local:
+            self.mpv.seek(self._dlna_last_position)
+            self.mpv.resume()
+            self.player_page.set_paused(False)
+        self._dlna_last_position = 0.0
+        self._dlna_position_offset = 0.0
+        self._dlna_pending_position_offset = 0.0
+        self._dlna_seek_supported = True
+        self._dlna_pending_seek_supported = True
+
+    def _poll_dlna_position(self) -> None:
+        if self._dlna_device is None or self._dlna_position_request_id:
+            return
+        self._dlna_position_request_id = self._start_dlna_action(self._dlna_device, "get_position")
+
+    def _flush_dlna_volume(self) -> None:
+        if self._dlna_device is not None and self._dlna_device.rendering_control_url:
+            self._start_dlna_action(self._dlna_device, "set_volume", self._dlna_pending_volume)
+
+    def _schedule_creator_playlist(self, video: VideoInfo) -> None:
+        if video.source_site not in {"youtube", "bilibili"}:
+            return
+        if not (video.creator_id or video.channel_id or video.creator_url):
+            logger.info("creator playlist skipped; video has no creator identity id=%s", video.video_id)
+            self.toast.show_message("无法识别视频制作者，未加载作者视频列表")
+            return
+        self._creator_playlist_generation += 1
+        generation = self._creator_playlist_generation
+        video_id = video.video_id
+        logger.info(
+            "creator playlist scheduled generation=%s site=%s video=%s creator=%s",
+            generation,
+            video.source_site,
+            video_id,
+            video.creator_id or video.channel_id,
+        )
+        QTimer.singleShot(
+            1500,
+            lambda: self._start_creator_playlist_worker(generation, video_id, video),
+        )
+
+    def _start_creator_playlist_worker(self, generation: int, video_id: str, video: VideoInfo) -> None:
+        if not self._is_creator_playlist_request_current(generation, video_id):
+            logger.debug("creator playlist start ignored as stale generation=%s video=%s", generation, video_id)
+            return
+        worker = CreatorVideosWorker(self.resolver, video, generation=generation, limit=50)
+        worker.signals.success.connect(self._creator_playlist_loaded)
+        worker.signals.error.connect(self._creator_playlist_failed)
+        worker.signals.finished.connect(self._creator_playlist_worker_finished)
+        self._creator_playlist_workers[(generation, video_id)] = worker
+        self.thread_pool.start(worker, -1)
+
+    @Slot(int, str, object)
+    def _creator_playlist_loaded(
+        self,
+        generation: int,
+        video_id: str,
+        playlist: PlaylistInfo | None,
+    ) -> None:
+        logger.info(
+            "creator playlist result received generation=%s video=%s count=%s",
+            generation,
+            video_id,
+            len(playlist.entries) if playlist else 0,
+        )
+        try:
+            if not self._is_creator_playlist_request_current(generation, video_id):
+                logger.info("creator playlist result ignored as stale generation=%s video=%s", generation, video_id)
+                return
+            if playlist is None or len(playlist.entries) <= 1:
+                logger.info("creator playlist has no additional entries generation=%s video=%s", generation, video_id)
+                self.toast.show_message("未找到该制作者的其他可用视频")
+                return
+            current_index = self._find_playlist_index(playlist, video_id)
+            self._activate_playlist(
+                playlist,
+                current_index=max(0, current_index),
+                playlist_key="",
+                auto_play_next=self.current_playlist_auto_play,
+                invalidate_creator_request=False,
+            )
+            logger.info(
+                "creator playlist applied generation=%s video=%s count=%s",
+                generation,
+                video_id,
+                len(playlist.entries),
+            )
+            self.toast.show_message(f"已加载制作者视频列表，共 {len(playlist.entries)} 条")
+        except Exception as exc:
+            logger.exception("creator playlist UI apply failed generation=%s video=%s", generation, video_id)
+            self.toast.show_message(f"作者视频列表应用失败：{exc}")
+
+    @Slot(int, str, str)
+    def _creator_playlist_failed(self, generation: int, video_id: str, message: str) -> None:
+        if not self._is_creator_playlist_request_current(generation, video_id):
+            logger.debug("stale creator playlist failure ignored generation=%s video=%s", generation, video_id)
+            return
+        logger.warning("creator playlist failed generation=%s video=%s: %s", generation, video_id, message)
+        self.toast.show_message("作者视频列表加载失败，当前视频继续播放")
+
+    @Slot(int, str)
+    def _creator_playlist_worker_finished(self, generation: int, video_id: str) -> None:
+        self._creator_playlist_workers.pop((generation, video_id), None)
+        logger.info("creator playlist worker finished generation=%s video=%s", generation, video_id)
+
+    def _is_creator_playlist_request_current(self, generation: int, video_id: str) -> bool:
+        return (
+            generation == self._creator_playlist_generation
+            and self.current_video is not None
+            and self.current_video.video_id == video_id
+            and self.current_playlist is None
+        )
+
+    def _invalidate_creator_playlist_request(self) -> None:
+        self._creator_playlist_generation += 1
 
     def _settings_saved(self) -> None:
         logger.info("settings saved")
+        self._invalidate_creator_playlist_request()
         self.mpv.apply_network_options()
         self.resolver = SiteResolver(self.config)
         self.update_service = UpdateService(self.config)
@@ -807,7 +1287,13 @@ class MainWindow(QMainWindow):
             self.load_home()
 
     def _remember_playback_return_widget(self, widget: QWidget | None = None) -> None:
-        self._playback_return_widget = widget or self.stack.currentWidget()
+        candidate = widget or self.stack.currentWidget()
+        if (
+            self._playback_return_widget is not None
+            and (candidate is self.player_page or candidate is self.playlist_page)
+        ):
+            return
+        self._playback_return_widget = candidate
 
     def _return_after_stop(self) -> None:
         target = self._playback_return_widget
@@ -850,16 +1336,32 @@ class MainWindow(QMainWindow):
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
-            logger.info("leaving fullscreen")
-            self.showNormal()
-            self.top_bar_widget.show()
-            self.player_page.set_fullscreen(False)
+            self._leave_player_fullscreen()
         else:
-            logger.info("entering fullscreen")
-            self.stack.setCurrentWidget(self.player_page)
-            self.top_bar_widget.hide()
-            self.showFullScreen()
-            self.player_page.set_fullscreen(True)
+            self._enter_player_fullscreen()
+
+    def _enter_player_fullscreen(self) -> None:
+        if self.isFullScreen():
+            return
+        self._was_maximized_before_fullscreen = self.isMaximized()
+        logger.info("entering fullscreen previous_maximized=%s", self._was_maximized_before_fullscreen)
+        self.stack.setCurrentWidget(self.player_page)
+        self.top_bar_widget.hide()
+        self.showFullScreen()
+        self.player_page.set_fullscreen(True)
+
+    def _leave_player_fullscreen(self) -> None:
+        if not self.isFullScreen():
+            return
+        restore_maximized = bool(self._was_maximized_before_fullscreen)
+        logger.info("leaving fullscreen restore_maximized=%s", restore_maximized)
+        self.top_bar_widget.show()
+        self.player_page.set_fullscreen(False)
+        if restore_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self._was_maximized_before_fullscreen = None
 
     def _toggle_topmost(self) -> None:
         self._set_topmost(not self._is_topmost)
@@ -1124,6 +1626,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
             logger.info("main window closing")
+            self._invalidate_creator_playlist_request()
+            self._dlna_position_timer.stop()
+            self._dlna_volume_timer.stop()
+            self.dlna_media_server.stop()
             self.config.save()
             self.download_manager.flush()
             self.mpv.shutdown()

@@ -19,6 +19,7 @@ class DownloadTask:
     url: str
     title: str
     video_id: str = ""
+    source_site: str = "youtube"
     quality_label: str = "Auto"
     format_selector: str = "bestvideo+bestaudio/best"
     save_dir: str = ""

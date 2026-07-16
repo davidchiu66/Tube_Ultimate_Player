@@ -104,6 +104,13 @@ class ConfigService:
             path = RUNTIME_ROOT / path
         return str(path)
 
+    def dlna_media_server_port(self) -> int:
+        try:
+            value = int(self.get("dlna.media_server_port", 8899) or 8899)
+        except (TypeError, ValueError):
+            value = 8899
+        return max(1, min(65535, value))
+
     def default_home_source(self) -> str:
         value = str(self.get("content.default_home", "bilibili") or "bilibili").strip().lower()
         return value if value in {"youtube", "bilibili"} else "bilibili"

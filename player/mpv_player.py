@@ -42,6 +42,7 @@ class MpvPlayer(QObject):
         self._duration = 0.0
         self._last_pause: bool | None = None
         self._last_eof = False
+        self._last_load_request: tuple[str, str | None, dict[str, str]] | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._poll_properties)
@@ -65,6 +66,7 @@ class MpvPlayer(QObject):
             f"{start_position:.3f}" if start_position and start_position > 0 else "none",
         )
         self.command("loadfile", video_url, "replace")
+        self._last_load_request = (video_url, audio_url, dict(headers or {}))
 
     def pause(self) -> None:
         self.set_property_string("pause", "yes")
@@ -75,6 +77,19 @@ class MpvPlayer(QObject):
     def toggle_pause(self) -> None:
         paused = self.get_bool("pause")
         self.set_property_string("pause", "no" if paused else "yes")
+
+    def restart(self) -> None:
+        if self.get_bool("seekable"):
+            self.command("seek", "0", "absolute+exact")
+        elif self._last_load_request is not None:
+            video_url, audio_url, headers = self._last_load_request
+            self.load(video_url, audio_url, headers=headers)
+        else:
+            raise MpvError("没有可重新播放的媒体")
+
+        # Keep the EOF edge latched until mpv reports that the restarted media left EOF.
+        self._last_eof = True
+        self.resume()
 
     def stop(self) -> None:
         self._last_eof = False

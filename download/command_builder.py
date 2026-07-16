@@ -34,6 +34,7 @@ def build_download_task(
                 return DownloadTask(
                     url=video.webpage_url,
                     video_id=video.video_id,
+                    source_site=video.source_site,
                     title=video.title or video.webpage_url,
                     quality_label=f"{quality_label} (单文件降级)",
                     format_selector="best",
@@ -45,6 +46,7 @@ def build_download_task(
     return DownloadTask(
         url=video.webpage_url,
         video_id=video.video_id,
+        source_site=video.source_site,
         title=video.title or video.webpage_url,
         quality_label=quality_label or "Auto",
         format_selector=format_selector,

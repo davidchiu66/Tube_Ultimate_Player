@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
+    QLineEdit,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from database.favorite_repository import FavoriteRepository
+from resolver.source_utils import source_site_label
 from ui.player_page import format_seconds
 
 
@@ -22,8 +25,29 @@ class FavoritePage(QWidget):
     def __init__(self, favorites: FavoriteRepository) -> None:
         super().__init__()
         self.favorites = favorites
+        self._rows: list[dict] = []
 
-        self.list_widget = QListWidget()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索标题、来源或作者")
+        self.search_edit.setClearButtonEnabled(True)
+        self.list_widget = QTableWidget(0, 6)
+        self.list_widget.setObjectName("LibraryTable")
+        self.list_widget.setHorizontalHeaderLabels(["标题", "来源", "作者", "时长", "收藏时间", "操作"])
+        self.list_widget.verticalHeader().setVisible(False)
+        self.list_widget.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.list_widget.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.list_widget.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.list_widget.setAlternatingRowColors(False)
+        table_header = self.list_widget.horizontalHeader()
+        table_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.list_widget.setColumnWidth(1, 90)
+        self.list_widget.setColumnWidth(2, 130)
+        self.list_widget.setColumnWidth(3, 90)
+        self.list_widget.setColumnWidth(4, 170)
+        self.list_widget.setColumnWidth(5, 150)
+        self.list_widget.verticalHeader().setDefaultSectionSize(40)
+
         self.play_button = QPushButton("播放选中")
         self.remove_button = QPushButton("删除收藏")
         self.refresh_button = QPushButton("刷新")
@@ -41,38 +65,94 @@ class FavoritePage(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         layout.addLayout(header)
+        layout.addWidget(self.search_edit)
         layout.addWidget(self.list_widget, 1)
 
+        self.search_edit.textChanged.connect(self._apply_filter)
         self.refresh_button.clicked.connect(self.refresh)
         self.play_button.clicked.connect(self._play_selected)
         self.remove_button.clicked.connect(self._remove_selected)
-        self.list_widget.itemDoubleClicked.connect(lambda _: self._play_selected())
+        self.list_widget.itemDoubleClicked.connect(lambda _item: self._play_selected())
         self.refresh()
 
     def refresh(self) -> None:
-        self.list_widget.clear()
-        for row in self.favorites.all():
-            title = row.get("title") or "未命名视频"
-            uploader = row.get("uploader") or "未知作者"
-            duration = format_seconds(row.get("duration") or 0)
-            updated_at = row.get("updated_at") or ""
-            item = QListWidgetItem(f"{title}\n{uploader} | {duration} | {updated_at}")
-            item.setData(256, row.get("webpage_url") or "")
-            item.setData(257, row.get("video_id") or "")
-            self.list_widget.addItem(item)
+        self._rows = self.favorites.all()
+        self.list_widget.setRowCount(0)
+        for row_data in self._rows:
+            row = self.list_widget.rowCount()
+            self.list_widget.insertRow(row)
+            self.list_widget.setRowHeight(row, 40)
+            title = str(row_data.get("title") or "未命名视频")
+            source = source_site_label(row_data.get("source_site", ""), row_data.get("webpage_url", ""))
+            values = [
+                title,
+                source,
+                str(row_data.get("uploader") or "未知作者"),
+                format_seconds(row_data.get("duration") or 0),
+                str(row_data.get("updated_at") or ""),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column in (1, 3, 4):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row_data.get("webpage_url") or "")
+                    item.setData(Qt.ItemDataRole.UserRole + 1, row_data.get("video_id") or "")
+                self.list_widget.setItem(row, column, item)
+
+            actions = QWidget()
+            action_layout = QHBoxLayout(actions)
+            action_layout.setContentsMargins(4, 0, 4, 0)
+            action_layout.setSpacing(4)
+            play_button = QPushButton("播放")
+            remove_button = QPushButton("删除")
+            for button in (play_button, remove_button):
+                button.setFixedHeight(28)
+                button.setMinimumWidth(56)
+                button.setObjectName("LibraryActionButton")
+            play_button.clicked.connect(lambda _=False, index=row: self._play_row(index))
+            remove_button.clicked.connect(lambda _=False, index=row: self._remove_row(index))
+            action_layout.addWidget(play_button)
+            action_layout.addWidget(remove_button)
+            self.list_widget.setCellWidget(row, 5, actions)
+        self._apply_filter()
+
+    def _apply_filter(self, _text: str = "") -> None:
+        query = self.search_edit.text().strip().casefold()
+        for row in range(self.list_widget.rowCount()):
+            data = self._rows[row] if row < len(self._rows) else {}
+            haystack = " ".join(
+                (
+                    str(data.get("title") or ""),
+                    source_site_label(data.get("source_site", ""), data.get("webpage_url", "")),
+                    str(data.get("uploader") or ""),
+                    str(data.get("webpage_url") or ""),
+                )
+            ).casefold()
+            self.list_widget.setRowHidden(row, bool(query and query not in haystack))
 
     def _play_selected(self) -> None:
-        item = self.list_widget.currentItem()
-        if not item:
+        row = self.list_widget.currentRow()
+        if row >= 0:
+            self._play_row(row)
+
+    def _play_row(self, row: int) -> None:
+        if not (0 <= row < self.list_widget.rowCount()):
             return
-        url = str(item.data(256) or "")
+        item = self.list_widget.item(row, 0)
+        url = str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
         if url:
             self.play_requested.emit(url)
 
     def _remove_selected(self) -> None:
-        item = self.list_widget.currentItem()
-        if not item:
+        row = self.list_widget.currentRow()
+        if row >= 0:
+            self._remove_row(row)
+
+    def _remove_row(self, row: int) -> None:
+        if not (0 <= row < self.list_widget.rowCount()):
             return
-        video_id = str(item.data(257) or "")
+        item = self.list_widget.item(row, 0)
+        video_id = str(item.data(Qt.ItemDataRole.UserRole + 1) or "") if item else ""
         if video_id:
             self.remove_requested.emit(video_id)

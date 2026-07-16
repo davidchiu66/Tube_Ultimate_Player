@@ -27,6 +27,10 @@
     "max_concurrent": 1,
     "ffmpeg_dir": ""
   },
+  "dlna": {
+    "media_server_port": 8899,
+    "discovery_timeout": 3.0
+  },
   "ui": {
     "theme": "dark",
     "language": "zh-CN"

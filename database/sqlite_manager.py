@@ -11,7 +11,9 @@ CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id TEXT NOT NULL,
     title TEXT NOT NULL,
+    source_site TEXT NOT NULL DEFAULT 'youtube',
     webpage_url TEXT,
+    uploader TEXT,
     thumbnail TEXT,
     duration INTEGER DEFAULT 0,
     watched_position INTEGER DEFAULT 0,
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS favorite (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id TEXT NOT NULL UNIQUE,
     title TEXT NOT NULL,
+    source_site TEXT NOT NULL DEFAULT 'youtube',
     webpage_url TEXT NOT NULL,
     uploader TEXT,
     duration INTEGER DEFAULT 0,
@@ -89,3 +92,25 @@ class SQLiteManager:
     def initialize(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_column(conn, "history", "source_site", "TEXT NOT NULL DEFAULT 'youtube'")
+            self._ensure_column(conn, "history", "uploader", "TEXT")
+            self._ensure_column(conn, "favorite", "source_site", "TEXT NOT NULL DEFAULT 'youtube'")
+            conn.execute(
+                "UPDATE history SET source_site = 'bilibili' "
+                "WHERE source_site = 'youtube' AND (lower(webpage_url) LIKE '%bilibili.com/%' "
+                "OR lower(webpage_url) LIKE '%b23.tv/%')"
+            )
+            conn.execute(
+                "UPDATE favorite SET source_site = 'bilibili' "
+                "WHERE source_site = 'youtube' AND (lower(webpage_url) LIKE '%bilibili.com/%' "
+                "OR lower(webpage_url) LIKE '%b23.tv/%')"
+            )
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

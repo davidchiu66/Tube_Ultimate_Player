@@ -5,6 +5,7 @@ from typing import Any
 
 from database.sqlite_manager import SQLiteManager
 from resolver.models import HomeVideo, VideoInfo
+from resolver.source_utils import detect_source_site
 
 
 class FavoriteRepository:
@@ -16,6 +17,7 @@ class FavoriteRepository:
             video_id=video.video_id,
             title=video.title,
             webpage_url=video.webpage_url,
+            source_site=video.source_site,
             uploader=video.uploader,
             duration=video.duration,
             thumbnail=video.thumbnail,
@@ -26,6 +28,7 @@ class FavoriteRepository:
             video_id=video.video_id,
             title=video.title,
             webpage_url=video.webpage_url,
+            source_site=video.source_site,
             uploader=video.uploader,
             duration=video.duration,
             thumbnail=video.thumbnail,
@@ -52,14 +55,19 @@ class FavoriteRepository:
         with self.db.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT video_id, title, webpage_url, uploader, duration, thumbnail, created_at, updated_at
+                SELECT video_id, title, source_site, webpage_url, uploader, duration, thumbnail, created_at, updated_at
                 FROM favorite
                 ORDER BY updated_at DESC, id DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["source_site"] = detect_source_site(item.get("webpage_url", ""), item.get("source_site", ""))
+            result.append(item)
+        return result
 
     def _upsert(
         self,
@@ -67,6 +75,7 @@ class FavoriteRepository:
         video_id: str,
         title: str,
         webpage_url: str,
+        source_site: str,
         uploader: str,
         duration: int,
         thumbnail: str,
@@ -81,19 +90,19 @@ class FavoriteRepository:
                 conn.execute(
                     """
                     UPDATE favorite
-                    SET title = ?, webpage_url = ?, uploader = ?, duration = ?, thumbnail = ?, updated_at = ?
+                    SET title = ?, source_site = ?, webpage_url = ?, uploader = ?, duration = ?, thumbnail = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (title, webpage_url, uploader, duration, thumbnail, now, existing["id"]),
+                    (title, detect_source_site(webpage_url, source_site), webpage_url, uploader, duration, thumbnail, now, existing["id"]),
                 )
                 return False
 
             conn.execute(
                 """
                 INSERT INTO favorite (
-                    video_id, title, webpage_url, uploader, duration, thumbnail, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    video_id, title, source_site, webpage_url, uploader, duration, thumbnail, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (video_id, title, webpage_url, uploader, duration, thumbnail, now, now),
+                (video_id, title, detect_source_site(webpage_url, source_site), webpage_url, uploader, duration, thumbnail, now, now),
             )
             return True

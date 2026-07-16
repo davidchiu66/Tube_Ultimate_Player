@@ -5,10 +5,12 @@ import html
 import json
 import logging
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
@@ -30,7 +32,9 @@ _BILIBILI_HOME_PAGE_LIMIT = 30
 _BILIBILI_SEARCH_PAGE_LIMIT = 45
 _HOME_CACHE_TTL_SECONDS = 300.0
 _SEARCH_CACHE_TTL_SECONDS = 1800.0
+_CREATOR_CACHE_TTL_SECONDS = 600.0
 _MAX_PAGE_CACHE_ITEMS = 48
+_MAX_CREATOR_CACHE_ITEMS = 32
 
 
 class SiteResolver:
@@ -39,6 +43,8 @@ class SiteResolver:
         self.youtube = YoutubeResolver(config)
         self.bilibili = BilibiliResolver(config, self.youtube)
         self._page_cache: OrderedDict[str, tuple[float, list[HomeVideo], bool]] = OrderedDict()
+        self._creator_cache: OrderedDict[str, tuple[float, PlaylistInfo | None]] = OrderedDict()
+        self._creator_cache_lock = threading.Lock()
 
     def home_source(self) -> str:
         return self.config.default_home_source()
@@ -58,6 +64,77 @@ class SiteResolver:
         if _is_bilibili_url(url):
             return self.bilibili.resolve_playlist(url)
         return self.youtube.resolve_playlist(url)
+
+    def resolve_creator_playlist(self, video: VideoInfo, limit: int = 50) -> PlaylistInfo | None:
+        if video.source_site not in {"youtube", "bilibili"}:
+            return None
+        creator_key = str(video.creator_id or video.channel_id or video.creator_url).strip()
+        if not creator_key:
+            return None
+
+        limit = max(1, min(50, int(limit)))
+        cache_key = f"creator|{video.source_site}|{creator_key}|{limit}|{self._config_fingerprint()}"
+        cached = self._creator_cache_lookup(cache_key)
+        if cached is not None:
+            logger.info("creator playlist cache hit site=%s creator=%s", video.source_site, creator_key)
+            return cached
+
+        if video.source_site == "bilibili":
+            creator_url, fetched_entries = self.bilibili.fetch_creator_videos(video, limit)
+        else:
+            creator_url, fetched_entries = self.youtube.fetch_creator_videos(video, limit)
+
+        playlist_id = f"{video.source_site}:creator:{creator_key}"
+        current_key = _creator_entry_key(video.source_site, video.video_id, video.webpage_url)
+        entries = [
+            PlaylistEntry(
+                playlist_id=playlist_id,
+                video_id=video.video_id,
+                title=video.title,
+                webpage_url=video.webpage_url,
+                source_site=video.source_site,
+                uploader=video.uploader,
+                duration=video.duration,
+                thumbnail=video.thumbnail,
+                position=1,
+                availability="",
+            )
+        ]
+        seen = {current_key}
+        for fetched in fetched_entries:
+            key = _creator_entry_key(fetched.source_site, fetched.video_id, fetched.webpage_url)
+            if not key or key in seen or fetched.availability in {"private", "deleted", "unavailable"}:
+                continue
+            seen.add(key)
+            entry = deepcopy(fetched)
+            entry.playlist_id = playlist_id
+            entry.position = len(entries) + 1
+            entries.append(entry)
+            if len(entries) - 1 >= limit:
+                break
+
+        playlist = None
+        if len(entries) > 1:
+            playlist = PlaylistInfo(
+                playlist_id=playlist_id,
+                title=f"{video.uploader or '制作者'} 的视频",
+                webpage_url=creator_url or video.creator_url,
+                source_site=video.source_site,
+                uploader=video.uploader,
+                thumbnail=video.thumbnail,
+                entry_count=len(entries),
+                source_type="creator",
+                current_video_id=video.video_id,
+                entries=entries,
+            )
+        self._creator_cache_store(cache_key, playlist)
+        logger.info(
+            "creator playlist resolved site=%s creator=%s count=%s",
+            video.source_site,
+            creator_key,
+            len(entries) if playlist else 0,
+        )
+        return deepcopy(playlist)
 
     def fetch_home_videos(
         self,
@@ -139,6 +216,25 @@ class SiteResolver:
         self._page_cache.move_to_end(key)
         while len(self._page_cache) > _MAX_PAGE_CACHE_ITEMS:
             self._page_cache.popitem(last=False)
+
+    def _creator_cache_lookup(self, key: str) -> PlaylistInfo | None:
+        with self._creator_cache_lock:
+            cached = self._creator_cache.get(key)
+            if cached is None:
+                return None
+            cached_at, playlist = cached
+            if time.time() - cached_at > _CREATOR_CACHE_TTL_SECONDS:
+                self._creator_cache.pop(key, None)
+                return None
+            self._creator_cache.move_to_end(key)
+            return deepcopy(playlist)
+
+    def _creator_cache_store(self, key: str, playlist: PlaylistInfo | None) -> None:
+        with self._creator_cache_lock:
+            self._creator_cache[key] = (time.time(), deepcopy(playlist))
+            self._creator_cache.move_to_end(key)
+            while len(self._creator_cache) > _MAX_CREATOR_CACHE_ITEMS:
+                self._creator_cache.popitem(last=False)
 
 
 class BilibiliResolver:
@@ -235,6 +331,59 @@ class BilibiliResolver:
         has_next = len(all_videos) > end
         logger.info("bilibili home fetched page=%s page_size=%s count=%s", page, page_size, len(videos))
         return videos, has_next
+
+    def fetch_creator_videos(
+        self,
+        video: VideoInfo,
+        limit: int = 50,
+    ) -> tuple[str, list[PlaylistEntry]]:
+        mid = str(video.creator_id or video.channel_id or "").strip()
+        creator_url = str(video.creator_url or "").strip().rstrip("/")
+        if not creator_url and mid:
+            creator_url = f"https://space.bilibili.com/{mid}"
+        if not mid:
+            raise RuntimeError("当前 Bilibili 视频缺少制作者 MID")
+
+        limit = max(1, min(50, int(limit)))
+        primary_error = ""
+        cookie_header = self._preferred_cookie_header(creator_url or "https://www.bilibili.com/")
+        try:
+            params: dict[str, object] = {
+                "mid": mid,
+                "pn": 1,
+                "ps": limit,
+                "order": "pubdate",
+                "order_avoided": "true",
+                "platform": "web",
+                "web_location": 1550101,
+            }
+            signed = self._sign_wbi_params(params, cookie_header=cookie_header)
+            payload = self._request_json(
+                "https://api.bilibili.com/x/space/wbi/arc/search",
+                params=signed,
+                cookie_header=cookie_header,
+                cookie_policy="none",
+            )
+            archives = (((payload.get("data") or {}).get("list") or {}).get("vlist") or [])
+            playlist_id = f"bilibili:creator:{mid}"
+            entries = [
+                entry
+                for index, item in enumerate(archives, start=1)
+                if isinstance(item, dict)
+                and (entry := _creator_entry_from_bilibili_archive(item, playlist_id, index)) is not None
+            ]
+            if entries:
+                logger.info("bilibili creator API fetched mid=%s count=%s", mid, len(entries))
+                return creator_url, entries
+            primary_error = "Bilibili 制作者投稿接口没有返回可用视频"
+        except Exception as exc:  # noqa: BLE001
+            primary_error = str(exc)
+            logger.warning("bilibili creator API failed mid=%s: %s", mid, exc)
+
+        try:
+            return self.ytdlp.fetch_creator_videos(video, limit)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Bilibili 作者视频获取失败：{primary_error}；yt-dlp 兜底失败：{exc}") from exc
 
     def _resolve_video_pages_playlist(self, url: str) -> PlaylistInfo:
         bvid = _extract_bvid(url)
@@ -795,6 +944,50 @@ def _parse_bilibili_search_result(payload: dict) -> tuple[list[HomeVideo], bool]
     num_pages = int(data.get("numPages") or page)
     has_next = page < num_pages or len(videos) >= page_size
     return videos, has_next
+
+
+def _creator_entry_key(source_site: str, video_id: str, webpage_url: str) -> str:
+    if source_site == "bilibili":
+        bvid = _extract_bvid(video_id) or _extract_bvid(webpage_url)
+        if bvid:
+            return f"bilibili:{bvid.lower()}"
+        aid = _extract_aid(webpage_url)
+        if not aid:
+            match = re.search(r"(?:bilibili:)?av(\d+)", str(video_id or ""), flags=re.IGNORECASE)
+            aid = match.group(1) if match else ""
+        if aid:
+            return f"bilibili:av{aid}"
+    normalized_id = str(video_id or "").strip()
+    if normalized_id:
+        return f"{source_site}:{normalized_id}"
+    return str(webpage_url or "").strip().lower()
+
+
+def _creator_entry_from_bilibili_archive(
+    item: dict,
+    playlist_id: str,
+    position: int,
+) -> PlaylistEntry | None:
+    bvid = str(item.get("bvid") or "").strip()
+    aid = str(item.get("aid") or "").strip()
+    if not bvid and not aid:
+        return None
+    url = f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://www.bilibili.com/video/av{aid}"
+    title = _strip_html(str(item.get("title") or "").strip())
+    if not title:
+        return None
+    return PlaylistEntry(
+        playlist_id=playlist_id,
+        video_id=_bilibili_video_key(url, bvid=bvid, aid=aid),
+        title=title,
+        webpage_url=url,
+        source_site="bilibili",
+        uploader=_strip_html(str(item.get("author") or "").strip()),
+        duration=_parse_duration_to_seconds(item.get("length") or item.get("duration") or 0),
+        thumbnail=_normalize_bilibili_thumbnail(str(item.get("pic") or "")),
+        position=position,
+        availability="",
+    )
 
 
 def _playlist_entry_from_dict(item: dict) -> PlaylistEntry:

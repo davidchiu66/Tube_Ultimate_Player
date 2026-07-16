@@ -4,6 +4,7 @@ from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, Qt,
 from PySide6.QtGui import QCursor, QKeySequence, QPixmap, QShortcut
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -27,6 +28,7 @@ class PlayerPage(QWidget):
     speed_changed = Signal(float)
     quality_changed = Signal(str)
     subtitle_changed = Signal(str)
+    cast_requested = Signal()
     fullscreen_requested = Signal()
     download_requested = Signal()
     favorite_requested = Signal()
@@ -47,9 +49,16 @@ class PlayerPage(QWidget):
         self._download_available = False
         self._favorite_available = False
         self._favorite_active = False
+        self._cast_available = False
+        self._cast_active = False
+        self._cast_seek_supported = True
+        self._cast_volume_supported = True
         self._paused = True
+        self._playback_finished = False
         self._fullscreen = False
         self._controls_visible = True
+        self._control_pointer_inside = False
+        self._control_interaction_active = False
         self._ignore_next_release = False
         self._auto_hide_enabled = False
 
@@ -150,6 +159,8 @@ class PlayerPage(QWidget):
 
         self.fullscreen_button = QPushButton("全屏")
         self.fullscreen_button.setFixedWidth(84)
+        self.cast_button = QPushButton("投屏")
+        self.cast_button.setFixedWidth(92)
 
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
@@ -163,6 +174,7 @@ class PlayerPage(QWidget):
         controls.addLayout(self._control_group("倍速", self.speed_combo))
         controls.addLayout(self._control_group("清晰度", self.quality_combo))
         controls.addLayout(self._control_group("字幕", self.subtitle_combo))
+        controls.addWidget(self.cast_button)
         controls.addWidget(self.fullscreen_button)
         controls.addStretch(1)
 
@@ -195,6 +207,7 @@ class PlayerPage(QWidget):
         self.speed_combo.currentIndexChanged.connect(self._emit_speed)
         self.quality_combo.currentTextChanged.connect(self._emit_quality)
         self.subtitle_combo.currentIndexChanged.connect(self._emit_subtitle)
+        self.cast_button.clicked.connect(self.cast_requested)
         self.fullscreen_button.clicked.connect(self.fullscreen_requested)
         self.playlist_overlay.entry_activated.connect(self.playlist_entry_requested)
         self.playlist_overlay.download_entries_requested.connect(self.playlist_download_requested)
@@ -215,6 +228,10 @@ class PlayerPage(QWidget):
         self.playlist_overlay.relayout(self.rect())
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.MouseButtonRelease and self._control_interaction_active:
+            self._control_interaction_active = False
+            QTimer.singleShot(0, self._reevaluate_control_pointer)
+
         if watched is self.video_widget:
             if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                 if self._ignore_next_release:
@@ -234,9 +251,13 @@ class PlayerPage(QWidget):
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 self._handle_mouse_move(watched, pos)
             elif event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.Wheel):
+                if event.type() == QEvent.Type.MouseButtonPress and self._is_control_widget(watched):
+                    self._control_interaction_active = True
                 self._show_cursor()
                 if self._auto_hide_enabled:
                     self._idle_timer.start()
+            elif watched is self and event.type() == QEvent.Type.Leave:
+                QTimer.singleShot(0, self._reevaluate_control_pointer)
 
         return super().eventFilter(watched, event)
 
@@ -255,6 +276,9 @@ class PlayerPage(QWidget):
     def set_playback_available(self, available: bool) -> None:
         self._has_media = available
         if not available:
+            self._playback_finished = False
+            self._cast_available = False
+            self._cast_active = False
             self._download_available = False
             self._favorite_available = False
             self._favorite_active = False
@@ -277,9 +301,30 @@ class PlayerPage(QWidget):
         self.favorite_button.setText("已收藏" if favorite else "收藏")
         self._update_playback_buttons()
 
+    def set_cast_available(self, available: bool) -> None:
+        self._cast_available = available
+        self._update_playback_buttons()
+
+    def set_cast_state(
+        self,
+        active: bool,
+        *,
+        seek_supported: bool = True,
+        volume_supported: bool = True,
+    ) -> None:
+        self._cast_active = active
+        self._cast_seek_supported = seek_supported
+        self._cast_volume_supported = volume_supported
+        self.cast_button.setText("停止投屏" if active else "投屏")
+        self._update_playback_buttons()
+
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
-        self.play_button.setText("播放" if paused else "暂停")
+        self._sync_auto_hide_state()
+        self._update_playback_buttons()
+
+    def set_playback_finished(self, finished: bool) -> None:
+        self._playback_finished = finished
         self._sync_auto_hide_state()
         self._update_playback_buttons()
 
@@ -432,10 +477,16 @@ class PlayerPage(QWidget):
         self.stop_button.setEnabled(enabled)
         self.download_button.setEnabled(enabled and self._download_available)
         self.favorite_button.setEnabled(enabled and self._favorite_available and not self._favorite_active)
-        self.play_button.setText("播放" if self._paused else "暂停")
+        self.cast_button.setEnabled(enabled and (self._cast_available or self._cast_active))
+        self.speed_combo.setEnabled(enabled and not self._cast_active)
+        self.quality_combo.setEnabled(enabled and not self._cast_active)
+        self.subtitle_combo.setEnabled(enabled and not self._cast_active)
+        self.progress_slider.setEnabled(enabled and (not self._cast_active or self._cast_seek_supported))
+        self.volume_slider.setEnabled(enabled and (not self._cast_active or self._cast_volume_supported))
+        self.play_button.setText("播放" if self._paused or self._playback_finished else "暂停")
 
     def _sync_auto_hide_state(self) -> None:
-        enabled = self._has_media and not self._loading and not self._paused
+        enabled = self._has_media and not self._loading and not self._paused and not self._playback_finished
         self._auto_hide_enabled = enabled
         if enabled:
             self._show_controls()
@@ -447,18 +498,28 @@ class PlayerPage(QWidget):
 
     def _handle_mouse_move(self, watched: QWidget, local_pos: QPoint) -> None:
         pos_in_self = watched.mapTo(self, local_pos)
+        in_control_zone = self._is_in_control_hot_zone(pos_in_self)
+        was_in_control_zone = self._control_pointer_inside
         self._show_cursor()
         self.playlist_overlay.handle_pointer(pos_in_self)
+        if in_control_zone:
+            self._control_pointer_inside = True
+        elif self._can_hide_controls_for_pointer_exit():
+            self._control_pointer_inside = False
         if self._auto_hide_enabled:
             self._idle_timer.start()
-            if self._is_in_control_hot_zone(pos_in_self):
+            if in_control_zone:
                 self._show_controls()
+            elif was_in_control_zone and self._can_hide_controls_for_pointer_exit():
+                self._hide_controls()
 
     def _handle_idle_timeout(self) -> None:
         if not self._auto_hide_enabled:
             return
-        self._controls_visible = False
-        self._position_control_panel(animated=True)
+        if not self._can_hide_controls_for_pointer_exit():
+            self._idle_timer.start()
+            return
+        self._hide_controls()
         self.playlist_overlay.handle_idle_timeout()
         self._set_cursor_hidden(True)
 
@@ -468,9 +529,40 @@ class PlayerPage(QWidget):
         return pos.y() >= max(0, self.height() - 72)
 
     def _show_controls(self) -> None:
+        if self._controls_visible:
+            self._show_cursor()
+            return
         self._controls_visible = True
         self._position_control_panel(animated=True)
         self._show_cursor()
+
+    def _hide_controls(self) -> None:
+        if not self._controls_visible:
+            return
+        self._controls_visible = False
+        self._position_control_panel(animated=True)
+
+    def _reevaluate_control_pointer(self) -> None:
+        pos_in_self = self.mapFromGlobal(QCursor.pos())
+        in_control_zone = self._is_in_control_hot_zone(pos_in_self)
+        was_in_control_zone = self._control_pointer_inside
+        can_hide = self._can_hide_controls_for_pointer_exit()
+        if in_control_zone:
+            self._control_pointer_inside = True
+        elif can_hide:
+            self._control_pointer_inside = False
+        if not self._auto_hide_enabled:
+            return
+        if in_control_zone:
+            self._show_controls()
+        elif was_in_control_zone and can_hide:
+            self._hide_controls()
+
+    def _can_hide_controls_for_pointer_exit(self) -> bool:
+        return not self._control_interaction_active and QApplication.activePopupWidget() is None
+
+    def _is_control_widget(self, widget: QWidget) -> bool:
+        return widget is self.control_panel or self.control_panel.isAncestorOf(widget)
 
     def _show_cursor(self) -> None:
         self._set_cursor_hidden(False)

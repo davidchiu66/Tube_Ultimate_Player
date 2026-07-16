@@ -40,6 +40,7 @@ class PlaylistItemWidget(QFrame):
         self.index = index
         self._network = network
         self._thumbnail_cache = thumbnail_cache
+        self._thumbnail_requested = False
         self.setObjectName("PlaylistOverlayItem")
         self.setFixedHeight(ITEM_HEIGHT)
 
@@ -52,7 +53,7 @@ class PlaylistItemWidget(QFrame):
         self.thumbnail_label.setObjectName("PlaylistOverlayThumb")
         self.thumbnail_label.setFixedSize(THUMB_WIDTH, THUMB_HEIGHT)
         self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumbnail_label.setText("加载中")
+        self.thumbnail_label.setText("封面")
 
         self.title_label = QLabel()
         self.title_label.setObjectName("PlaylistOverlayTitle")
@@ -79,7 +80,6 @@ class PlaylistItemWidget(QFrame):
         layout.addLayout(text_layout, 1)
 
         self._apply_entry()
-        self._load_thumbnail()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -92,6 +92,12 @@ class PlaylistItemWidget(QFrame):
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
         self._refresh_style()
+
+    def ensure_thumbnail_loaded(self) -> None:
+        if self._thumbnail_requested:
+            return
+        self._thumbnail_requested = True
+        self._load_thumbnail()
 
     def _refresh_style(self) -> None:
         self.style().unpolish(self)
@@ -177,6 +183,7 @@ class PlaylistOverlay(QFrame):
         self.list_widget.setSpacing(4)
         self.list_widget.itemDoubleClicked.connect(self._double_clicked)
         self.list_widget.itemSelectionChanged.connect(self._on_selection_changed)
+        self.list_widget.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumbnail_load)
 
         self.play_selected_button = QPushButton("播放选中")
         self.download_selected_button = QPushButton("下载选中")
@@ -246,6 +253,7 @@ class PlaylistOverlay(QFrame):
         self.set_current_index(current_index)
         self._sync_selection_visuals()
         self._update_button_state()
+        self._schedule_visible_thumbnail_load()
 
     def set_saved_playlists(self, playlists: list[SavedPlaylist], current_key: str = "") -> None:
         self._saved_playlists = list(playlists)
@@ -301,6 +309,7 @@ class PlaylistOverlay(QFrame):
         self.show()
         self.raise_()
         self._move_panel(animated)
+        self._schedule_visible_thumbnail_load()
 
     def hide_overlay(self, animated: bool = True) -> None:
         self._hide_timer.stop()
@@ -347,6 +356,22 @@ class PlaylistOverlay(QFrame):
             self.hide()
         elif self._open:
             self.show()
+
+    def _schedule_visible_thumbnail_load(self, _value: int | None = None) -> None:
+        if self._open:
+            QTimer.singleShot(0, self._load_visible_thumbnails)
+
+    def _load_visible_thumbnails(self) -> None:
+        if not self._open:
+            return
+        viewport_rect = self.list_widget.viewport().rect().adjusted(0, -ITEM_HEIGHT, 0, ITEM_HEIGHT)
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if not self.list_widget.visualItemRect(item).intersects(viewport_rect):
+                continue
+            widget = self.list_widget.itemWidget(item)
+            if isinstance(widget, PlaylistItemWidget):
+                widget.ensure_thumbnail_loaded()
 
     def _play_selected(self) -> None:
         items = self.list_widget.selectedItems()
