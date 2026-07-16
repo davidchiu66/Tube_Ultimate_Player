@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app_paths import CONFIG_DIR, DEFAULT_CONFIG_DIR, DOWNLOAD_DIR, RUNTIME_ROOT, default_config_path, runtime_path
+from services.shortcut_service import DEFAULT_SHORTCUTS
 
 
 DEFAULT_CONFIG_PATH = default_config_path("default_config.json")
@@ -117,6 +118,13 @@ class ConfigService:
 
     def default_home_label(self) -> str:
         return "Bilibili" if self.default_home_source() == "bilibili" else "YouTube"
+
+    def shortcut_sequence(self, action: str) -> str:
+        default = DEFAULT_SHORTCUTS.get(action, "")
+        return str(self.get(f"shortcuts.{action}", default) or "").strip()
+
+    def shortcut_sequences(self) -> dict[str, str]:
+        return {action: self.shortcut_sequence(action) for action in DEFAULT_SHORTCUTS}
 
     def cookie_browser(self) -> str:
         browser = str(self.get("youtube.cookie_browser", "") or "").strip()

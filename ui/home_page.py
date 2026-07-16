@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from resolver.models import HomeVideo
 from ui.player_page import format_seconds
+from ui.text_elision import elide_multiline_text
 from ui.thumbnail_cache import ThumbnailCache
 
 
@@ -54,10 +55,13 @@ class HomeVideoCard(QFrame):
         self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumbnail_label.setText("加载封面...")
 
-        self.title_label = QLabel(video.title)
+        self._full_title = str(video.title or "").strip()
+        self.title_label = QLabel()
         self.title_label.setObjectName("HomeVideoTitle")
         self.title_label.setWordWrap(True)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.title_label.setFixedHeight(60)
+        self.title_label.setToolTip(self._full_title)
 
         meta = []
         if video.uploader:
@@ -84,7 +88,13 @@ class HomeVideoCard(QFrame):
         layout.addWidget(self.meta_label)
         layout.addStretch(1)
 
+        layout.activate()
+        self._apply_title()
         self._load_thumbnail()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_title()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self:
@@ -104,6 +114,10 @@ class HomeVideoCard(QFrame):
     def set_favorite(self, favorite: bool) -> None:
         self.favorite_button.setText("已收藏" if favorite else "收藏")
         self.favorite_button.setEnabled(not favorite)
+
+    def _apply_title(self) -> None:
+        width = max(80, self.title_label.width())
+        self.title_label.setText(elide_multiline_text(self.title_label, self._full_title, width, 3))
 
     def _load_thumbnail(self) -> None:
         self._thumbnail_cache.load(

@@ -57,6 +57,8 @@ class MpvPlayer(QObject):
         audio_url: str | None = None,
         start_position: float | None = None,
         headers: dict[str, str] | None = None,
+        *,
+        autoplay: bool = True,
     ) -> None:
         self._last_eof = False
         self.apply_network_options(headers or {})
@@ -66,6 +68,10 @@ class MpvPlayer(QObject):
             f"{start_position:.3f}" if start_position and start_position > 0 else "none",
         )
         self.command("loadfile", video_url, "replace")
+        if autoplay:
+            # keep-open leaves mpv paused after EOF. Explicitly clear that state so
+            # loading the next playlist entry actually starts playback.
+            self.resume()
         self._last_load_request = (video_url, audio_url, dict(headers or {}))
 
     def pause(self) -> None:

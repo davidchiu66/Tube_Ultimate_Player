@@ -9,14 +9,19 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSlider,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from resolver.models import VideoInfo
+from services.config_service import ConfigService
+from services.shortcut_service import SHORTCUT_DEFINITIONS
 from ui.playlist_overlay import PlaylistOverlay
 
 
@@ -39,9 +44,15 @@ class PlayerPage(QWidget):
     playlist_delete_requested = Signal(str)
     playlist_auto_play_changed = Signal(bool)
 
-    def __init__(self) -> None:
+    def __init__(self, config: ConfigService | None = None) -> None:
         super().__init__()
+        self._config = config
+        self._keyboard_shortcuts: list[QShortcut] = []
         self._duration = 0.0
+        self._position = 0.0
+        self._playlist_count = 0
+        self._playlist_index = -1
+        self._volume_before_mute = 80
         self._seeking = False
         self._populating = False
         self._loading = False
@@ -203,7 +214,7 @@ class PlayerPage(QWidget):
         self.stop_button.clicked.connect(self.stop_requested)
         self.download_button.clicked.connect(self.download_requested)
         self.favorite_button.clicked.connect(self.favorite_requested)
-        self.volume_slider.valueChanged.connect(self.volume_changed)
+        self.volume_slider.valueChanged.connect(self._handle_volume_changed)
         self.speed_combo.currentIndexChanged.connect(self._emit_speed)
         self.quality_combo.currentTextChanged.connect(self._emit_quality)
         self.subtitle_combo.currentIndexChanged.connect(self._emit_subtitle)
@@ -219,6 +230,9 @@ class PlayerPage(QWidget):
         self._install_mouse_tracking(self.control_panel)
         self._install_mouse_tracking(self.playlist_overlay)
         self._setup_keyboard_shortcuts()
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._handle_shortcut_focus_changed)
         self._update_playback_buttons()
         self._position_control_panel(animated=False)
 
@@ -276,6 +290,11 @@ class PlayerPage(QWidget):
     def set_playback_available(self, available: bool) -> None:
         self._has_media = available
         if not available:
+            self._position = 0.0
+            self._duration = 0.0
+            self.position_label.setText("00:00")
+            self.duration_label.setText("00:00")
+            self.progress_slider.setValue(0)
             self._playback_finished = False
             self._cast_available = False
             self._cast_active = False
@@ -330,6 +349,8 @@ class PlayerPage(QWidget):
 
     def update_video_info(self, video: VideoInfo, selected_quality: str) -> None:
         self._populating = True
+        self._position = 0.0
+        self.progress_slider.setValue(0)
         self.title_label.setText(video.title)
         self.meta_label.setText(
             f"时长 {format_seconds(video.duration)} | 清晰度 {selected_quality} | 字幕 {len(video.subtitles)} 个"
@@ -356,6 +377,11 @@ class PlayerPage(QWidget):
 
     def update_local_file_info(self, path: str) -> None:
         self._populating = True
+        self._position = 0.0
+        self._duration = 0.0
+        self.position_label.setText("00:00")
+        self.duration_label.setText("00:00")
+        self.progress_slider.setValue(0)
         self.title_label.setText(path)
         self.meta_label.setText("本地文件")
         self.thumbnail_label.setText("本地文件")
@@ -387,19 +413,25 @@ class PlayerPage(QWidget):
         self._show_controls()
 
     def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = True) -> None:
+        self._playlist_count = len(playlist.entries) if playlist is not None else 0
+        self._playlist_index = current_index
         self.playlist_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
         self.playlist_overlay.relayout(self.rect())
 
     def clear_playlist_context(self) -> None:
+        self._playlist_count = 0
+        self._playlist_index = -1
         self.playlist_overlay.set_playlist(None)
 
     def set_playlist_saved_items(self, playlists, current_key: str = "") -> None:
         self.playlist_overlay.set_saved_playlists(playlists, current_key=current_key)
 
     def set_playlist_current_index(self, index: int) -> None:
+        self._playlist_index = index
         self.playlist_overlay.set_current_index(index)
 
     def update_position(self, seconds: float) -> None:
+        self._position = max(0.0, float(seconds or 0.0))
         self.position_label.setText(format_seconds(int(seconds)))
         if self._duration > 0 and not self._seeking:
             value = int(max(0, min(1000, seconds / self._duration * 1000)))
@@ -462,6 +494,11 @@ class PlayerPage(QWidget):
 
     def _emit_speed(self) -> None:
         self.speed_changed.emit(float(self.speed_combo.currentData()))
+
+    def _handle_volume_changed(self, volume: int) -> None:
+        if volume > 0:
+            self._volume_before_mute = volume
+        self.volume_changed.emit(volume)
 
     def _emit_quality(self, label: str) -> None:
         if not self._populating:
@@ -580,25 +617,128 @@ class PlayerPage(QWidget):
             child.installEventFilter(self)
 
     def _setup_keyboard_shortcuts(self) -> None:
-        for sequence in ("Space",):
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            shortcut.setAutoRepeat(False)
-            shortcut.activated.connect(self._shortcut_play_pause)
+        for shortcut in self._keyboard_shortcuts:
+            shortcut.setEnabled(False)
+            shortcut.deleteLater()
+        self._keyboard_shortcuts.clear()
 
-        for sequence in ("Return", "Enter"):
-            shortcut = QShortcut(QKeySequence(sequence), self)
+        handlers = {
+            "play_pause": self._shortcut_play_pause,
+            "stop": self._shortcut_stop,
+            "download": self._shortcut_download,
+            "favorite": self._shortcut_favorite,
+            "cast": self._shortcut_cast,
+            "fullscreen": self._shortcut_fullscreen,
+            "fullscreen_keypad": self._shortcut_fullscreen,
+            "seek_backward_10": lambda: self._shortcut_seek(-10.0),
+            "seek_forward_10": lambda: self._shortcut_seek(10.0),
+            "seek_backward_60": lambda: self._shortcut_seek(-60.0),
+            "seek_forward_60": lambda: self._shortcut_seek(60.0),
+            "volume_up": lambda: self._shortcut_volume(5),
+            "volume_down": lambda: self._shortcut_volume(-5),
+            "mute": self._shortcut_toggle_mute,
+            "seek_start": self._shortcut_seek_start,
+            "seek_end": self._shortcut_seek_end,
+            "playlist_previous": lambda: self._shortcut_playlist_step(-1),
+            "playlist_next": lambda: self._shortcut_playlist_step(1),
+        }
+        for definition in SHORTCUT_DEFINITIONS:
+            sequence = (
+                self._config.shortcut_sequence(definition.action)
+                if self._config is not None
+                else definition.default
+            )
+            key_sequence = QKeySequence(sequence)
+            if key_sequence.isEmpty():
+                continue
+            shortcut = QShortcut(key_sequence, self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.setAutoRepeat(False)
-            shortcut.activated.connect(self._shortcut_fullscreen)
+            shortcut.activated.connect(handlers[definition.action])
+            self._keyboard_shortcuts.append(shortcut)
+        self._update_shortcut_enabled_state()
+
+    def reload_shortcuts(self) -> None:
+        self._setup_keyboard_shortcuts()
+
+    def _handle_shortcut_focus_changed(self, _old, _new) -> None:
+        self._update_shortcut_enabled_state()
+
+    def _update_shortcut_enabled_state(self) -> None:
+        focus = QApplication.focusWidget()
+        enabled = not isinstance(focus, (QLineEdit, QPlainTextEdit, QTextEdit))
+        for shortcut in self._keyboard_shortcuts:
+            shortcut.setEnabled(enabled)
+
+    def _shortcut_context_active(self) -> bool:
+        return self.isVisible() and self._has_media and not self._loading
 
     def _shortcut_play_pause(self) -> None:
-        if self.isVisible() and self._has_media and not self._loading:
+        if self._shortcut_context_active():
             self.play_pause_requested.emit()
 
+    def _shortcut_stop(self) -> None:
+        if self._shortcut_context_active():
+            self.stop_requested.emit()
+
+    def _shortcut_download(self) -> None:
+        if self._shortcut_context_active() and self._download_available:
+            self.download_requested.emit()
+
+    def _shortcut_favorite(self) -> None:
+        if self._shortcut_context_active() and self._favorite_available and not self._favorite_active:
+            self.favorite_requested.emit()
+
+    def _shortcut_cast(self) -> None:
+        if self._shortcut_context_active() and (self._cast_available or self._cast_active):
+            self.cast_requested.emit()
+
     def _shortcut_fullscreen(self) -> None:
-        if self.isVisible() and self._has_media and not self._loading:
+        if self._shortcut_context_active():
             self.fullscreen_requested.emit()
+
+    def _shortcut_seek(self, delta: float) -> None:
+        if not self._shortcut_context_active():
+            return
+        target = max(0.0, self._position + float(delta))
+        if self._duration > 0:
+            target = min(self._duration, target)
+        self.seek_requested.emit(target)
+
+    def _shortcut_volume(self, delta: int) -> None:
+        if not self._shortcut_context_active():
+            return
+        if self._cast_active and not self._cast_volume_supported:
+            return
+        target = max(0, min(100, self.volume_slider.value() + int(delta)))
+        self.volume_slider.setValue(target)
+
+    def _shortcut_toggle_mute(self) -> None:
+        if not self._shortcut_context_active():
+            return
+        if self._cast_active and not self._cast_volume_supported:
+            return
+        current = self.volume_slider.value()
+        if current > 0:
+            self._volume_before_mute = current
+            self.volume_slider.setValue(0)
+        else:
+            self.volume_slider.setValue(max(1, min(100, self._volume_before_mute)))
+
+    def _shortcut_seek_start(self) -> None:
+        if self._shortcut_context_active():
+            self.seek_requested.emit(0.0)
+
+    def _shortcut_seek_end(self) -> None:
+        if self._shortcut_context_active() and self._duration > 0:
+            self.seek_requested.emit(self._duration)
+
+    def _shortcut_playlist_step(self, delta: int) -> None:
+        if not self._shortcut_context_active():
+            return
+        target = self._playlist_index + int(delta)
+        if 0 <= target < self._playlist_count:
+            self.playlist_entry_requested.emit(target)
 
     @staticmethod
     def _control_group(label_text: str, widget: QWidget) -> QHBoxLayout:

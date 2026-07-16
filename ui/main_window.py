@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home_page = HomePage()
-        self.player_page = PlayerPage()
+        self.player_page = PlayerPage(self.config)
         self.playlist_page = PlaylistPage()
         self.download_page = DownloadPage()
         self.favorite_page = FavoritePage(self.favorites)
@@ -699,13 +699,16 @@ class MainWindow(QMainWindow):
         if not quality:
             return
 
-        position = 0.0 if self._playback_finished else self.mpv.position()
+        playback_finished = self._playback_finished
+        position = 0.0 if playback_finished else self.mpv.position()
+        autoplay = playback_finished or not self.mpv.get_bool("pause")
         try:
             self.mpv.load(
                 quality.video_url,
                 quality.audio_url,
                 start_position=position,
                 headers=self.current_video.http_headers,
+                autoplay=autoplay,
             )
             self.current_quality_label = label
             self._set_playback_finished(False)
@@ -721,8 +724,19 @@ class MainWindow(QMainWindow):
             return
         subtitle = self.current_video.subtitles.get(key)
         if subtitle:
+            subtitle_ext = str(subtitle.ext or "").strip().lower()
+            subtitle_url = str(subtitle.url or "").strip()
+            if subtitle_ext == "xml" or urlparse(subtitle_url).path.lower().endswith(".xml"):
+                logger.warning(
+                    "unsupported XML subtitle ignored key=%s url=%s",
+                    key,
+                    subtitle_url,
+                )
+                self.toast.show_message("Bilibili XML 弹幕不是标准字幕，已忽略")
+                return
             try:
-                self.mpv.add_subtitle(subtitle.url)
+                logger.info("subtitle load requested key=%s ext=%s", key, subtitle_ext)
+                self.mpv.add_subtitle(subtitle_url)
             except Exception as exc:
                 logger.exception("subtitle load failed key=%s", key)
                 QMessageBox.warning(self, "字幕加载失败", str(exc))
@@ -1262,6 +1276,7 @@ class MainWindow(QMainWindow):
         self.runtime_install_service = RuntimeInstallService(self.config)
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
         self.download_manager.reload_settings()
+        self.player_page.reload_shortcuts()
         self._home_cache = []
         self._home_page = 1
         self._home_has_next = False

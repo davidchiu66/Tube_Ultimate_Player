@@ -14,6 +14,7 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-2563eb?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.6-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
@@ -28,6 +29,8 @@
 - 使用 `libmpv` 播放，支持暂停、停止、全屏、清晰度切换、倍速、字幕与自动隐藏控制面板
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
 - 投屏设备列表支持会话内缓存，后续打开时先快速校验 IP + 端口，缓存失效后再重新扫描
+- 播放快捷键支持在设置页查看、修改、禁用、冲突校验和恢复默认
+- 播放列表自动连播会在下一集加载后明确恢复播放，避免停留在暂停状态
 - 内置下载队列，支持并发下载、暂停、继续、删除、完成回放与完成 toast 提示
 - 下载列表、收藏和播放历史显示视频来源，并支持本地筛选搜索
 - 支持浏览器 Cookie 自动提取、手动 Cookie 文本保存、代理、FFmpeg、下载目录与默认首页配置
@@ -52,15 +55,15 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 首页 | YouTube / Bilibili 推荐内容、分页浏览、九宫格卡片展示 |
-| 搜索 | 双站点关键词搜索、分页、等待动画与温馨提示 |
+| 首页 | YouTube / Bilibili 推荐内容、分页浏览、九宫格卡片展示、长标题三行省略 |
+| 搜索 | 双站点关键词搜索、分页、等待动画、长标题三行省略与温馨提示 |
 | URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 列表类链接 |
-| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、全屏、双击切换全屏、自动隐藏控制器 |
+| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、全屏、快进/后退、静音、音量和播放列表快捷键、自动隐藏控制器 |
 | 播放列表 | 明确播放列表、作者动态列表、侧滑播放列表面板、命名保存、自动连播、批量下载 |
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制 |
 | 下载 | 下载队列、并发控制、暂停、继续、删除、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 代理、Cookie 文本、浏览器 Cookie 自动获取、FFmpeg、JS Runtime、下载目录、默认首页 |
+| 设置 | 常规与快捷键 Tab、代理、Cookie、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
 | 关于 | 当前版本、GitHub 链接、检测新版本、Release Note 展示、在线升级下载 |
 
 ## Bilibili 支持说明
@@ -182,6 +185,36 @@ Tube_Ultimate_Player/
 1. 前往官方站点：https://nodejs.org/
 2. 安装 LTS 版本
 3. 重启应用后重新检测
+
+## 播放快捷键
+
+快捷键可在“设置 → 快捷键”中查看、修改、禁用或恢复默认配置。
+
+| 默认按键 | 功能 |
+| --- | --- |
+| `Space` | 播放 / 暂停 |
+| `S` | 停止 |
+| `D` | 下载当前视频 |
+| `C` | 收藏当前视频 |
+| `Ctrl+C` | 投屏 / 停止投屏 |
+| `Enter / Return` | 全屏 / 退出全屏 |
+| `← / →` | 后退 / 前进 10 秒 |
+| `Ctrl+← / Ctrl+→` | 后退 / 前进 60 秒 |
+| `↑ / ↓` | 音量增加 / 降低 5 |
+| `M` | 静音 / 恢复音量 |
+| `Home / End` | 跳转到开头 / 结尾 |
+| `PageUp / PageDown` | 播放列表上一项 / 下一项 |
+
+输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
+
+## 0.2.6 更新摘要
+
+- 设置页新增“快捷键”Tab，所有播放器快捷键均可自定义、禁用或恢复默认。
+- 修复 Bilibili XML 弹幕被当作字幕加载时导致界面卡死的问题。
+- 修复播放列表自动连播下一集加载成功后仍停留在暂停状态的问题。
+- 首页和搜索结果的长标题最多显示三行，超出部分使用 `...`，悬停可查看完整标题。
+
+完整说明见 [`docs/releases/v0.2.6.md`](docs/releases/v0.2.6.md)。
 
 ## DLNA 投屏说明
 

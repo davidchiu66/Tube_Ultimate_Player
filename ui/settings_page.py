@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -11,9 +12,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QKeySequenceEdit,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSpinBox,
+    QScrollArea,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -21,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from services.config_service import ConfigService, detect_browser_cookie_sources
 from services.runtime_install_service import RuntimeStatus
+from services.shortcut_service import SHORTCUT_DEFINITIONS
 
 
 class SettingsPage(QWidget):
@@ -133,6 +139,51 @@ class SettingsPage(QWidget):
         form.addRow("FFmpeg 目录", ffmpeg_dir_row)
         form.addRow("DLNA 媒体服务端口", self.dlna_media_server_port_spin)
 
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        general_layout.setContentsMargins(16, 16, 16, 16)
+        general_layout.setSpacing(14)
+        general_layout.addWidget(self.system_hint_label)
+        general_layout.addLayout(form)
+        general_layout.addStretch(1)
+
+        self.shortcut_edits: dict[str, QKeySequenceEdit] = {}
+        shortcut_form = QFormLayout()
+        shortcut_form.setContentsMargins(0, 0, 0, 0)
+        shortcut_form.setHorizontalSpacing(18)
+        shortcut_form.setVerticalSpacing(10)
+        for definition in SHORTCUT_DEFINITIONS:
+            edit = QKeySequenceEdit()
+            self.shortcut_edits[definition.action] = edit
+            shortcut_form.addRow(definition.label, edit)
+
+        shortcut_content = QWidget()
+        shortcut_content.setLayout(shortcut_form)
+        shortcut_scroll = QScrollArea()
+        shortcut_scroll.setWidgetResizable(True)
+        shortcut_scroll.setWidget(shortcut_content)
+
+        shortcut_hint = QLabel("点击快捷键输入框后按下新的组合键。清空输入框可禁用该快捷键；相同快捷键不能分配给多个功能。")
+        shortcut_hint.setObjectName("MetaLabel")
+        shortcut_hint.setWordWrap(True)
+        self.restore_shortcuts_button = QPushButton("恢复默认快捷键")
+        self.restore_shortcuts_button.clicked.connect(self._restore_default_shortcuts)
+
+        self.shortcut_tab = QWidget()
+        shortcut_layout = QVBoxLayout(self.shortcut_tab)
+        shortcut_layout.setContentsMargins(16, 16, 16, 16)
+        shortcut_layout.setSpacing(12)
+        shortcut_layout.addWidget(shortcut_hint)
+        shortcut_layout.addWidget(shortcut_scroll, 1)
+        shortcut_actions = QHBoxLayout()
+        shortcut_actions.addWidget(self.restore_shortcuts_button)
+        shortcut_actions.addStretch(1)
+        shortcut_layout.addLayout(shortcut_actions)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(general_tab, "常规")
+        self.tabs.addTab(self.shortcut_tab, "快捷键")
+
         self.save_button = QPushButton("保存设置")
         self.reload_button = QPushButton("重新读取")
         self.save_button.clicked.connect(self.save)
@@ -149,9 +200,7 @@ class SettingsPage(QWidget):
         title = QLabel("设置")
         title.setObjectName("PageTitle")
         layout.addWidget(title)
-        layout.addWidget(self.system_hint_label)
-        layout.addLayout(form)
-        layout.addStretch()
+        layout.addWidget(self.tabs, 1)
         layout.addLayout(actions)
 
         self.load()
@@ -177,10 +226,16 @@ class SettingsPage(QWidget):
         self.ffmpeg_dir_edit.setText(str(self.config.get("download.ffmpeg_dir", "") or ""))
         self.max_downloads_spin.setValue(self.config.download_max_concurrent())
         self.dlna_media_server_port_spin.setValue(self.config.dlna_media_server_port())
+        for definition in SHORTCUT_DEFINITIONS:
+            sequence = self.config.shortcut_sequence(definition.action)
+            self.shortcut_edits[definition.action].setKeySequence(QKeySequence(sequence))
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
 
     def save(self) -> None:
+        shortcuts = self._shortcut_values()
+        if shortcuts is None:
+            return
         cookie_path = self._cookie_file_path()
         cookie_path.parent.mkdir(parents=True, exist_ok=True)
         cookie_path.write_text(self.cookie_edit.toPlainText().strip(), encoding="utf-8")
@@ -199,11 +254,40 @@ class SettingsPage(QWidget):
         self.config.set("download.ffmpeg_dir", self.ffmpeg_dir_edit.text().strip())
         self.config.set("download.max_concurrent", self.max_downloads_spin.value())
         self.config.set("dlna.media_server_port", self.dlna_media_server_port_spin.value())
+        for action, sequence in shortcuts.items():
+            self.config.set(f"shortcuts.{action}", sequence)
         self.config.save()
         self.config.download_dir()
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
         self.settings_saved.emit()
+
+    def _shortcut_values(self) -> dict[str, str] | None:
+        values: dict[str, str] = {}
+        assigned: dict[str, str] = {}
+        labels = {definition.action: definition.label for definition in SHORTCUT_DEFINITIONS}
+        for definition in SHORTCUT_DEFINITIONS:
+            sequence = self.shortcut_edits[definition.action].keySequence().toString(
+                QKeySequence.SequenceFormat.PortableText
+            ).strip()
+            normalized = sequence.casefold()
+            if normalized and normalized in assigned:
+                previous = assigned[normalized]
+                QMessageBox.warning(
+                    self,
+                    "快捷键冲突",
+                    f"“{labels[previous]}”和“{definition.label}”使用了相同快捷键：{sequence}",
+                )
+                self.tabs.setCurrentWidget(self.shortcut_tab)
+                return None
+            if normalized:
+                assigned[normalized] = definition.action
+            values[definition.action] = sequence
+        return values
+
+    def _restore_default_shortcuts(self) -> None:
+        for definition in SHORTCUT_DEFINITIONS:
+            self.shortcut_edits[definition.action].setKeySequence(QKeySequence(definition.default))
 
     def refresh_active_proxy(self) -> None:
         source, proxy = self.config.effective_proxy()

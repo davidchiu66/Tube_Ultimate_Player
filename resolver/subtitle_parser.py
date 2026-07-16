@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
 
 from resolver.models import SubtitleInfo
 
 
+logger = logging.getLogger("tube_player.resolver")
+
+
 class SubtitleParser:
-    PREFERRED_EXTS = ("vtt", "srt", "ttml", "json3")
+    PREFERRED_EXTS = ("vtt", "srt", "ass", "ssa", "ttml", "json3", "lrc")
 
     @classmethod
     def parse(
@@ -26,6 +30,14 @@ class SubtitleParser:
                 continue
             selected = cls._select_entry(entries)
             if not selected:
+                extensions = sorted({str(entry.get("ext") or "").lower() for entry in entries if entry.get("url")})
+                if extensions:
+                    logger.info(
+                        "unsupported subtitle formats skipped language=%s automatic=%s formats=%s",
+                        language,
+                        is_auto,
+                        extensions,
+                    )
                 continue
             key_base = f"{language}:{'auto' if is_auto else 'manual'}"
             key = key_base
@@ -49,5 +61,4 @@ class SubtitleParser:
             for entry in usable:
                 if entry.get("ext") == ext:
                     return entry
-        return usable[0]
-
+        return None

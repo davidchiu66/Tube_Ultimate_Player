@@ -31,6 +31,26 @@
     "media_server_port": 8899,
     "discovery_timeout": 3.0
   },
+  "shortcuts": {
+    "play_pause": "Space",
+    "stop": "S",
+    "download": "D",
+    "favorite": "C",
+    "cast": "Ctrl+C",
+    "fullscreen": "Return",
+    "fullscreen_keypad": "Enter",
+    "seek_backward_10": "Left",
+    "seek_forward_10": "Right",
+    "seek_backward_60": "Ctrl+Left",
+    "seek_forward_60": "Ctrl+Right",
+    "volume_up": "Up",
+    "volume_down": "Down",
+    "mute": "M",
+    "seek_start": "Home",
+    "seek_end": "End",
+    "playlist_previous": "PgUp",
+    "playlist_next": "PgDown"
+  },
   "ui": {
     "theme": "dark",
     "language": "zh-CN"
