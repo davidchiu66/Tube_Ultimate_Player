@@ -182,3 +182,7 @@ Tube_player/
 - `__pycache__/`
 
 这些内容已在 `.gitignore` 中忽略。
+
+## 社区
+
+[LINUX DO](https://linux.do)
