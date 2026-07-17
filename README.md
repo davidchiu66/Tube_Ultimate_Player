@@ -284,3 +284,7 @@ python -m unittest discover -s tests -p "test_*.py"
 - `__pycache__/`
 
 这些内容已在 `.gitignore` 中忽略。
+
+## 社区
+
+[LINUX DO](https://linux.do)
