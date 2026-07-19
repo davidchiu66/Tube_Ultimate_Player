@@ -206,7 +206,7 @@ class MpvPlayer(QObject):
                 )
         options = {
             "wid": str(int(self.video_widget.winId())),
-            "vo": "gpu-next",
+            "vo": _default_video_output(),
             "hwdec": str(self.config.get("player.hardware_decode", "auto-safe")),
             "keep-open": "yes",
             "cache": "yes",
@@ -346,3 +346,8 @@ def _libmpv_candidates(platform_name: str | None = None) -> list[str | Path]:
         seen.add(key)
         deduped.append(candidate)
     return deduped
+
+
+def _default_video_output(platform_name: str | None = None) -> str:
+    platform_value = platform_name or sys.platform
+    return "gpu" if platform_value.startswith("linux") else "gpu-next"

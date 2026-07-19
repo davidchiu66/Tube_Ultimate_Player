@@ -44,10 +44,13 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 真实 X11/libmpv 嵌入烟雾测试：
 
 ```bash
-xvfb-run -a env QT_QPA_PLATFORM=xcb python tests/linux_mpv_smoke.py
+xvfb-run -a -s "-screen 0 1280x720x24" \
+  env QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 \
+  python tests/linux_mpv_smoke.py
 ```
 
 烟雾测试会用 FFmpeg 生成短视频，创建真实 Qt/X11 窗口，初始化 libmpv 并确认播放位置开始推进。
+Linux 默认使用兼容性较好的 mpv `vo=gpu`；Windows 继续使用 `vo=gpu-next`。
 
 ## 准备增强运行时
 

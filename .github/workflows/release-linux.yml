@@ -43,7 +43,10 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Run X11 libmpv smoke test
-        run: xvfb-run -a env QT_QPA_PLATFORM=xcb QT_DEBUG_PLUGINS=1 python tests/linux_mpv_smoke.py
+        run: >-
+          xvfb-run -a -s "-screen 0 1280x720x24"
+          env QT_QPA_PLATFORM=xcb QT_DEBUG_PLUGINS=1 LIBGL_ALWAYS_SOFTWARE=1
+          python tests/linux_mpv_smoke.py
 
       - name: Stage enhanced AppDir
         run: python build_linux.py

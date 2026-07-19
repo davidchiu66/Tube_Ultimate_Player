@@ -61,9 +61,24 @@ def main() -> int:
                 succeeded["value"] = True
                 app.quit()
 
+        def on_timeout() -> None:
+            print(
+                "libmpv smoke timeout",
+                {
+                    "position": player.position(),
+                    "duration": player.duration(),
+                    "paused": player.get_bool("pause"),
+                    "eof": player.get_bool("eof-reached"),
+                    "idle": player.get_bool("core-idle"),
+                    "sample_size": sample.stat().st_size,
+                },
+                flush=True,
+            )
+            app.quit()
+
         player.position_changed.connect(on_position)
         player.load(str(sample))
-        QTimer.singleShot(8000, app.quit)
+        QTimer.singleShot(12000, on_timeout)
         app.exec()
         player.shutdown()
         widget.close()
