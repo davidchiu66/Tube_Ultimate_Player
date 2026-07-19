@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app_paths import APP_NAME, linux_runtime_directories
 from platform_support import configure_qt_platform_environment, linux_session_type
-from player.mpv_player import _default_video_output, _libmpv_candidates
+from player.mpv_player import _default_video_output, _libmpv_candidates, _software_gpu_fallback_enabled
 from services.config_service import detect_browser_cookie_sources
 from services.config_service import ConfigService
 from services.cookie_service import _resolve_firefox_profile_dir
@@ -115,6 +115,8 @@ class LinuxLibmpvDiscoveryTests(unittest.TestCase):
     def test_linux_uses_compatible_gpu_video_output(self) -> None:
         self.assertEqual(_default_video_output("linux"), "gpu")
         self.assertEqual(_default_video_output("win32"), "gpu-next")
+        self.assertTrue(_software_gpu_fallback_enabled("linux"))
+        self.assertFalse(_software_gpu_fallback_enabled("win32"))
 
     def test_linux_candidates_include_bundled_and_system_sonames(self) -> None:
         with patch("player.mpv_player.ctypes.util.find_library", return_value="libmpv.so.2"):

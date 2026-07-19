@@ -51,6 +51,7 @@ xvfb-run -a -s "-screen 0 1280x720x24" \
 
 烟雾测试会用 FFmpeg 生成短视频，创建真实 Qt/X11 窗口，初始化 libmpv 并确认播放位置开始推进。
 Linux 默认使用兼容性较好的 mpv `vo=gpu`；Windows 继续使用 `vo=gpu-next`。
+Linux 同时允许 `gpu-sw=yes` 软件 GPU 兜底；只有硬件上下文不可用时才回退到 Mesa llvmpipe 等软件渲染器。
 
 ## 准备增强运行时
 

@@ -222,13 +222,15 @@ class MpvPlayer(QObject):
         _, proxy = self.config.effective_proxy()
         if proxy:
             options["http-proxy"] = proxy
+        if _software_gpu_fallback_enabled():
+            options["gpu-sw"] = "yes"
 
         debug_log = os.environ.get("TUBE_PLAYER_MPV_LOG_FILE", "").strip()
         if debug_log:
             options["log-file"] = debug_log
             options["msg-level"] = "all=v"
 
-        optional_options = {"profile", "log-file", "msg-level"}
+        optional_options = {"profile", "gpu-sw", "log-file", "msg-level"}
         for key, value in options.items():
             try:
                 self._check(
@@ -357,3 +359,7 @@ def _libmpv_candidates(platform_name: str | None = None) -> list[str | Path]:
 def _default_video_output(platform_name: str | None = None) -> str:
     platform_value = platform_name or sys.platform
     return "gpu" if platform_value.startswith("linux") else "gpu-next"
+
+
+def _software_gpu_fallback_enabled(platform_name: str | None = None) -> bool:
+    return (platform_name or sys.platform).startswith("linux")
