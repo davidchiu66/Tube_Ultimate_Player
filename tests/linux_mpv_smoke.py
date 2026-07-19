@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 from player.mpv_player import MpvPlayer
@@ -31,18 +31,14 @@ def main() -> int:
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=black:s=320x180:d=2",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=44100:cl=stereo",
-                "-shortest",
+                "color=c=black:s=320x180:d=5",
                 "-c:v",
-                "libx264",
+                "mpeg4",
+                "-q:v",
+                "5",
                 "-pix_fmt",
                 "yuv420p",
-                "-c:a",
-                "aac",
+                "-an",
                 "-y",
                 str(sample),
             ],
@@ -51,8 +47,12 @@ def main() -> int:
 
         config = ConfigService(user_path=root / "user_config.json")
         widget = QWidget()
+        widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         widget.resize(640, 360)
         widget.show()
+        native_window_id = int(widget.winId())
+        app.processEvents()
+        print(f"X11 smoke widget mapped wid={native_window_id}", flush=True)
         player = MpvPlayer(widget, config)
         succeeded = {"value": False}
 
@@ -77,7 +77,7 @@ def main() -> int:
             app.quit()
 
         player.position_changed.connect(on_position)
-        player.load(str(sample))
+        QTimer.singleShot(0, lambda: player.load(str(sample)))
         QTimer.singleShot(12000, on_timeout)
         app.exec()
         player.shutdown()
