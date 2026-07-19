@@ -5,6 +5,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -66,5 +71,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
-
+    raise SystemExit(0 if "--check-imports" in sys.argv else main())
