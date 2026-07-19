@@ -75,7 +75,6 @@ def validate_enhanced_runtime() -> None:
     if missing:
         raise RuntimeError(f"Missing enhanced runtime files: {', '.join(missing)}")
 
-
 def _copy_tree_contents(source_dir: Path, target_dir: Path) -> None:
     for child in source_dir.iterdir():
         destination = target_dir / child.name
