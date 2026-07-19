@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -37,6 +38,71 @@ DEFAULT_CONFIG_DIR = _pick_existing(APP_DIR / "config", BUNDLE_DIR / "config", S
 ASSET_DIR = _pick_existing(APP_DIR / "docs" / "assets", BUNDLE_DIR / "docs" / "assets", SOURCE_DIR / "docs" / "assets")
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeDirectories:
+    root: Path
+    config: Path
+    cache: Path
+    data: Path
+    logs: Path
+    downloads: Path
+    updates: Path
+
+
+def linux_runtime_directories(
+    environ: dict[str, str] | None = None,
+    home: Path | None = None,
+) -> RuntimeDirectories:
+    env = environ if environ is not None else os.environ
+    user_home = home if home is not None else Path.home()
+    config_home = _absolute_env_path(env, "XDG_CONFIG_HOME", user_home / ".config")
+    data_home = _absolute_env_path(env, "XDG_DATA_HOME", user_home / ".local" / "share")
+    cache_home = _absolute_env_path(env, "XDG_CACHE_HOME", user_home / ".cache")
+    state_home = _absolute_env_path(env, "XDG_STATE_HOME", user_home / ".local" / "state")
+    videos_home = _linux_videos_home(env, user_home, config_home)
+
+    data = data_home / APP_NAME
+    cache = cache_home / APP_NAME
+    return RuntimeDirectories(
+        root=data,
+        config=config_home / APP_NAME,
+        cache=cache,
+        data=data,
+        logs=state_home / APP_NAME / "logs",
+        downloads=videos_home / APP_NAME,
+        updates=cache / "updates",
+    )
+
+
+def _absolute_env_path(environ: dict[str, str], key: str, fallback: Path) -> Path:
+    raw = environ.get(key, "").strip()
+    if not raw:
+        return fallback
+    candidate = Path(raw).expanduser()
+    return candidate if candidate.is_absolute() or raw.startswith("/") else fallback
+
+
+def _linux_videos_home(environ: dict[str, str], home: Path, config_home: Path) -> Path:
+    configured = environ.get("XDG_VIDEOS_DIR", "").strip()
+    if not configured:
+        user_dirs = config_home / "user-dirs.dirs"
+        try:
+            for raw_line in user_dirs.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line.startswith("XDG_VIDEOS_DIR="):
+                    continue
+                configured = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+        except OSError:
+            pass
+    if configured:
+        configured = configured.replace("${HOME}", str(home)).replace("$HOME", str(home))
+        candidate = Path(configured).expanduser()
+        if candidate.is_absolute() or configured.startswith("/"):
+            return candidate
+    return home / "Videos"
+
+
 def _runtime_root_candidates() -> list[Path]:
     candidates: list[Path] = []
     if sys.platform.startswith("win"):
@@ -62,13 +128,23 @@ def _runtime_root() -> Path:
     return SOURCE_DIR / "runtime"
 
 
-RUNTIME_ROOT = _runtime_root()
-CONFIG_DIR = RUNTIME_ROOT / "config"
-CACHE_DIR = RUNTIME_ROOT / "cache"
-DATA_DIR = RUNTIME_ROOT / "data"
-LOG_DIR = RUNTIME_ROOT / "logs"
-DOWNLOAD_DIR = RUNTIME_ROOT / "downloads"
-UPDATE_DIR = RUNTIME_ROOT / "updates"
+if sys.platform.startswith("linux"):
+    _RUNTIME_DIRS = linux_runtime_directories()
+    RUNTIME_ROOT = _RUNTIME_DIRS.root
+    CONFIG_DIR = _RUNTIME_DIRS.config
+    CACHE_DIR = _RUNTIME_DIRS.cache
+    DATA_DIR = _RUNTIME_DIRS.data
+    LOG_DIR = _RUNTIME_DIRS.logs
+    DOWNLOAD_DIR = _RUNTIME_DIRS.downloads
+    UPDATE_DIR = _RUNTIME_DIRS.updates
+else:
+    RUNTIME_ROOT = _runtime_root()
+    CONFIG_DIR = RUNTIME_ROOT / "config"
+    CACHE_DIR = RUNTIME_ROOT / "cache"
+    DATA_DIR = RUNTIME_ROOT / "data"
+    LOG_DIR = RUNTIME_ROOT / "logs"
+    DOWNLOAD_DIR = RUNTIME_ROOT / "downloads"
+    UPDATE_DIR = RUNTIME_ROOT / "updates"
 
 
 def ensure_runtime_dirs() -> None:

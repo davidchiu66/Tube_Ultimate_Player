@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT="/opt/Tube_Ultimate_Player"
+export LD_LIBRARY_PATH="$APP_ROOT/lib:$APP_ROOT/3rdpart${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    export QT_QPA_PLATFORM="${TUBE_PLAYER_QPA_PLATFORM:-xcb}"
+fi
+
+exec "$APP_ROOT/Tube_Ultimate_Player" "$@"
+

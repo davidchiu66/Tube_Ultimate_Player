@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+
+from platform_support import configure_qt_platform_environment, is_root_user, linux_session_type
+
+
+configure_qt_platform_environment()
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -17,8 +23,19 @@ logger = logging.getLogger("tube_player.app")
 def main() -> int:
     ensure_runtime_dirs()
     setup_logging()
-    logger.info("application starting")
+    logger.info(
+        "application starting platform=%s session=%s qpa=%s root=%s",
+        sys.platform,
+        linux_session_type(),
+        os.environ.get("QT_QPA_PLATFORM", "auto"),
+        is_root_user(),
+    )
+    if is_root_user():
+        logger.warning(
+            "application is running as root; desktop session, cookies, audio and created file ownership may be limited"
+        )
     app = QApplication(sys.argv)
+    logger.info("Qt platform backend=%s", app.platformName())
     app.setApplicationName(APP_NAME)
     _load_app_icon(app)
     _load_stylesheet(app)

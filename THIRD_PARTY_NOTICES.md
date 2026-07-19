@@ -31,15 +31,29 @@ This project depends on, bundles, or integrates with the following third-party s
 - Website: https://deno.com/ and https://github.com/denoland/deno
 - Copyright: Deno authors and contributors
 - License: MIT License; refer to the license file bundled with enhanced installers
-- Usage in this project: optional JavaScript runtime bundled in the `_with_deno_ffmpeg` installer
+- Usage in this project: JavaScript runtime bundled in enhanced Windows installers/portable packages and enhanced Linux AppImage/DEB packages
 
 ## FFmpeg
 
 - Project: FFmpeg
 - Website: https://ffmpeg.org/
 - Copyright: FFmpeg developers and contributors
-- License: depends on the selected Windows build configuration; enhanced installers use the referenced Gyan Windows build and bundle the corresponding license notice
-- Usage in this project: optional media merge, remuxing and DLNA streaming runtime bundled in the `_with_deno_ffmpeg` installer
+- License: depends on the exact build configuration; Windows enhanced installers use the referenced Gyan build, while Linux enhanced packages use the build source recorded by the Linux runtime preparation script
+- Usage in this project: media merge, remuxing and DLNA streaming runtime bundled in enhanced Windows and Linux packages
+
+## Linux Enhanced Packages
+
+The enhanced Linux AppImage and DEB build chain bundles libmpv, Deno, FFmpeg/FFprobe and yt-dlp. It also uses linuxdeploy to collect the redistributable user-space shared-library dependency closure required by libmpv.
+
+Each Linux build must include:
+
+- `THIRD_PARTY_BUNDLED.md`
+- the files under `licenses/`
+- `third-party-manifest.sha256`
+- `bundled-runtime-manifest.sha256`
+- the exact package/build configuration information required to determine whether LGPL, GPL or other terms apply
+
+glibc, GPU drivers and host Mesa drivers must not be bundled.
 
 ## Additional Binary Dependencies
 
@@ -55,3 +69,4 @@ If you publish binaries or installers built from this repository:
 2. Include upstream license texts or links where required.
 3. Do not remove or alter third-party copyright notices.
 4. Ensure your redistribution complies with the original licenses of yt-dlp, mpv/libmpv, Qt/PySide6, and any other bundled binaries.
+5. For Linux packages, retain the generated SHA256 manifest and the complete license/copyright payload collected during the build.

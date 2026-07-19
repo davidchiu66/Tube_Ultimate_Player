@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,9 @@ class FfmpegInstallService:
     def is_available(self) -> bool:
         return bool(self.effective_ffmpeg_dir())
 
+    def automatic_install_supported(self) -> bool:
+        return sys.platform.startswith("win")
+
     def effective_ffmpeg_dir(self) -> str:
         configured = self.config.download_ffmpeg_location()
         if configured:
@@ -36,9 +40,10 @@ class FfmpegInstallService:
             if found:
                 return str(found)
 
-        thirdpart_ffmpeg = _ffmpeg_dir_from_path(thirdpart_path("ffmpeg.exe"))
-        if thirdpart_ffmpeg:
-            return str(thirdpart_ffmpeg)
+        for name in ("ffmpeg.exe", "ffmpeg"):
+            thirdpart_ffmpeg = _ffmpeg_dir_from_path(thirdpart_path(name))
+            if thirdpart_ffmpeg:
+                return str(thirdpart_ffmpeg)
 
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
@@ -51,6 +56,8 @@ class FfmpegInstallService:
         return ""
 
     def install_info(self) -> FfmpegInstallInfo:
+        if not self.automatic_install_supported():
+            raise RuntimeError("Linux 不使用 Windows FFmpeg 7z 安装流程，请使用增强版或发行版包管理器安装 FFmpeg。")
         UPDATE_DIR.mkdir(parents=True, exist_ok=True)
         self.extract_dir().mkdir(parents=True, exist_ok=True)
         return FfmpegInstallInfo(

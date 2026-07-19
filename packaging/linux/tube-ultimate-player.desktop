@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Tube Ultimate Player
+Comment=YouTube and Bilibili desktop video player
+Exec=Tube_Ultimate_Player %U
+Icon=tube-ultimate-player
+Terminal=false
+Categories=AudioVideo;Video;Network;
+StartupWMClass=Tube_Ultimate_Player
+MimeType=x-scheme-handler/http;x-scheme-handler/https;

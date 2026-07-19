@@ -141,6 +141,15 @@ class UpdateService:
         return UPDATE_DIR
 
     def detect_install_mode(self) -> tuple[str, str]:
+        if sys.platform.startswith("linux"):
+            if os.environ.get("APPIMAGE", "").strip():
+                return "linux_appimage", "Linux AppImage"
+            root = APP_DIR.resolve()
+            root_text = root.as_posix().lower()
+            if root_text.startswith("/opt/") or root_text.startswith("/usr/"):
+                return "linux_deb", "Linux DEB"
+            return "linux_appimage", "Linux 开发/AppImage 模式"
+
         root = APP_DIR
         root_text = str(root).lower()
         if "program files" in root_text:
@@ -215,6 +224,20 @@ class UpdateService:
 
     def select_upgrade_asset(self, release: ReleaseInfo, install_mode: str) -> ReleaseAsset | None:
         assets = release.assets
+        if install_mode.startswith("linux"):
+            suffix = ".deb" if install_mode == "linux_deb" else ".appimage"
+            matching = [asset for asset in assets if asset.name.lower().endswith(suffix)]
+            matching = [
+                asset
+                for asset in matching
+                if any(arch in asset.name.lower() for arch in ("x86_64", "amd64"))
+            ] or matching
+            for asset in matching:
+                name = asset.name.lower()
+                if "with_deno_ffmpeg" in name or "with-deno-ffmpeg" in name:
+                    return asset
+            return matching[0] if matching else None
+
         if install_mode == "portable":
             for asset in assets:
                 name = asset.name.lower()
@@ -232,6 +255,10 @@ class UpdateService:
             if asset.name.lower().endswith(".exe"):
                 return asset
         return None
+
+    @staticmethod
+    def automatic_upgrade_supported(install_mode: str) -> bool:
+        return sys.platform.startswith("win") and install_mode in ("portable", "installer")
 
     def download_target_path(self, asset: ReleaseAsset) -> Path:
         filename = asset.name or "update_package.bin"

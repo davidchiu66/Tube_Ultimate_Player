@@ -6,6 +6,7 @@ import os
 import urllib.error
 import urllib.request
 import webbrowser
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ class RuntimeStatus:
     available: bool
     runtime: str
     display_text: str
+    automatic_install_supported: bool = True
 
 
 @dataclass(slots=True)
@@ -45,9 +47,18 @@ class RuntimeInstallService:
             name, _, path = runtime.partition(":")
             label = name if not path else f"{name} ({path})"
             return RuntimeStatus(True, runtime, f"已检测到 JS Runtime：{label}")
+        if sys.platform.startswith("linux"):
+            return RuntimeStatus(
+                False,
+                "",
+                "未检测到 JS Runtime。增强版应内置 Deno；标准版请通过发行版包管理器安装 deno 或 nodejs。",
+                automatic_install_supported=False,
+            )
         return RuntimeStatus(False, "", "未检测到 JS Runtime，建议安装 Node.js LTS。")
 
     def fetch_node_installer_info(self) -> NodeInstallerInfo:
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("Linux 不使用 Windows Node.js MSI 安装流程，请安装 Deno/Node 或使用增强版。")
         payload = self._read_json(NODE_INDEX_URL)
         if not isinstance(payload, list):
             raise RuntimeError("Node.js 版本清单格式无效")
@@ -80,6 +91,8 @@ class RuntimeInstallService:
         return UPDATE_DIR / info.filename
 
     def launch_installer(self, path: str | Path) -> None:
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("当前平台不支持启动 Windows Node.js 安装程序")
         target = Path(path)
         if not target.exists():
             raise RuntimeError("安装包文件不存在")

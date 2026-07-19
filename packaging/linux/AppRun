@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+APPDIR="${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
+export LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/bin/3rdpart${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    export QT_QPA_PLATFORM="${TUBE_PLAYER_QPA_PLATFORM:-xcb}"
+fi
+
+exec "$APPDIR/usr/bin/Tube_Ultimate_Player" "$@"
+

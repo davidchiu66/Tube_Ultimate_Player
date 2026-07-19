@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QMessageBox
 
-from services.update_service import UpdateService
+from services.update_service import ReleaseAsset, ReleaseInfo, UpdateService
 from ui.main_window import MainWindow
 
 
@@ -69,6 +69,46 @@ class UpdateLaunchServiceTests(unittest.TestCase):
             self.assertIn("robocopy.exe $sourceRoot $TargetDir", script)
             self.assertIn("Start-Process -FilePath $RestartExecutable", script)
 
+    def test_linux_prefers_enhanced_appimage_asset(self) -> None:
+        release = ReleaseInfo(
+            tag_name="v1.0.0",
+            name="1.0.0",
+            published_at="",
+            body="",
+            html_url="https://example.invalid",
+            prerelease=False,
+            assets=[
+                ReleaseAsset("Tube_Ultimate_Player_v1.0.0_x86_64.AppImage", "standard", 1),
+                ReleaseAsset(
+                    "Tube_Ultimate_Player_v1.0.0_x86_64_with_deno_ffmpeg.AppImage",
+                    "enhanced",
+                    2,
+                ),
+                ReleaseAsset("tube-ultimate-player_1.0.0_amd64.deb", "deb", 3),
+            ],
+        )
+
+        selected = self.service.select_upgrade_asset(release, "linux_appimage")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.download_url, "enhanced")
+
+    def test_linux_deb_mode_selects_deb_asset(self) -> None:
+        release = ReleaseInfo(
+            tag_name="v1.0.0",
+            name="1.0.0",
+            published_at="",
+            body="",
+            html_url="https://example.invalid",
+            prerelease=False,
+            assets=[ReleaseAsset("tube-ultimate-player_1.0.0_amd64.deb", "deb", 3)],
+        )
+
+        selected = self.service.select_upgrade_asset(release, "linux_deb")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.download_url, "deb")
+
 
 class UpdateLaunchUiTests(unittest.TestCase):
     def _state(self, install_mode: str = "portable") -> SimpleNamespace:
@@ -108,6 +148,20 @@ class UpdateLaunchUiTests(unittest.TestCase):
 
         state.update_service.launch_portable_update.assert_called_once_with("portable.zip")
         state.close.assert_called_once_with()
+
+    def test_linux_download_completion_does_not_launch_or_close(self) -> None:
+        state = self._state("linux_appimage")
+        state._launch_downloaded_upgrade = Mock()
+
+        with (
+            patch("ui.main_window.QMessageBox.information"),
+            patch("ui.main_window.QDesktopServices.openUrl"),
+        ):
+            MainWindow._update_download_success(state, "/tmp/player.AppImage")
+
+        state._launch_downloaded_upgrade.assert_not_called()
+        state.close.assert_not_called()
+        state.about_page.set_status.assert_called_with("Linux 升级包已下载，请退出应用后手动安装或替换。")
 
 
 if __name__ == "__main__":

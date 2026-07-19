@@ -150,6 +150,7 @@ def _write_netscape_cookie_file(cookies: list[tuple[str, str]], target_url: str 
             f"{row_domain}\t{row_include_subdomains}\t/\t{secure}\t{expires}\t{name}\t{clean_value}"
         )
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    secure_cookie_file(target)
     return target
 
 
@@ -228,16 +229,46 @@ def _load_firefox_cookie_header(browser_spec: str, target_url: str) -> str:
 
 
 def _resolve_firefox_profile_dir(profile: str) -> Path | None:
-    root = Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "Profiles"
-    if not root.exists():
-        return None
+    profile_path = Path(profile).expanduser() if profile else None
+    if profile_path is not None and profile_path.is_absolute():
+        return profile_path if (profile_path / "cookies.sqlite").is_file() else None
+
+    roots: list[Path]
+    if os.name == "nt":
+        roots = [Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "Profiles"]
+    else:
+        home = Path.home()
+        roots = [
+            home / ".mozilla" / "firefox",
+            home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+            home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
+        ]
     if profile:
-        target = root / profile
-        return target if target.exists() else None
-    for candidate in root.iterdir():
-        if (candidate / "cookies.sqlite").exists():
-            return candidate
+        for root in roots:
+            target = root / profile
+            if (target / "cookies.sqlite").is_file():
+                return target
+        return None
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            candidates = root.iterdir()
+        except OSError:
+            continue
+        for candidate in candidates:
+            if (candidate / "cookies.sqlite").is_file():
+                return candidate
     return None
+
+
+def secure_cookie_file(path: str | Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        Path(path).chmod(0o600)
+    except OSError:
+        pass
 
 
 def _cookie_domain_for_url(target_url: str) -> tuple[str, str]:

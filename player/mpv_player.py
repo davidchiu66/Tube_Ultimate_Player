@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QWidget
 
-from app_paths import add_thirdpart_dll_directory, thirdpart_path
+from app_paths import BUNDLE_DIR, THIRDPART_DIR, add_thirdpart_dll_directory, thirdpart_path
 from services.config_service import ConfigService
 
 
@@ -190,6 +193,13 @@ class MpvPlayer(QObject):
         return bool(value.value)
 
     def _configure_before_initialize(self) -> None:
+        if sys.platform.startswith("linux"):
+            backend = QGuiApplication.platformName().strip().lower()
+            if backend.startswith("wayland"):
+                raise MpvError(
+                    "Linux 首版暂不支持原生 Wayland 嵌入播放。请使用 X11，或在 Wayland 会话中通过 "
+                    "QT_QPA_PLATFORM=xcb 启用 XWayland。"
+                )
         options = {
             "wid": str(int(self.video_widget.winId())),
             "vo": "gpu-next",
@@ -286,17 +296,43 @@ class MpvPlayer(QObject):
     @staticmethod
     def _load_libmpv() -> ctypes.CDLL:
         add_thirdpart_dll_directory()
-        candidates = [
-            thirdpart_path("libmpv-2.dll"),
-            thirdpart_path("mpv-2.dll"),
-            Path("libmpv.so.2"),
-            Path("libmpv.dylib"),
-        ]
+        candidates = _libmpv_candidates()
         for candidate in candidates:
             try:
-                if candidate.is_absolute() or candidate.exists():
-                    return ctypes.CDLL(str(candidate))
                 return ctypes.CDLL(str(candidate))
             except OSError:
                 continue
-        raise MpvError("未找到 libmpv 动态库，请确认 3rdpart/libmpv-2.dll 存在")
+        checked = ", ".join(str(candidate) for candidate in candidates)
+        raise MpvError(f"未找到可用的 libmpv 动态库。已检查：{checked}")
+
+
+def _libmpv_candidates(platform_name: str | None = None) -> list[str | Path]:
+    platform_value = platform_name or sys.platform
+    candidates: list[str | Path] = []
+    if platform_value.startswith("win"):
+        candidates.extend((thirdpart_path("libmpv-2.dll"), thirdpart_path("mpv-2.dll")))
+    elif platform_value.startswith("linux"):
+        for name in ("libmpv.so.2", "libmpv.so.1", "libmpv.so"):
+            candidates.extend(
+                (
+                    THIRDPART_DIR / name,
+                    BUNDLE_DIR / "lib" / name,
+                    BUNDLE_DIR / "usr" / "lib" / name,
+                )
+            )
+        detected = ctypes.util.find_library("mpv")
+        if detected:
+            candidates.append(detected)
+        candidates.extend(("libmpv.so.2", "libmpv.so.1", "libmpv.so"))
+    elif platform_value == "darwin":
+        candidates.extend((thirdpart_path("libmpv.dylib"), "libmpv.dylib"))
+
+    deduped: list[str | Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped

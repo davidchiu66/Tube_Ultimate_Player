@@ -713,9 +713,10 @@ class YoutubeResolver:
 
     @staticmethod
     def _find_ytdlp() -> Path:
-        bundled = thirdpart_path("yt-dlp.exe")
-        if bundled.exists():
-            return bundled
+        for name in ("yt-dlp.exe", "yt-dlp_linux", "yt-dlp"):
+            bundled = thirdpart_path(name)
+            if bundled.is_file():
+                return bundled
         return Path("yt-dlp")
 
     @staticmethod

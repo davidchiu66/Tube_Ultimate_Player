@@ -27,6 +27,7 @@ from dlna.media_server import DlnaMediaServer, DlnaMediaSource, mime_type_for_ex
 from dlna.models import DlnaDevice
 from download.download_manager import DownloadManager
 from player.mpv_player import MpvPlayer
+from platform_support import is_root_user
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, SavedPlaylist, VideoInfo, VideoQuality
 from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
@@ -179,8 +180,19 @@ class MainWindow(QMainWindow):
         self._refresh_favorite_views()
         QTimer.singleShot(0, self.load_home)
         QTimer.singleShot(1200, self._maybe_prompt_ffmpeg_install)
+        if is_root_user():
+            QTimer.singleShot(0, self._show_root_session_warning)
         self.top_bar_widget.set_topmost_state(self._is_topmost)
         logger.info("main window initialized")
+
+    def _show_root_session_warning(self) -> None:
+        QMessageBox.warning(
+            self,
+            "不建议以 root 运行",
+            "应用允许以 root 身份启动，但当前进程将使用 /root 下的独立配置和数据。\n\n"
+            "浏览器 Cookie、桌面密钥环、音频会话和 X11/XWayland 显示授权可能不可用，"
+            "下载文件也会归 root 所有。建议退出后使用当前桌面普通用户运行。",
+        )
 
     def _connect_signals(self) -> None:
         self.top_bar_widget.search_requested.connect(self._toolbar_search_requested)
@@ -1430,7 +1442,10 @@ class MainWindow(QMainWindow):
         self.about_page.set_upgrade_available(result.has_update)
         if result.has_update:
             asset_name = result.selected_asset.name if result.selected_asset else "升级包"
-            self.about_page.set_status(f"检测到新版本，可下载 {asset_name} 进行升级。")
+            if result.install_mode.startswith("linux"):
+                self.about_page.set_status(f"检测到新版本，可下载 {asset_name}；下载后请手动替换或通过包管理器安装。")
+            else:
+                self.about_page.set_status(f"检测到新版本，可下载 {asset_name} 进行升级。")
         else:
             message = "当前已经是最新版本。"
             if result.selected_asset is None:
@@ -1474,6 +1489,18 @@ class MainWindow(QMainWindow):
         mode_label = result.install_mode_label if result else "当前版本"
         self.about_page.set_upgrade_progress(False, f"升级包已下载完成：{path}", 100.0)
         self.about_page.set_status("升级包已准备好。")
+        if result and result.install_mode.startswith("linux"):
+            package = Path(path)
+            self.about_page.set_status("Linux 升级包已下载，请退出应用后手动安装或替换。")
+            QMessageBox.information(
+                self,
+                "Linux 升级包已下载",
+                f"{mode_label} 的升级包已保存到：\n{path}\n\n"
+                "Linux 首版不会自动提权或安装系统包。AppImage 请退出后替换原文件；"
+                "DEB 请通过软件中心或 apt/dpkg 安装。",
+            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(package.parent)))
+            return
         if result and result.install_mode == "portable":
             detail = "确认后将关闭当前应用，自动解压并替换便携版文件，完成后重新启动新版。"
         else:
@@ -1491,6 +1518,10 @@ class MainWindow(QMainWindow):
         self._launch_downloaded_upgrade(path, result.install_mode if result else "installer")
 
     def _launch_downloaded_upgrade(self, path: str, install_mode: str) -> None:
+        if install_mode.startswith("linux"):
+            self.about_page.set_status("Linux 升级包需要由用户手动安装。")
+            QMessageBox.information(self, "Linux 升级说明", "Linux 首版不执行自动安装或权限提升。")
+            return
         try:
             if install_mode == "portable":
                 self.update_service.launch_portable_update(path)
@@ -1585,6 +1616,11 @@ class MainWindow(QMainWindow):
     def _maybe_prompt_ffmpeg_install(self) -> None:
         if self.ffmpeg_install_service.is_available():
             return
+        if not self.ffmpeg_install_service.automatic_install_supported():
+            logger.warning(
+                "FFmpeg is unavailable; Linux automatic installation is disabled, use bundled FFmpeg or the package manager"
+            )
+            return
         answer = QMessageBox.question(
             self,
             "FFmpeg 未配置",
@@ -1596,7 +1632,11 @@ class MainWindow(QMainWindow):
             self._start_ffmpeg_install()
 
     def _start_ffmpeg_install(self) -> None:
-        info = self.ffmpeg_install_service.install_info()
+        try:
+            info = self.ffmpeg_install_service.install_info()
+        except RuntimeError as exc:
+            QMessageBox.information(self, "FFmpeg 安装说明", str(exc))
+            return
         self._pending_ffmpeg_info = info
         self._show_ffmpeg_progress("正在下载 FFmpeg...", 0.0, indeterminate=True)
 
@@ -1633,7 +1673,7 @@ class MainWindow(QMainWindow):
         ffmpeg_dir = self.ffmpeg_install_service.locate_extracted_ffmpeg_dir()
         if not ffmpeg_dir:
             self._close_ffmpeg_progress()
-            QMessageBox.warning(self, "FFmpeg 安装失败", "已解压 FFmpeg，但没有找到 ffmpeg.exe。")
+            QMessageBox.warning(self, "FFmpeg 安装失败", "已解压 FFmpeg，但没有找到 FFmpeg 可执行文件。")
             return
 
         self.config.set("download.ffmpeg_dir", ffmpeg_dir)

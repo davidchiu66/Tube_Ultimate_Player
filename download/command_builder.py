@@ -127,9 +127,10 @@ def should_retry_with_cookie_file(output: str) -> bool:
 
 
 def _find_ytdlp() -> Path:
-    bundled = thirdpart_path("yt-dlp.exe")
-    if bundled.exists():
-        return bundled
+    for name in ("yt-dlp.exe", "yt-dlp_linux", "yt-dlp"):
+        bundled = thirdpart_path(name)
+        if bundled.is_file():
+            return bundled
     return Path("yt-dlp")
 
 
@@ -148,9 +149,10 @@ def _ffmpeg_location(config: ConfigService) -> str:
     configured = config.download_ffmpeg_location()
     if configured and _contains_ffmpeg(Path(configured)):
         return configured
-    thirdpart = thirdpart_path("ffmpeg.exe")
-    if thirdpart.exists():
-        return str(thirdpart.parent)
+    for name in ("ffmpeg.exe", "ffmpeg"):
+        thirdpart = thirdpart_path(name)
+        if thirdpart.is_file():
+            return str(thirdpart.parent)
     system_ffmpeg = shutil.which("ffmpeg")
     if system_ffmpeg:
         return str(Path(system_ffmpeg).parent)

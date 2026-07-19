@@ -210,9 +210,13 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/release-installer-with-deno-ffmpeg.yml
 
+  build-linux-with-deno-ffmpeg:
+    needs: prepare
+    uses: ./.github/workflows/release-linux.yml
+
   publish-release:
     runs-on: windows-latest
-    needs: [prepare, build-portable, build-installer, build-installer-with-deno-ffmpeg]
+    needs: [prepare, build-portable, build-installer, build-installer-with-deno-ffmpeg, build-linux-with-deno-ffmpeg]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -241,6 +245,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: Tube_Ultimate_Player_portable_with_deno_ffmpeg
+          path: release_assets
+
+      - name: Download enhanced Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_linux_x86_64_with_deno_ffmpeg
           path: release_assets
 
       - name: Publish GitHub Release

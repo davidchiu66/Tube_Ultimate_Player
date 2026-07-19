@@ -101,6 +101,8 @@ class ConfigService:
 
     def default_cookie_file(self, site: str = "") -> str:
         normalized_site = self._normalize_cookie_site(site)
+        if sys.platform.startswith("linux"):
+            return str(CONFIG_DIR / f"cookie_{normalized_site}.txt")
         return str(runtime_path(f"cookie_{normalized_site}.txt"))
 
     def cookie_site_for_url(self, target_url: str) -> str:
@@ -246,10 +248,16 @@ def detect_browser_cookie_source() -> str:
     return str(sources[0][1]) if sources else ""
 
 
-def detect_browser_cookie_sources() -> list[tuple[str, str]]:
-    if sys.platform.startswith("win"):
-        local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
-        app_data = Path(os.environ.get("APPDATA", ""))
+def detect_browser_cookie_sources(
+    platform_name: str | None = None,
+    home: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    platform_value = platform_name or sys.platform
+    env = environ if environ is not None else os.environ
+    if platform_value.startswith("win"):
+        local_app_data = Path(env.get("LOCALAPPDATA", ""))
+        app_data = Path(env.get("APPDATA", ""))
         default_browser = _detect_default_windows_browser()
         sources: list[tuple[str, str, str]] = []
         chromium_candidates = (
@@ -285,7 +293,91 @@ def detect_browser_cookie_sources() -> list[tuple[str, str]]:
         deduped.sort(key=lambda item: (0 if item[0].startswith("默认浏览器") else 1, item[0].lower()))
         return deduped
 
+    if platform_value.startswith("linux"):
+        return _detect_linux_browser_cookie_sources(home or Path.home(), env)
+
     return []
+
+
+def _detect_linux_browser_cookie_sources(home: Path, environ: dict[str, str]) -> list[tuple[str, str]]:
+    config_home = Path(environ.get("XDG_CONFIG_HOME", "").strip() or home / ".config")
+    default_browser = _browser_name_from_command(environ.get("BROWSER", ""))
+    sources: list[tuple[str, str, str]] = []
+
+    chromium_roots = (
+        ("chrome", "Google Chrome", config_home / "google-chrome", True),
+        ("chromium", "Chromium", config_home / "chromium", True),
+        ("brave", "Brave", config_home / "BraveSoftware" / "Brave-Browser", True),
+        ("vivaldi", "Vivaldi", config_home / "vivaldi", True),
+        ("chromium", "Chromium (Snap)", home / "snap" / "chromium" / "common" / "chromium", False),
+        (
+            "chrome",
+            "Google Chrome (Flatpak)",
+            home / ".var" / "app" / "com.google.Chrome" / "config" / "google-chrome",
+            False,
+        ),
+        (
+            "chromium",
+            "Chromium (Flatpak)",
+            home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium",
+            False,
+        ),
+        (
+            "brave",
+            "Brave (Flatpak)",
+            home / ".var" / "app" / "com.brave.Browser" / "config" / "BraveSoftware" / "Brave-Browser",
+            False,
+        ),
+    )
+    for browser, label, user_data, use_profile_name in chromium_roots:
+        for profile in _chromium_cookie_profiles(user_data):
+            profile_value = profile if use_profile_name else str((user_data / profile).resolve())
+            sources.append((browser, f"{label} ({profile})", f"{browser}:{profile_value}"))
+
+    firefox_roots = (
+        ("Firefox", home / ".mozilla" / "firefox", True),
+        ("Firefox (Snap)", home / "snap" / "firefox" / "common" / ".mozilla" / "firefox", False),
+        ("Firefox (Flatpak)", home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox", False),
+    )
+    for label, profiles_root, use_profile_name in firefox_roots:
+        if not profiles_root.exists():
+            continue
+        try:
+            profile_dirs = list(profiles_root.iterdir())
+        except OSError:
+            continue
+        for profile_dir in profile_dirs:
+            if not (profile_dir / "cookies.sqlite").is_file():
+                continue
+            profile_value = profile_dir.name if use_profile_name else str(profile_dir.resolve())
+            sources.append(("firefox", f"{label} ({profile_dir.name})", f"firefox:{profile_value}"))
+
+    deduped: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for browser, label, value in sources:
+        if value in seen:
+            continue
+        seen.add(value)
+        prefix = "默认浏览器 - " if browser == default_browser else ""
+        deduped.append((f"{prefix}{label}", value))
+    deduped.sort(key=lambda item: (0 if item[0].startswith("默认浏览器") else 1, item[0].lower()))
+    return deduped
+
+
+def _browser_name_from_command(command: str) -> str:
+    executable = Path(str(command or "").strip().split()[0]).name.lower() if str(command or "").strip() else ""
+    mappings = (
+        ("google-chrome", "chrome"),
+        ("chrome", "chrome"),
+        ("chromium", "chromium"),
+        ("brave", "brave"),
+        ("firefox", "firefox"),
+        ("vivaldi", "vivaldi"),
+    )
+    for needle, browser in mappings:
+        if needle in executable:
+            return browser
+    return ""
 
 
 def _chromium_cookie_profiles(user_data: Path) -> list[str]:

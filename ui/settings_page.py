@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Signal
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.config_service import ConfigService, detect_browser_cookie_sources
+from services.cookie_service import secure_cookie_file
 from services.runtime_install_service import RuntimeStatus
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 
@@ -113,7 +115,7 @@ class SettingsPage(QWidget):
         download_dir_row.addWidget(browse_download_dir)
 
         self.ffmpeg_dir_edit = QLineEdit()
-        self.ffmpeg_dir_edit.setPlaceholderText("ffmpeg.exe 所在目录")
+        self.ffmpeg_dir_edit.setPlaceholderText("FFmpeg 可执行文件所在目录" if not sys.platform.startswith("win") else "ffmpeg.exe 所在目录")
         browse_ffmpeg_dir = QPushButton("浏览")
         browse_ffmpeg_dir.clicked.connect(self._browse_ffmpeg_dir)
         ffmpeg_dir_row = QHBoxLayout()
@@ -260,6 +262,7 @@ class SettingsPage(QWidget):
             cookie_path = self._cookie_file_path(site, for_write=True)
             cookie_path.parent.mkdir(parents=True, exist_ok=True)
             cookie_path.write_text(text.strip(), encoding="utf-8")
+            secure_cookie_file(cookie_path)
             cookie_paths[site] = cookie_path
 
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
@@ -318,7 +321,7 @@ class SettingsPage(QWidget):
 
     def set_runtime_status(self, status: RuntimeStatus) -> None:
         self.js_runtime_status_label.setText(status.display_text)
-        self.install_node_button.setVisible(not status.available)
+        self.install_node_button.setVisible(not status.available and status.automatic_install_supported)
         self.open_node_site_button.setVisible(not status.available)
         if status.available:
             self.js_runtime_progress_label.clear()
