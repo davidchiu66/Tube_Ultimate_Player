@@ -318,6 +318,8 @@ class CreatorWorkerSignalTests(unittest.TestCase):
     def test_worker_result_is_delivered_to_bound_receiver(self) -> None:
         loop = QEventLoop()
         receiver = _CreatorWorkerReceiver(loop)
+        worker_holder: list[CreatorVideosWorker] = []
+        thread_pool = QThreadPool.globalInstance()
         resolver = SimpleNamespace(
             resolve_creator_playlist=lambda _video, _limit: (
                 time.sleep(0.05) or PlaylistInfo("p", "P", "https://example.com")
@@ -330,12 +332,14 @@ class CreatorWorkerSignalTests(unittest.TestCase):
                 VideoInfo("video", "Video", creator_id="creator"),
                 generation=7,
             )
+            worker_holder.append(worker)
             worker.signals.success.connect(receiver.receive)
-            QThreadPool.globalInstance().start(worker, -1)
+            thread_pool.start(worker, -1)
 
         start_worker()
         QTimer.singleShot(2000, loop.quit)
         loop.exec()
+        self.assertTrue(thread_pool.waitForDone(1000))
 
         self.assertIsNotNone(receiver.result)
         self.assertEqual(receiver.result[:2], (7, "video"))
