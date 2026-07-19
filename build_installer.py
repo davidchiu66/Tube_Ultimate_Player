@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ APP_NAME = "Tube_Ultimate_Player"
 THIRDPART_DIR = ROOT / "3rdpart"
 MIN_DLL_SIZE = 10 * 1024 * 1024
 ICON_FILE = ROOT / "docs" / "assets" / "icons" / "app-icon.ico"
+ENHANCED_RUNTIME_FILES = ("deno.exe", "ffmpeg.exe", "ffprobe.exe")
 
 
 def read_version() -> str:
@@ -64,21 +66,30 @@ def validate_thirdpart_binaries() -> None:
             )
 
 
-def build_installer(version: str) -> Path:
+def validate_enhanced_runtime() -> None:
+    missing = [name for name in ENHANCED_RUNTIME_FILES if not (THIRDPART_DIR / name).is_file()]
+    if missing:
+        raise RuntimeError(f"Missing enhanced runtime files: {', '.join(missing)}")
+
+
+def build_installer(version: str, *, with_deno_ffmpeg: bool = False) -> Path:
     iss_path = ROOT / "packaging" / "installer.iss"
-    output_dir = DIST_DIR / "installer"
+    output_dir = DIST_DIR / ("installer-with-deno-ffmpeg" if with_deno_ffmpeg else "installer")
     output_dir.mkdir(parents=True, exist_ok=True)
     iscc = shutil.which("ISCC.exe")
     if not iscc:
         raise RuntimeError("Inno Setup compiler ISCC.exe was not found")
+    command = [
+        iscc,
+        f"/DAppVersion={version}",
+        f"/DProjectRoot={ROOT}",
+        f"/DOutputDir={output_dir}",
+    ]
+    if with_deno_ffmpeg:
+        command.append("/DOutputSuffix=_with_deno_ffmpeg")
+    command.append(str(iss_path))
     subprocess.run(
-        [
-            iscc,
-            f"/DAppVersion={version}",
-            f"/DProjectRoot={ROOT}",
-            f"/DOutputDir={output_dir}",
-            str(iss_path),
-        ],
+        command,
         check=True,
         cwd=ROOT,
     )
@@ -89,9 +100,18 @@ def build_installer(version: str) -> Path:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--with-deno-ffmpeg",
+        action="store_true",
+        help="Build an installer containing bundled Deno, FFmpeg and FFprobe.",
+    )
+    args = parser.parse_args()
     version = read_version()
+    if args.with_deno_ffmpeg:
+        validate_enhanced_runtime()
     run_pyinstaller()
-    installer_path = build_installer(version)
+    installer_path = build_installer(version, with_deno_ffmpeg=args.with_deno_ffmpeg)
     print(installer_path)
     return 0
 

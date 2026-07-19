@@ -333,7 +333,7 @@ class SettingsPage(QWidget):
     def set_runtime_install_progress(self, text: str) -> None:
         self.js_runtime_progress_label.setText(text)
 
-    def _populate_cookie_browser_combo(self, selected: str) -> None:
+    def _populate_cookie_browser_combo(self, _selected: str) -> None:
         self.cookie_browser_combo.blockSignals(True)
         self.cookie_browser_combo.clear()
         self.cookie_browser_combo.addItem("自动检测（默认浏览器优先）", "auto")
@@ -342,23 +342,6 @@ class SettingsPage(QWidget):
         detected = detect_browser_cookie_sources()
         for label, value in detected:
             self.cookie_browser_combo.addItem(label, value)
-
-        fallback = (
-            ("Microsoft Edge", "edge"),
-            ("Google Chrome", "chrome"),
-            ("Firefox", "firefox"),
-            ("Brave", "brave"),
-            ("Chromium", "chromium"),
-            ("Opera", "opera"),
-            ("Vivaldi", "vivaldi"),
-        )
-        existing = {self.cookie_browser_combo.itemData(index) for index in range(self.cookie_browser_combo.count())}
-        for label, value in fallback:
-            if value not in existing:
-                self.cookie_browser_combo.addItem(label, value)
-
-        if selected and self.cookie_browser_combo.findData(selected) < 0:
-            self.cookie_browser_combo.addItem(selected, selected)
         self.cookie_browser_combo.blockSignals(False)
 
     def _switch_cookie_site(self, site: str) -> None:

@@ -102,7 +102,7 @@ def build_download_command(
         command.extend(["--proxy", proxy])
 
     cookie_browser = config.explicit_cookie_browser()
-    cookie_file = config.cookie_file()
+    cookie_file = config.cookie_file_for_url(task.url)
     if force_cookie_file and cookie_file:
         command.extend(["--cookies", prepare_cookie_file(cookie_file, task.url)])
     elif cookie_browser:

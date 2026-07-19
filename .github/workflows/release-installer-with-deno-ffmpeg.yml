@@ -1,0 +1,124 @@
+name: Release Bundles with Deno and FFmpeg
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build-installer-with-deno-ffmpeg:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Validate formal version
+        shell: powershell
+        run: |
+          $version = (Get-Content app_version.txt -Raw).Trim()
+          if (-not $version) { throw "app_version.txt is empty" }
+          if ($version -match "-") { throw "Formal release versions must not contain prerelease suffixes: $version" }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Inno Setup and 7-Zip
+        shell: powershell
+        run: choco install innosetup 7zip -y --no-progress
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller requests
+
+      - name: Download latest yt-dlp
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "yt-dlp.exe asset not found" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "3rdpart/yt-dlp.exe"
+
+      - name: Download libmpv from SourceForge
+        shell: powershell
+        run: |
+          $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20260607-git-71ebd08.7z"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev.7z"
+          $extractDir = Join-Path $env:RUNNER_TEMP "mpv-dev"
+          & curl.exe -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --output $archive $url
+          if ($LASTEXITCODE -ne 0) { throw "Failed to download libmpv archive" }
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          & 7z.exe x $archive "-o$extractDir" -y
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract libmpv archive" }
+          $dll = Get-ChildItem -Path $extractDir -Recurse -Filter "libmpv-2.dll" |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll was not found" }
+          Copy-Item -LiteralPath $dll.FullName -Destination "3rdpart/libmpv-2.dll" -Force
+
+      - name: Download Deno
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/denoland/deno/releases/latest"
+          $asset = $release.assets |
+            Where-Object { $_.name -eq "deno-x86_64-pc-windows-msvc.zip" } |
+            Select-Object -First 1
+          if (-not $asset) { throw "Deno Windows x64 asset not found" }
+          $archive = Join-Path $env:RUNNER_TEMP "deno.zip"
+          $extractDir = Join-Path $env:RUNNER_TEMP "deno"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+          Copy-Item -LiteralPath (Join-Path $extractDir "deno.exe") -Destination "3rdpart/deno.exe" -Force
+          New-Item -ItemType Directory -Force -Path "3rdpart/licenses" | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/denoland/deno/main/LICENSE.md" -OutFile "3rdpart/licenses/deno-LICENSE.md"
+
+      - name: Download FFmpeg
+        shell: powershell
+        run: |
+          $url = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-essentials_build.7z"
+          $archive = Join-Path $env:RUNNER_TEMP "ffmpeg.7z"
+          $extractDir = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          & curl.exe -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --output $archive $url
+          if ($LASTEXITCODE -ne 0) { throw "Failed to download FFmpeg archive" }
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          & 7z.exe x $archive "-o$extractDir" -y
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract FFmpeg archive" }
+          foreach ($name in @("ffmpeg.exe", "ffprobe.exe")) {
+            $binary = Get-ChildItem -Path $extractDir -Recurse -Filter $name | Select-Object -First 1
+            if (-not $binary) { throw "$name was not found" }
+            Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path "3rdpart" $name) -Force
+          }
+          New-Item -ItemType Directory -Force -Path "3rdpart/licenses" | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/COPYING.GPLv3" -OutFile "3rdpart/licenses/ffmpeg-COPYING.GPLv3"
+
+      - name: Verify bundled runtime
+        shell: powershell
+        run: |
+          foreach ($name in @("libmpv-2.dll", "libEGL.dll", "libGLESv2.dll", "deno.exe", "ffmpeg.exe", "ffprobe.exe")) {
+            $path = Join-Path "3rdpart" $name
+            if (-not (Test-Path $path)) { throw "Missing $path" }
+            Write-Host "$name size: $((Get-Item $path).Length) bytes"
+          }
+
+      - name: Build enhanced installer
+        run: python build_installer.py --with-deno-ffmpeg
+
+      - name: Build enhanced portable package
+        run: python build_portable_with_deno_ffmpeg.py
+
+      - name: Upload enhanced installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_installer_with_deno_ffmpeg
+          path: dist/installer-with-deno-ffmpeg/*_with_deno_ffmpeg.exe
+
+      - name: Upload enhanced portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_portable_with_deno_ffmpeg
+          path: dist/*_with_deno_ffmpeg.zip

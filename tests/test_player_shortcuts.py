@@ -150,6 +150,24 @@ class PlayerShortcutTests(unittest.TestCase):
 
         self.assertTrue(self.page._idle_timer.isActive())
 
+    def test_paused_playback_uses_the_same_auto_hide_behavior(self) -> None:
+        self.page.set_paused(True)
+
+        self.assertTrue(self.page._auto_hide_enabled)
+        self.assertTrue(self.page._idle_timer.isActive())
+
+        self.page._control_pointer_inside = False
+        self.page._handle_idle_timeout()
+
+        self.assertFalse(self.page._controls_visible)
+
+    def test_finished_playback_keeps_controls_visible(self) -> None:
+        self.page.set_playback_finished(True)
+
+        self.assertFalse(self.page._auto_hide_enabled)
+        self.assertFalse(self.page._idle_timer.isActive())
+        self.assertTrue(self.page._controls_visible)
+
     def test_browser_play_button_is_available_for_online_video(self) -> None:
         requests: list[bool] = []
         self.page.browser_play_requested.connect(lambda: requests.append(True))

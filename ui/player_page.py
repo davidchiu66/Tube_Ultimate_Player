@@ -547,7 +547,7 @@ class PlayerPage(QWidget):
         self.play_button.setText("播放" if self._paused or self._playback_finished else "暂停")
 
     def _sync_auto_hide_state(self) -> None:
-        enabled = self._has_media and not self._loading and not self._paused and not self._playback_finished
+        enabled = self._has_media and not self._loading and not self._playback_finished
         self._auto_hide_enabled = enabled
         if enabled:
             self._show_controls()

@@ -25,6 +25,22 @@ This project depends on, bundles, or integrates with the following third-party s
 - License: Refer to the upstream project distribution for the exact bundled binary license terms
 - Usage in this project: native playback library loaded by the application
 
+## Deno
+
+- Project: Deno
+- Website: https://deno.com/ and https://github.com/denoland/deno
+- Copyright: Deno authors and contributors
+- License: MIT License; refer to the license file bundled with enhanced installers
+- Usage in this project: optional JavaScript runtime bundled in the `_with_deno_ffmpeg` installer
+
+## FFmpeg
+
+- Project: FFmpeg
+- Website: https://ffmpeg.org/
+- Copyright: FFmpeg developers and contributors
+- License: depends on the selected Windows build configuration; enhanced installers use the referenced Gyan Windows build and bundle the corresponding license notice
+- Usage in this project: optional media merge, remuxing and DLNA streaming runtime bundled in the `_with_deno_ffmpeg` installer
+
 ## Additional Binary Dependencies
 
 The `3rdpart/` directory may contain runtime binary dependencies required by bundled playback components,

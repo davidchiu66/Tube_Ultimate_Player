@@ -14,7 +14,7 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.7-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.8-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
@@ -27,6 +27,7 @@
 - 支持首页推荐、关键词搜索、URL 直接播放、播放列表详情页与播放器侧滑播放列表面板
 - 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放
 - 使用 `libmpv` 播放，支持暂停、停止、全屏、清晰度切换、倍速、字幕与自动隐藏控制面板
+- 播放与暂停状态使用一致的控制面板滑入滑出逻辑，避免暂停画面长期被遮挡
 - 播放器可一键使用系统默认浏览器打开当前在线视频原始页面
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
 - 投屏设备列表支持会话内缓存，后续打开时先快速校验 IP + 端口，缓存失效后再重新扫描
@@ -36,6 +37,7 @@
 - 下载列表、收藏和播放历史显示视频来源，并支持本地筛选搜索
 - YouTube 与 Bilibili Cookie 内容独立保存，并随默认首页站点切换联动显示
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
+- 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
 
 ## 界面与流程
@@ -65,7 +67,7 @@
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制 |
 | 下载 | 下载队列、并发控制、暂停、继续、删除、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 常规与快捷键 Tab、代理、双站点独立 Cookie、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
+| 设置 | 常规与快捷键 Tab、代理、双站点独立 Cookie、仅显示已检测浏览器、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
 | 关于 | 当前版本、GitHub 链接、检测新版本、Release Note 展示、安装版与便携版自动升级 |
 
 ## Bilibili 支持说明
@@ -130,6 +132,7 @@ Tube_Ultimate_Player/
 ├── app_version.txt           # 当前正式版本号
 ├── build_installer.py        # 安装包构建脚本
 ├── build_portable.py         # 便携版构建脚本
+├── build_portable_with_deno_ffmpeg.py # 自带 Deno/FFmpeg 的免安装便携版脚本
 └── main.py
 ```
 
@@ -164,11 +167,12 @@ Tube_Ultimate_Player/
 
 ### GitHub Actions
 
-仓库中提供三套工作流：
+仓库中提供四套工作流：
 
 - `release.yml`：完整正式发布流程，包含便携版、安装包构建与 GitHub Release 发布
 - `release-portable.yml`：仅构建便携版
 - `release-installer.yml`：仅构建安装包
+- `release-installer-with-deno-ffmpeg.yml`：构建自带 Deno、FFmpeg 与 FFprobe 的增强安装包和增强便携版
 
 正式发布流程会：
 
@@ -177,7 +181,26 @@ Tube_Ultimate_Player/
 3. 下载最新 `yt-dlp.exe`
 4. 从 SourceForge 下载 `libmpv-2.dll`
 5. 结合仓库中的其余 `3rdpart` 依赖构建产物
-6. 上传便携版、安装包，并发布到 GitHub Releases
+6. 上传普通/增强便携版、普通/增强安装包，并发布到 GitHub Releases
+
+正式发布同时提供普通版本和增强版本。增强安装包及增强便携版文件名带有
+`_with_deno_ffmpeg` 后缀，体积更大，但可直接使用内置 Deno 与 FFmpeg。
+
+### 自带 Deno 与 FFmpeg 的免安装便携版
+
+先将 `deno.exe`、`ffmpeg.exe` 和 `ffprobe.exe` 放入 `3rdpart/`，然后运行：
+
+```bash
+python build_portable_with_deno_ffmpeg.py
+```
+
+也可以直接使用：
+
+```bash
+python build_portable.py --with-deno-ffmpeg
+```
+
+输出文件名为 `Tube_Ultimate_Player_portable_v<version>_with_deno_ffmpeg.zip`，解压后即可运行。
 
 ## JS Runtime 说明
 
@@ -210,16 +233,16 @@ Tube_Ultimate_Player/
 
 输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
 
-## 0.2.7 更新摘要
+## 0.2.8 更新摘要
 
-- 播放控制面板新增“浏览器播放”，可直接打开当前在线视频原始页面。
-- 首页和搜索结果改为每个视频卡片独立提供“播放”按钮。
-- YouTube 与 Bilibili Cookie 内容独立保存，并随默认首页选择即时切换。
-- 在线升级支持用户确认后自动关闭应用、启动安装程序；便携版支持自动解压替换和重启。
-- 修复 Windows 下 SQLite 连接未及时关闭导致测试临时数据库被占用的问题。
-- 修复鼠标位于播放列表动态条目上时，播放器活动计时无法正确重置的问题。
+- 暂停状态与播放状态使用一致的控制面板自动滑入滑出逻辑。
+- Cookie 浏览器列表只显示系统实际检测到且具有可读取 Profile 的浏览器。
+- 新增自带 Deno、FFmpeg、FFprobe 的增强安装包发布工作流。
+- 新增自带运行时的免安装增强便携版构建脚本和正式发布产物。
+- 应用自动优先使用内置 Deno 和 FFmpeg，无需首次启动后再次下载。
+- 下载任务按视频实际站点选择对应的 YouTube/Bilibili Cookie 文件。
 
-完整说明见 [`docs/releases/v0.2.7.md`](docs/releases/v0.2.7.md)。
+完整说明见 [`docs/releases/v0.2.8.md`](docs/releases/v0.2.8.md)。
 
 ## DLNA 投屏说明
 
@@ -242,7 +265,7 @@ Tube_Ultimate_Player/
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `73` 项）：
+运行完整自动化测试（当前版本共 `81` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"

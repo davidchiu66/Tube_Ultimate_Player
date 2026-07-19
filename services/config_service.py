@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from app_paths import CONFIG_DIR, DEFAULT_CONFIG_DIR, DOWNLOAD_DIR, RUNTIME_ROOT, default_config_path, runtime_path
+from app_paths import (
+    CONFIG_DIR,
+    DEFAULT_CONFIG_DIR,
+    DOWNLOAD_DIR,
+    RUNTIME_ROOT,
+    default_config_path,
+    runtime_path,
+    thirdpart_path,
+)
 from services.shortcut_service import DEFAULT_SHORTCUTS
 
 
@@ -331,6 +339,9 @@ def _detect_default_windows_browser() -> str:
 
 
 def detect_js_runtime() -> str:
+    bundled_deno = thirdpart_path("deno.exe" if sys.platform.startswith("win") else "deno")
+    if bundled_deno.is_file():
+        return f"deno:{bundled_deno}"
     for runtime in ("deno", "node", "quickjs", "qjs", "bun"):
         path = shutil.which(runtime)
         if not path:
