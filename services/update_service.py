@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -18,6 +21,82 @@ logger = logging.getLogger("tube_player.update")
 REPO_SLUG = "davidchiu66/Tube_Ultimate_Player"
 REPO_URL = f"https://github.com/{REPO_SLUG}"
 RELEASES_API = f"https://api.github.com/repos/{REPO_SLUG}/releases"
+
+INSTALLER_LAUNCHER_SCRIPT = r'''param(
+    [Parameter(Mandatory=$true)][string]$InstallerPath,
+    [Parameter(Mandatory=$true)][int]$ParentPid
+)
+
+$ErrorActionPreference = "Stop"
+$logPath = Join-Path ([System.IO.Path]::GetDirectoryName($InstallerPath)) "installer-launch.log"
+
+try {
+    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    Start-Process -FilePath $InstallerPath
+}
+catch {
+    ($_ | Out-String) | Out-File -LiteralPath $logPath -Encoding UTF8
+    Add-Type -AssemblyName PresentationFramework
+    [System.Windows.MessageBox]::Show(
+        "新版安装程序启动失败。请查看日志：`n$logPath`n`n$($_.Exception.Message)",
+        "Tube_Ultimate_Player 升级失败",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    ) | Out-Null
+}
+'''
+
+PORTABLE_UPDATER_SCRIPT = r'''param(
+    [Parameter(Mandatory=$true)][string]$ArchivePath,
+    [Parameter(Mandatory=$true)][string]$TargetDir,
+    [Parameter(Mandatory=$true)][string]$RestartExecutable,
+    [Parameter(Mandatory=$true)][int]$ParentPid
+)
+
+$ErrorActionPreference = "Stop"
+$workRoot = Join-Path ([System.IO.Path]::GetDirectoryName($ArchivePath)) ("portable-update-" + [System.Guid]::NewGuid().ToString("N"))
+$logPath = Join-Path ([System.IO.Path]::GetDirectoryName($ArchivePath)) "portable-update.log"
+
+try {
+    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800
+    New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $workRoot)
+
+    $sourceRoot = $workRoot
+    $topItems = @(Get-ChildItem -LiteralPath $workRoot -Force)
+    $topFiles = @($topItems | Where-Object { -not $_.PSIsContainer })
+    $topDirs = @($topItems | Where-Object { $_.PSIsContainer })
+    if ($topFiles.Count -eq 0 -and $topDirs.Count -eq 1) {
+        $sourceRoot = $topDirs[0].FullName
+    }
+
+    & robocopy.exe $sourceRoot $TargetDir /E /COPY:DAT /DCOPY:DAT /R:10 /W:1 /NFL /NDL /NJH /NJS /NP
+    if ($LASTEXITCODE -ge 8) {
+        throw "文件替换失败，Robocopy 退出代码: $LASTEXITCODE"
+    }
+
+    Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Start-Process -FilePath $RestartExecutable -WorkingDirectory $TargetDir
+}
+catch {
+    ($_ | Out-String) | Out-File -LiteralPath $logPath -Encoding UTF8
+    Add-Type -AssemblyName PresentationFramework
+    [System.Windows.MessageBox]::Show(
+        "便携版自动升级失败。请查看日志：`n$logPath`n`n$($_.Exception.Message)",
+        "Tube_Ultimate_Player 升级失败",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Error
+    ) | Out-Null
+}
+finally {
+    if (Test-Path -LiteralPath $workRoot) {
+        Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+'''
 
 
 @dataclass(slots=True)
@@ -157,6 +236,90 @@ class UpdateService:
     def download_target_path(self, asset: ReleaseAsset) -> Path:
         filename = asset.name or "update_package.bin"
         return self.updates_dir() / filename
+
+    def launch_installer(self, package_path: str | Path) -> None:
+        package = Path(package_path).resolve()
+        if not package.is_file():
+            raise RuntimeError("升级安装包不存在")
+        if package.suffix.lower() != ".exe":
+            raise RuntimeError("当前升级文件不是可执行安装包")
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("自动启动安装程序目前仅支持 Windows")
+
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            raise RuntimeError("未找到 Windows PowerShell，无法在应用退出后启动安装程序")
+        script_path = self.updates_dir() / "installer_launcher.ps1"
+        script_path.write_text(INSTALLER_LAUNCHER_SCRIPT, encoding="utf-8-sig")
+        command = [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script_path),
+            "-InstallerPath",
+            str(package),
+            "-ParentPid",
+            str(os.getpid()),
+        ]
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        try:
+            subprocess.Popen(command, close_fds=True, creationflags=creation_flags)
+        except OSError as exc:
+            logger.exception("failed to launch update installer path=%s", package)
+            raise RuntimeError(f"无法启动升级安装程序：{exc}") from exc
+
+    def launch_portable_update(self, package_path: str | Path) -> None:
+        package = Path(package_path).resolve()
+        if not package.is_file():
+            raise RuntimeError("便携版升级包不存在")
+        if package.suffix.lower() != ".zip":
+            raise RuntimeError("便携版升级包必须是 ZIP 文件")
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("便携版自动替换目前仅支持 Windows")
+        if not getattr(sys, "frozen", False):
+            raise RuntimeError("开发源码模式不支持自动覆盖，请使用版本控制工具更新源码")
+
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            raise RuntimeError("未找到 Windows PowerShell，无法启动便携版自动升级")
+
+        script_path = self.updates_dir() / "portable_updater.ps1"
+        script_path.write_text(PORTABLE_UPDATER_SCRIPT, encoding="utf-8-sig")
+        executable = Path(sys.executable).resolve()
+        command = [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script_path),
+            "-ArchivePath",
+            str(package),
+            "-TargetDir",
+            str(APP_DIR.resolve()),
+            "-RestartExecutable",
+            str(executable),
+            "-ParentPid",
+            str(os.getpid()),
+        ]
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        try:
+            subprocess.Popen(
+                command,
+                close_fds=True,
+                creationflags=creation_flags,
+            )
+        except OSError as exc:
+            logger.exception("failed to launch portable updater package=%s", package)
+            raise RuntimeError(f"无法启动便携版升级程序：{exc}") from exc
 
     def build_request(self, url: str) -> urllib.request.Request:
         return urllib.request.Request(

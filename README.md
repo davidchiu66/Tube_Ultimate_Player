@@ -14,7 +14,7 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.6-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.7-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
@@ -27,13 +27,15 @@
 - 支持首页推荐、关键词搜索、URL 直接播放、播放列表详情页与播放器侧滑播放列表面板
 - 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放
 - 使用 `libmpv` 播放，支持暂停、停止、全屏、清晰度切换、倍速、字幕与自动隐藏控制面板
+- 播放器可一键使用系统默认浏览器打开当前在线视频原始页面
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
 - 投屏设备列表支持会话内缓存，后续打开时先快速校验 IP + 端口，缓存失效后再重新扫描
 - 播放快捷键支持在设置页查看、修改、禁用、冲突校验和恢复默认
 - 播放列表自动连播会在下一集加载后明确恢复播放，避免停留在暂停状态
 - 内置下载队列，支持并发下载、暂停、继续、删除、完成回放与完成 toast 提示
 - 下载列表、收藏和播放历史显示视频来源，并支持本地筛选搜索
-- 支持浏览器 Cookie 自动提取、手动 Cookie 文本保存、代理、FFmpeg、下载目录与默认首页配置
+- YouTube 与 Bilibili Cookie 内容独立保存，并随默认首页站点切换联动显示
+- 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
 
 ## 界面与流程
@@ -46,8 +48,8 @@
 
 1. 启动应用后进入默认首页，可选择 `Bilibili` 或 `YouTube`
 2. 在顶部搜索框输入关键词，或通过“播放 URL”弹窗直接输入任意站点地址
-3. 双击首页卡片、搜索结果、收藏、历史或播放列表条目开始播放
-4. 在播放器中切换清晰度、倍速、全屏，或点击“投屏”将当前在线视频发送到局域网 DLNA 设备
+3. 点击首页或搜索结果卡片中的“播放”，也可双击卡片、收藏、历史或播放列表条目开始播放
+4. 在播放器中切换清晰度、倍速、全屏，点击“浏览器播放”打开原始页面，或点击“投屏”发送到局域网 DLNA 设备
 5. 下载完成后，可直接在下载列表中双击本地文件再次播放
 6. 在下载列表、收藏或历史页面中，可按标题、来源、作者或链接快速筛选
 
@@ -55,16 +57,16 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 首页 | YouTube / Bilibili 推荐内容、分页浏览、九宫格卡片展示、长标题三行省略 |
-| 搜索 | 双站点关键词搜索、分页、等待动画、长标题三行省略与温馨提示 |
+| 首页 | YouTube / Bilibili 推荐内容、分页浏览、卡片独立播放/收藏/下载、长标题三行省略 |
+| 搜索 | 双站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
 | URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 列表类链接 |
-| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、全屏、快进/后退、静音、音量和播放列表快捷键、自动隐藏控制器 |
+| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、浏览器播放、全屏、快进/后退、静音、音量和播放列表快捷键、自动隐藏控制器 |
 | 播放列表 | 明确播放列表、作者动态列表、侧滑播放列表面板、命名保存、自动连播、批量下载 |
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制 |
 | 下载 | 下载队列、并发控制、暂停、继续、删除、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 常规与快捷键 Tab、代理、Cookie、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
-| 关于 | 当前版本、GitHub 链接、检测新版本、Release Note 展示、在线升级下载 |
+| 设置 | 常规与快捷键 Tab、代理、双站点独立 Cookie、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
+| 关于 | 当前版本、GitHub 链接、检测新版本、Release Note 展示、安装版与便携版自动升级 |
 
 ## Bilibili 支持说明
 
@@ -142,7 +144,8 @@ Tube_Ultimate_Player/
 其中包括：
 
 - `config/user_config.json`
-- `cookie.txt`
+- `cookie_youtube.txt`
+- `cookie_bilibili.txt`
 - `data/tube_ultimate_player.sqlite3`
 - `data/download_tasks.json`
 - `downloads/`
@@ -207,14 +210,16 @@ Tube_Ultimate_Player/
 
 输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
 
-## 0.2.6 更新摘要
+## 0.2.7 更新摘要
 
-- 设置页新增“快捷键”Tab，所有播放器快捷键均可自定义、禁用或恢复默认。
-- 修复 Bilibili XML 弹幕被当作字幕加载时导致界面卡死的问题。
-- 修复播放列表自动连播下一集加载成功后仍停留在暂停状态的问题。
-- 首页和搜索结果的长标题最多显示三行，超出部分使用 `...`，悬停可查看完整标题。
+- 播放控制面板新增“浏览器播放”，可直接打开当前在线视频原始页面。
+- 首页和搜索结果改为每个视频卡片独立提供“播放”按钮。
+- YouTube 与 Bilibili Cookie 内容独立保存，并随默认首页选择即时切换。
+- 在线升级支持用户确认后自动关闭应用、启动安装程序；便携版支持自动解压替换和重启。
+- 修复 Windows 下 SQLite 连接未及时关闭导致测试临时数据库被占用的问题。
+- 修复鼠标位于播放列表动态条目上时，播放器活动计时无法正确重置的问题。
 
-完整说明见 [`docs/releases/v0.2.6.md`](docs/releases/v0.2.6.md)。
+完整说明见 [`docs/releases/v0.2.7.md`](docs/releases/v0.2.7.md)。
 
 ## DLNA 投屏说明
 
@@ -237,7 +242,7 @@ Tube_Ultimate_Player/
 
 ## 测试
 
-运行完整自动化测试：
+运行完整自动化测试（当前版本共 `73` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -273,7 +278,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 为避免个人数据泄露，以下内容不应提交到仓库：
 
-- `cookie.txt`
+- `cookie_youtube.txt`
+- `cookie_bilibili.txt`
 - `config/user_config.json`
 - `logs/`
 - `downloads/`

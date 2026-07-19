@@ -14,7 +14,7 @@ class PlaylistRepository:
         self.db = db
 
     def all_playlists(self) -> list[SavedPlaylist]:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT playlist_key, name, source_url, source_type, auto_play_next, created_at, updated_at
@@ -36,7 +36,7 @@ class PlaylistRepository:
         ]
 
     def get_playlist(self, playlist_key: str) -> SavedPlaylist | None:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             row = conn.execute(
                 """
                 SELECT playlist_key, name, source_url, source_type, auto_play_next, created_at, updated_at
@@ -91,7 +91,7 @@ class PlaylistRepository:
         key = playlist_key or uuid4().hex
         now = datetime.now().isoformat(timespec="seconds")
 
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             existing = conn.execute(
                 "SELECT id, created_at FROM playlist_library WHERE playlist_key = ? LIMIT 1",
                 (key,),
@@ -146,7 +146,7 @@ class PlaylistRepository:
         return key
 
     def delete_playlist(self, playlist_key: str) -> None:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             conn.execute("DELETE FROM playlist_item WHERE playlist_key = ?", (playlist_key,))
             conn.execute("DELETE FROM playlist_library WHERE playlist_key = ?", (playlist_key,))
 
@@ -155,7 +155,7 @@ class PlaylistRepository:
         if not playlist_name:
             raise ValueError("playlist name is required")
         now = datetime.now().isoformat(timespec="seconds")
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             conn.execute(
                 "UPDATE playlist_library SET name = ?, updated_at = ? WHERE playlist_key = ?",
                 (playlist_name, now, playlist_key),
@@ -163,7 +163,7 @@ class PlaylistRepository:
 
     def set_auto_play_next(self, playlist_key: str, enabled: bool) -> None:
         now = datetime.now().isoformat(timespec="seconds")
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             conn.execute(
                 "UPDATE playlist_library SET auto_play_next = ?, updated_at = ? WHERE playlist_key = ?",
                 (1 if enabled else 0, now, playlist_key),

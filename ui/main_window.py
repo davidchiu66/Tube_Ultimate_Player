@@ -224,6 +224,7 @@ class MainWindow(QMainWindow):
         self.player_page.quality_changed.connect(self._change_quality)
         self.player_page.subtitle_changed.connect(self._change_subtitle)
         self.player_page.cast_requested.connect(self._show_cast_dialog)
+        self.player_page.browser_play_requested.connect(self._open_current_video_in_browser)
         self.player_page.fullscreen_requested.connect(self._toggle_fullscreen)
         self.player_page.download_requested.connect(self._download_current_video)
         self.player_page.favorite_requested.connect(self._favorite_current_video)
@@ -757,6 +758,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "当前没有可下载的视频。")
             return
         self._enqueue_download(self.current_video, self.current_quality_label)
+
+    def _open_current_video_in_browser(self) -> None:
+        url = str(self.current_video.webpage_url or "").strip() if self.current_video else ""
+        if not url:
+            self.toast.show_message("浏览器播放失败：视频链接不可用")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromUserInput(url)):
+            self.toast.show_message("浏览器播放失败：无法打开系统默认浏览器")
 
     def _download_home_video(self, video: HomeVideo) -> None:
         if not video.webpage_url:
@@ -1466,14 +1475,39 @@ class MainWindow(QMainWindow):
         self.about_page.set_upgrade_progress(False, f"升级包已下载完成：{path}", 100.0)
         self.about_page.set_status("升级包已准备好。")
         if result and result.install_mode == "portable":
-            detail = "便携版升级包已下载完成，请关闭当前应用后手动替换文件。"
+            detail = "确认后将关闭当前应用，自动解压并替换便携版文件，完成后重新启动新版。"
         else:
-            detail = "安装包已下载完成，请关闭当前应用后运行安装程序。"
-        QMessageBox.information(
+            detail = "确认后将关闭当前应用，并立即启动新版安装程序。"
+        answer = QMessageBox.question(
             self,
             "升级包已下载",
-            f"{mode_label} 的升级包已保存到：\n{path}\n\n{detail}",
+            f"{mode_label} 的升级包已保存到：\n{path}\n\n{detail}\n\n是否立即继续升级？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.about_page.set_status("升级包已下载，等待用户启动升级。")
+            return
+        self._launch_downloaded_upgrade(path, result.install_mode if result else "installer")
+
+    def _launch_downloaded_upgrade(self, path: str, install_mode: str) -> None:
+        try:
+            if install_mode == "portable":
+                self.update_service.launch_portable_update(path)
+                status = "便携版升级程序已启动，正在关闭当前应用..."
+            else:
+                self.update_service.launch_installer(path)
+                status = "新版安装程序已启动，正在关闭当前应用..."
+        except Exception as exc:
+            message = str(exc).strip() or "无法启动升级程序"
+            logger.exception("failed to launch downloaded upgrade mode=%s path=%s", install_mode, path)
+            self.about_page.set_status(f"启动升级失败：{message}")
+            self.about_page.set_upgrade_available(True)
+            QMessageBox.warning(self, "启动升级失败", message)
+            return
+
+        self.about_page.set_status(status)
+        QTimer.singleShot(0, self.close)
 
     def _update_download_failed(self, message: str) -> None:
         logger.error("update download failed: %s", message)

@@ -37,6 +37,9 @@ class SettingsPage(QWidget):
     def __init__(self, config: ConfigService) -> None:
         super().__init__()
         self.config = config
+        self._cookie_texts = {"youtube": "", "bilibili": ""}
+        self._cookie_site = "bilibili"
+        self._loading_settings = True
 
         self.active_proxy_label = QLabel()
         self.system_hint_label = QLabel("代理读取顺序：优先使用系统代理；未检测到系统代理时再使用此处配置。")
@@ -50,6 +53,12 @@ class SettingsPage(QWidget):
         self.default_home_youtube = QRadioButton("YouTube")
         self.default_home_group.addButton(self.default_home_bilibili)
         self.default_home_group.addButton(self.default_home_youtube)
+        self.default_home_bilibili.toggled.connect(
+            lambda checked: self._switch_cookie_site("bilibili") if checked else None
+        )
+        self.default_home_youtube.toggled.connect(
+            lambda checked: self._switch_cookie_site("youtube") if checked else None
+        )
         default_home_row = QHBoxLayout()
         default_home_row.setContentsMargins(0, 0, 0, 0)
         default_home_row.setSpacing(16)
@@ -61,8 +70,9 @@ class SettingsPage(QWidget):
         self.cookie_edit.setMinimumHeight(150)
         self.cookie_edit.setPlaceholderText(
             "粘贴 Netscape cookies.txt 内容，或浏览器请求头里的 Cookie: a=b; c=d\n"
-            "可用于 YouTube / Bilibili；程序会按目标站点自动转换。"
+            "内容会保存到当前默认首页对应的网站 Cookie。"
         )
+        self.cookie_content_label = QLabel()
 
         self.cookie_browser_combo = QComboBox()
 
@@ -129,7 +139,7 @@ class SettingsPage(QWidget):
         form.addRow("配置代理", self.proxy_edit)
         form.addRow("从浏览器读取 Cookie", self.cookie_browser_combo)
         form.addRow("浏览器 Profile", self.cookie_profile_edit)
-        form.addRow("Cookie 内容", self.cookie_edit)
+        form.addRow(self.cookie_content_label, self.cookie_edit)
         form.addRow("JS Runtime", self.js_runtime_combo)
         form.addRow("运行时状态", self.js_runtime_status_label)
         form.addRow("", js_actions)
@@ -206,12 +216,19 @@ class SettingsPage(QWidget):
         self.load()
 
     def load(self) -> None:
+        self._loading_settings = True
         self.config.load()
         default_home = self.config.default_home_source()
+        self._cookie_texts = {
+            "youtube": self._read_cookie_text("youtube"),
+            "bilibili": self._read_cookie_text("bilibili"),
+        }
+        self._cookie_site = default_home
         self.default_home_bilibili.setChecked(default_home != "youtube")
         self.default_home_youtube.setChecked(default_home == "youtube")
         self.proxy_edit.setText(str(self.config.get("youtube.proxy", "") or ""))
-        self.cookie_edit.setPlainText(self._read_cookie_text())
+        self.cookie_edit.setPlainText(self._cookie_texts[default_home])
+        self._update_cookie_content_label()
         browser = str(self.config.get("youtube.cookie_browser", "") or "")
         self._populate_cookie_browser_combo(browser)
         index = self.cookie_browser_combo.findData(browser)
@@ -231,14 +248,19 @@ class SettingsPage(QWidget):
             self.shortcut_edits[definition.action].setKeySequence(QKeySequence(sequence))
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
+        self._loading_settings = False
 
     def save(self) -> None:
         shortcuts = self._shortcut_values()
         if shortcuts is None:
             return
-        cookie_path = self._cookie_file_path()
-        cookie_path.parent.mkdir(parents=True, exist_ok=True)
-        cookie_path.write_text(self.cookie_edit.toPlainText().strip(), encoding="utf-8")
+        self._store_cookie_draft()
+        cookie_paths: dict[str, Path] = {}
+        for site, text in self._cookie_texts.items():
+            cookie_path = self._cookie_file_path(site, for_write=True)
+            cookie_path.parent.mkdir(parents=True, exist_ok=True)
+            cookie_path.write_text(text.strip(), encoding="utf-8")
+            cookie_paths[site] = cookie_path
 
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
         self.config.set("content.default_home", "youtube" if self.default_home_youtube.isChecked() else "bilibili")
@@ -248,7 +270,8 @@ class SettingsPage(QWidget):
             "youtube.cookie_browser_profile",
             "" if ":" in cookie_browser else self.cookie_profile_edit.text().strip(),
         )
-        self.config.set("youtube.cookie_file", str(cookie_path))
+        for site, cookie_path in cookie_paths.items():
+            self.config.set(f"cookies.{site}.file", str(cookie_path))
         self.config.set("youtube.js_runtime", self.js_runtime_combo.currentData() or "")
         self.config.set("download.save_dir", self.download_dir_edit.text().strip() or self.config.download_dir())
         self.config.set("download.ffmpeg_dir", self.ffmpeg_dir_edit.text().strip())
@@ -338,14 +361,33 @@ class SettingsPage(QWidget):
             self.cookie_browser_combo.addItem(selected, selected)
         self.cookie_browser_combo.blockSignals(False)
 
-    def _cookie_file_path(self) -> Path:
-        configured = str(self.config.get("youtube.cookie_file", "") or "").strip()
-        if configured:
-            return Path(self.config.cookie_file())
-        return Path(self.config.default_cookie_file())
+    def _switch_cookie_site(self, site: str) -> None:
+        if self._loading_settings or site == self._cookie_site:
+            return
+        self._store_cookie_draft()
+        self._cookie_site = site
+        self.cookie_edit.setPlainText(self._cookie_texts.get(site, ""))
+        self._update_cookie_content_label()
 
-    def _read_cookie_text(self) -> str:
-        path = self._cookie_file_path()
+    def _store_cookie_draft(self) -> None:
+        self._cookie_texts[self._cookie_site] = self.cookie_edit.toPlainText()
+
+    def _update_cookie_content_label(self) -> None:
+        label = "Bilibili" if self._cookie_site == "bilibili" else "YouTube"
+        self.cookie_content_label.setText(f"{label} Cookie 内容")
+
+    def _cookie_file_path(self, site: str, *, for_write: bool = False) -> Path:
+        configured = str(self.config.get(f"cookies.{site}.file", "") or "").strip()
+        if configured:
+            return Path(self.config.cookie_file(site))
+        if not for_write:
+            legacy_or_configured = self.config.cookie_file(site)
+            if legacy_or_configured:
+                return Path(legacy_or_configured)
+        return Path(self.config.default_cookie_file(site))
+
+    def _read_cookie_text(self, site: str) -> str:
+        path = self._cookie_file_path(site)
         if not path.exists():
             return ""
         try:

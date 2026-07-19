@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from app_paths import DATA_DIR
 
@@ -89,8 +91,18 @@ class SQLiteManager:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Return a transactional connection that is always closed on exit."""
+        conn = self.connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def initialize(self) -> None:
-        with self.connect() as conn:
+        with self.connection() as conn:
             conn.executescript(SCHEMA)
             self._ensure_column(conn, "history", "source_site", "TEXT NOT NULL DEFAULT 'youtube'")
             self._ensure_column(conn, "history", "uploader", "TEXT")

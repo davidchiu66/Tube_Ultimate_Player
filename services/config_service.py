@@ -7,6 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from app_paths import CONFIG_DIR, DEFAULT_CONFIG_DIR, DOWNLOAD_DIR, RUNTIME_ROOT, default_config_path, runtime_path
 from services.shortcut_service import DEFAULT_SHORTCUTS
@@ -68,8 +69,17 @@ class ConfigService:
 
         return "未使用代理", ""
 
-    def cookie_file(self) -> str:
-        value = str(self.get("youtube.cookie_file", "") or "").strip()
+    def cookie_file(self, site: str = "") -> str:
+        normalized_site = self._normalize_cookie_site(site)
+        value = str(self.get(f"cookies.{normalized_site}.file", "") or "").strip()
+        if not value and normalized_site == self.default_home_source():
+            # Before site-specific Cookie files were introduced, the single
+            # legacy file followed the selected home site in practice.
+            value = str(self.get("youtube.cookie_file", "") or "").strip()
+            if not value:
+                legacy_default = runtime_path("cookie.txt")
+                if legacy_default.exists():
+                    value = str(legacy_default)
         if not value:
             return ""
 
@@ -78,8 +88,23 @@ class ConfigService:
             path = RUNTIME_ROOT / path
         return str(path)
 
-    def default_cookie_file(self) -> str:
-        return str(runtime_path("cookie.txt"))
+    def cookie_file_for_url(self, target_url: str) -> str:
+        return self.cookie_file(self.cookie_site_for_url(target_url))
+
+    def default_cookie_file(self, site: str = "") -> str:
+        normalized_site = self._normalize_cookie_site(site)
+        return str(runtime_path(f"cookie_{normalized_site}.txt"))
+
+    def cookie_site_for_url(self, target_url: str) -> str:
+        raw = str(target_url or "").strip()
+        host = (urlparse(raw).hostname or "").lower()
+        if host.endswith("bilibili.com") or host.endswith("b23.tv"):
+            return "bilibili"
+        return "youtube"
+
+    def _normalize_cookie_site(self, site: str) -> str:
+        normalized = str(site or "").strip().lower()
+        return normalized if normalized in {"youtube", "bilibili"} else self.default_home_source()
 
     def download_dir(self) -> str:
         value = str(self.get("download.save_dir", str(DOWNLOAD_DIR)) or str(DOWNLOAD_DIR)).strip()

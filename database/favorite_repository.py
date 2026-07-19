@@ -35,11 +35,11 @@ class FavoriteRepository:
         )
 
     def remove(self, video_id: str) -> None:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             conn.execute("DELETE FROM favorite WHERE video_id = ?", (video_id,))
 
     def is_favorite(self, video_id: str) -> bool:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             row = conn.execute(
                 "SELECT 1 FROM favorite WHERE video_id = ? LIMIT 1",
                 (video_id,),
@@ -47,12 +47,12 @@ class FavoriteRepository:
         return row is not None
 
     def favorite_ids(self) -> set[str]:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             rows = conn.execute("SELECT video_id FROM favorite").fetchall()
         return {str(row["video_id"]) for row in rows}
 
     def all(self, limit: int = 500) -> list[dict[str, Any]]:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT video_id, title, source_site, webpage_url, uploader, duration, thumbnail, created_at, updated_at
@@ -81,7 +81,7 @@ class FavoriteRepository:
         thumbnail: str,
     ) -> bool:
         now = datetime.now().isoformat(timespec="seconds")
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             existing = conn.execute(
                 "SELECT id FROM favorite WHERE video_id = ? LIMIT 1",
                 (video_id,),

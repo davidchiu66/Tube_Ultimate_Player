@@ -180,7 +180,8 @@ class SiteResolver:
         return f"{mode}|{source}|{normalized}|{int(page)}|{int(page_size)}|{fingerprint}"
 
     def _config_fingerprint(self) -> str:
-        cookie_file = self.config.cookie_file()
+        source = self.config.default_home_source()
+        cookie_file = self.config.cookie_file(source)
         cookie_stamp = ""
         if cookie_file:
             path = Path(cookie_file)
@@ -191,7 +192,7 @@ class SiteResolver:
                 cookie_stamp = str(path)
         proxy_label, proxy_value = self.config.effective_proxy()
         payload = {
-            "default_home": self.config.default_home_source(),
+            "default_home": source,
             "cookie_browser": self.config.cookie_browser(),
             "cookie_file": cookie_stamp,
             "proxy_label": proxy_label,
@@ -883,7 +884,7 @@ class BilibiliResolver:
         browser_cookie = self._browser_cookie_header(url)
         if browser_cookie:
             return browser_cookie
-        cookie_file = self.config.cookie_file()
+        cookie_file = self.config.cookie_file_for_url(url)
         if cookie_file:
             return load_cookie_header(cookie_file, url)
         return ""

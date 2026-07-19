@@ -30,6 +30,7 @@ class HomeVideoCard(QFrame):
     double_clicked = Signal(object)
     favorite_requested = Signal(object)
     download_requested = Signal(object)
+    play_requested = Signal(object)
 
     def __init__(self, video: HomeVideo, network: QNetworkAccessManager, thumbnail_cache: ThumbnailCache) -> None:
         super().__init__()
@@ -43,11 +44,13 @@ class HomeVideoCard(QFrame):
         self.installEventFilter(self)
 
         self.favorite_button = QPushButton("收藏")
-        self.favorite_button.setFixedHeight(28)
         self.favorite_button.clicked.connect(lambda: self.favorite_requested.emit(self.video))
         self.download_button = QPushButton("下载")
-        self.download_button.setFixedHeight(28)
         self.download_button.clicked.connect(lambda: self.download_requested.emit(self.video))
+        self.play_button = QPushButton("播放")
+        self.play_button.clicked.connect(lambda: self.play_requested.emit(self.video))
+        for button in (self.favorite_button, self.download_button, self.play_button):
+            button.setFixedSize(60, 28)
 
         self.thumbnail_label = QLabel()
         self.thumbnail_label.setObjectName("HomeThumbnail")
@@ -77,6 +80,7 @@ class HomeVideoCard(QFrame):
         action_row.setSpacing(6)
         action_row.addWidget(self.favorite_button)
         action_row.addWidget(self.download_button)
+        action_row.addWidget(self.play_button)
         action_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -159,7 +163,6 @@ class HomePage(QWidget):
         self.title_label = QLabel("首页")
         self.title_label.setObjectName("PageTitle")
         self.refresh_button = QPushButton("刷新")
-        self.play_button = QPushButton("播放选中")
         self.prev_button = QPushButton("上一页")
         self.next_button = QPushButton("下一页")
         self.page_label = QLabel("")
@@ -178,7 +181,6 @@ class HomePage(QWidget):
         header.addWidget(self.next_button)
         header.addSpacing(8)
         header.addWidget(self.refresh_button)
-        header.addWidget(self.play_button)
 
         self.grid_host = QWidget()
         self.grid_layout = QGridLayout(self.grid_host)
@@ -201,10 +203,8 @@ class HomePage(QWidget):
         layout.addWidget(self.scroll_area, 1)
 
         self.refresh_button.clicked.connect(self.refresh_requested)
-        self.play_button.clicked.connect(self._play_selected)
         self.prev_button.clicked.connect(lambda: self.page_requested.emit(max(1, self._page - 1)))
         self.next_button.clicked.connect(lambda: self.page_requested.emit(self._page + 1))
-        self.play_button.setEnabled(False)
         self._update_pagination()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -224,7 +224,6 @@ class HomePage(QWidget):
         self._loading = loading
         self.refresh_button.setEnabled(not loading)
         self.loading_bar.setVisible(loading)
-        self._update_play_button()
         self._update_pagination()
         if loading:
             self.status_label.setText(message or "正在加载内容，请稍等...")
@@ -267,6 +266,7 @@ class HomePage(QWidget):
             card.double_clicked.connect(self._play_card)
             card.favorite_requested.connect(self.favorite_requested)
             card.download_requested.connect(self.download_requested)
+            card.play_requested.connect(self._play_video)
             card.set_favorite(video.video_id in self._favorite_ids)
             self._cards.append(card)
 
@@ -278,14 +278,12 @@ class HomePage(QWidget):
             self.status_label.setText(f"首页第 {page} 页，共加载 {len(videos)} 个视频")
         if self._cards:
             self._select_card(self._cards[0])
-        self._update_play_button()
         self._update_pagination()
 
     def set_error(self, message: str) -> None:
         self._finish_loading()
         prefix = "搜索失败" if self._mode == "search" else "首页加载失败"
         self.status_label.setText(f"{prefix}：{message}")
-        self._update_play_button()
         self._update_pagination()
 
     def set_favorite_ids(self, favorite_ids: set[str]) -> None:
@@ -301,18 +299,13 @@ class HomePage(QWidget):
             self._selected_card.set_selected(False)
         self._selected_card = card
         card.set_selected(True)
-        self._update_play_button()
-
-    def _play_selected(self) -> None:
-        if self._selected_card:
-            self._play_card(self._selected_card)
 
     def _play_card(self, card: HomeVideoCard) -> None:
-        if card.video.webpage_url:
-            self.play_requested.emit(card.video.webpage_url)
+        self._play_video(card.video)
 
-    def _update_play_button(self) -> None:
-        self.play_button.setEnabled(not self._loading and self._selected_card is not None)
+    def _play_video(self, video: HomeVideo) -> None:
+        if video.webpage_url:
+            self.play_requested.emit(video.webpage_url)
 
     def _update_pagination(self) -> None:
         self.prev_button.setVisible(True)

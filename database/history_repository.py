@@ -14,7 +14,7 @@ class HistoryRepository:
 
     def record_play(self, video: VideoInfo, watched_position: int = 0) -> None:
         now = datetime.now().isoformat(timespec="seconds")
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             existing = conn.execute(
                 "SELECT id, play_count FROM history WHERE video_id = ? ORDER BY id DESC LIMIT 1",
                 (video.video_id,),
@@ -63,7 +63,7 @@ class HistoryRepository:
                 )
 
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self.db.connect() as conn:
+        with self.db.connection() as conn:
             rows = conn.execute(
                 """
                 SELECT video_id, title, source_site, webpage_url, uploader, thumbnail, duration,

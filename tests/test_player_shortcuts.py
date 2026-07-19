@@ -7,10 +7,11 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QShortcut
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent, QShortcut
 from PySide6.QtWidgets import QApplication
 
-from resolver.models import PlaylistEntry, PlaylistInfo
+from resolver.models import PlaylistEntry, PlaylistInfo, VideoInfo
 from services.config_service import ConfigService
 from ui.player_page import PlayerPage
 
@@ -126,6 +127,51 @@ class PlayerShortcutTests(unittest.TestCase):
         self.page._shortcut_playlist_step(1)
 
         self.assertEqual(targets, [0, 2])
+
+    def test_mouse_move_in_playlist_item_resets_player_activity(self) -> None:
+        entry = PlaylistEntry("p", "1", "Video", "https://example.com/1", position=1)
+        playlist = PlaylistInfo("p", "Playlist", "https://example.com", entries=[entry])
+        self.page.set_playlist_context(playlist, current_index=0)
+        self.page.set_paused(False)
+        self.page._idle_timer.stop()
+        item = self.page.playlist_overlay.list_widget.item(0)
+        item_widget = self.page.playlist_overlay.list_widget.itemWidget(item)
+        target = item_widget.title_label
+
+        event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(2, 2),
+            QPointF(2, 2),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(target, event)
+
+        self.assertTrue(self.page._idle_timer.isActive())
+
+    def test_browser_play_button_is_available_for_online_video(self) -> None:
+        requests: list[bool] = []
+        self.page.browser_play_requested.connect(lambda: requests.append(True))
+        self.page.update_video_info(
+            VideoInfo(
+                video_id="video-1",
+                title="Video",
+                webpage_url="https://www.youtube.com/watch?v=video-1",
+            ),
+            "Auto",
+        )
+
+        self.assertTrue(self.page.browser_play_button.isEnabled())
+        self.page.browser_play_button.click()
+
+        self.assertEqual(requests, [True])
+
+    def test_browser_play_button_is_disabled_for_local_file(self) -> None:
+        self.page.set_browser_play_available(True)
+        self.page.update_local_file_info("C:/Videos/example.mp4")
+
+        self.assertFalse(self.page.browser_play_button.isEnabled())
 
     def test_action_shortcuts_emit_available_actions(self) -> None:
         actions: list[str] = []

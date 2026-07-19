@@ -86,6 +86,15 @@ class ListSourceSearchTests(unittest.TestCase):
 
 
 class DatabaseMigrationTests(unittest.TestCase):
+    def test_managed_connection_is_closed_after_context_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = SQLiteManager(Path(temp_dir) / "managed.sqlite3")
+            with db.connection() as conn:
+                conn.execute("SELECT 1").fetchone()
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
+
     def test_existing_tables_gain_source_site_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "legacy.sqlite3"

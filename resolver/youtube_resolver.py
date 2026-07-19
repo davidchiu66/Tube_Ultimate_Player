@@ -47,7 +47,7 @@ class YoutubeResolver:
                 result,
             )
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
-            cookie_file = self.config.cookie_file()
+            cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
                 ytdlp_logger.warning("browser cookie extraction failed; retrying with configured cookie file")
                 command = self._build_command(url, force_cookie_file=True)
@@ -99,7 +99,7 @@ class YoutubeResolver:
                 result,
             )
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
-            cookie_file = self.config.cookie_file()
+            cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
                 ytdlp_logger.warning("playlist browser cookie extraction failed; retrying with configured cookie file")
                 command = self._build_playlist_command(url, force_cookie_file=True)
@@ -147,7 +147,7 @@ class YoutubeResolver:
                 result,
             )
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
-            cookie_file = self.config.cookie_file()
+            cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
                 ytdlp_logger.warning("home browser cookie extraction failed; retrying with configured cookie file")
                 command = self._build_home_command(url, total_needed, force_cookie_file=True)
@@ -204,7 +204,7 @@ class YoutubeResolver:
                 result,
             )
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
-            cookie_file = self.config.cookie_file()
+            cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
                 ytdlp_logger.warning("search browser cookie extraction failed; retrying with configured cookie file")
                 command = self._build_home_command(url, total_needed, force_cookie_file=True)
@@ -262,7 +262,7 @@ class YoutubeResolver:
                 result,
             )
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
-            cookie_file = self.config.cookie_file()
+            cookie_file = self.config.cookie_file_for_url(creator_url)
             if cookie_file:
                 command = self._build_home_command(creator_url, limit, force_cookie_file=True)
                 result = self._run_ytdlp(command, creator_url, "creator-videos-fallback-cookie-file")
@@ -392,7 +392,7 @@ class YoutubeResolver:
             command.extend(["--proxy", proxy])
 
         cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
-        cookie_file = self.config.cookie_file()
+        cookie_file = self.config.cookie_file_for_url(url)
         if force_cookie_file and cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
         elif cookie_browser:
@@ -435,7 +435,7 @@ class YoutubeResolver:
             command.extend(["--proxy", proxy])
 
         cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
-        cookie_file = self.config.cookie_file()
+        cookie_file = self.config.cookie_file_for_url(url)
         if force_cookie_file and cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
         elif cookie_browser:
@@ -478,7 +478,7 @@ class YoutubeResolver:
             command.extend(["--proxy", proxy])
 
         cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
-        cookie_file = self.config.cookie_file()
+        cookie_file = self.config.cookie_file_for_url(url)
         if force_cookie_file and cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
         elif cookie_browser:

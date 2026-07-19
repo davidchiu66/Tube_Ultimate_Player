@@ -13,6 +13,14 @@
     "js_runtime": "auto",
     "subtitle_languages": ["zh-Hans", "zh-Hant", "zh", "en"]
   },
+  "cookies": {
+    "youtube": {
+      "file": ""
+    },
+    "bilibili": {
+      "file": ""
+    }
+  },
   "cache": {
     "enabled": true,
     "metadata_ttl_hours": 12,

@@ -34,6 +34,7 @@ class PlayerPage(QWidget):
     quality_changed = Signal(str)
     subtitle_changed = Signal(str)
     cast_requested = Signal()
+    browser_play_requested = Signal()
     fullscreen_requested = Signal()
     download_requested = Signal()
     favorite_requested = Signal()
@@ -61,6 +62,7 @@ class PlayerPage(QWidget):
         self._favorite_available = False
         self._favorite_active = False
         self._cast_available = False
+        self._browser_play_available = False
         self._cast_active = False
         self._cast_seek_supported = True
         self._cast_volume_supported = True
@@ -117,6 +119,7 @@ class PlayerPage(QWidget):
         self.thumbnail_label.setFixedSize(120, 68)
         self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumbnail_label.setText("封面")
+        self.browser_play_button = QPushButton("浏览器播放")
 
         meta_row = QHBoxLayout()
         meta_row.addWidget(self.thumbnail_label)
@@ -125,6 +128,7 @@ class PlayerPage(QWidget):
         meta_text.addWidget(self.meta_label)
         meta_text.addStretch()
         meta_row.addLayout(meta_text, 1)
+        meta_row.addWidget(self.browser_play_button, 0, Qt.AlignmentFlag.AlignTop)
 
         self.position_label = QLabel("00:00")
         self.duration_label = QLabel("00:00")
@@ -214,6 +218,7 @@ class PlayerPage(QWidget):
         self.stop_button.clicked.connect(self.stop_requested)
         self.download_button.clicked.connect(self.download_requested)
         self.favorite_button.clicked.connect(self.favorite_requested)
+        self.browser_play_button.clicked.connect(self.browser_play_requested)
         self.volume_slider.valueChanged.connect(self._handle_volume_changed)
         self.speed_combo.currentIndexChanged.connect(self._emit_speed)
         self.quality_combo.currentTextChanged.connect(self._emit_quality)
@@ -260,7 +265,14 @@ class PlayerPage(QWidget):
                 self.fullscreen_requested.emit()
                 return True
 
-        if watched is self or watched is self.video_widget or watched is self.control_panel or self.control_panel.isAncestorOf(watched):
+        if (
+            watched is self
+            or watched is self.video_widget
+            or watched is self.control_panel
+            or self.control_panel.isAncestorOf(watched)
+            or watched is self.playlist_overlay
+            or self.playlist_overlay.isAncestorOf(watched)
+        ):
             if event.type() == QEvent.Type.MouseMove:
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 self._handle_mouse_move(watched, pos)
@@ -297,6 +309,7 @@ class PlayerPage(QWidget):
             self.progress_slider.setValue(0)
             self._playback_finished = False
             self._cast_available = False
+            self._browser_play_available = False
             self._cast_active = False
             self._download_available = False
             self._favorite_available = False
@@ -322,6 +335,10 @@ class PlayerPage(QWidget):
 
     def set_cast_available(self, available: bool) -> None:
         self._cast_available = available
+        self._update_playback_buttons()
+
+    def set_browser_play_available(self, available: bool) -> None:
+        self._browser_play_available = available
         self._update_playback_buttons()
 
     def set_cast_state(
@@ -373,6 +390,7 @@ class PlayerPage(QWidget):
         self._populating = False
         self.load_thumbnail(video.thumbnail)
         self.set_download_available(True)
+        self.set_browser_play_available(bool(str(video.webpage_url or "").strip()))
         self._position_control_panel(animated=False)
 
     def update_local_file_info(self, path: str) -> None:
@@ -392,6 +410,7 @@ class PlayerPage(QWidget):
         self.subtitle_combo.addItem("关闭", "")
         self._populating = False
         self.set_download_available(False)
+        self.set_browser_play_available(False)
         self.set_favorite_state(False, available=False)
         self._position_control_panel(animated=False)
 
@@ -416,6 +435,10 @@ class PlayerPage(QWidget):
         self._playlist_count = len(playlist.entries) if playlist is not None else 0
         self._playlist_index = current_index
         self.playlist_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
+        # Playlist item widgets are created dynamically, after the overlay's
+        # initial mouse-tracking setup. Track them too so activity anywhere in
+        # the panel resets the playback idle timer and keeps the panel open.
+        self._install_mouse_tracking(self.playlist_overlay)
         self.playlist_overlay.relayout(self.rect())
 
     def clear_playlist_context(self) -> None:
@@ -514,6 +537,7 @@ class PlayerPage(QWidget):
         self.stop_button.setEnabled(enabled)
         self.download_button.setEnabled(enabled and self._download_available)
         self.favorite_button.setEnabled(enabled and self._favorite_available and not self._favorite_active)
+        self.browser_play_button.setEnabled(enabled and self._browser_play_available)
         self.cast_button.setEnabled(enabled and (self._cast_available or self._cast_active))
         self.speed_combo.setEnabled(enabled and not self._cast_active)
         self.quality_combo.setEnabled(enabled and not self._cast_active)
