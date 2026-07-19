@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,8 @@ def main() -> int:
         )
 
         config = ConfigService(user_path=root / "user_config.json")
+        mpv_log = root / "mpv-smoke.log"
+        os.environ["TUBE_PLAYER_MPV_LOG_FILE"] = str(mpv_log)
         widget = QWidget()
         widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         widget.resize(640, 360)
@@ -74,10 +77,22 @@ def main() -> int:
                 },
                 flush=True,
             )
+            if mpv_log.is_file():
+                lines = mpv_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                print("--- libmpv log tail ---", flush=True)
+                print("\n".join(lines[-120:]), flush=True)
             app.quit()
 
+        def start_load() -> None:
+            print(f"libmpv smoke loading path={sample}", flush=True)
+            player.load(str(sample))
+            print(
+                f"libmpv smoke load command returned idle={player.get_bool('core-idle')}",
+                flush=True,
+            )
+
         player.position_changed.connect(on_position)
-        QTimer.singleShot(0, lambda: player.load(str(sample)))
+        QTimer.singleShot(0, start_load)
         QTimer.singleShot(12000, on_timeout)
         app.exec()
         player.shutdown()

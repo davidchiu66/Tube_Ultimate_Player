@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -222,7 +223,12 @@ class MpvPlayer(QObject):
         if proxy:
             options["http-proxy"] = proxy
 
-        optional_options = {"profile"}
+        debug_log = os.environ.get("TUBE_PLAYER_MPV_LOG_FILE", "").strip()
+        if debug_log:
+            options["log-file"] = debug_log
+            options["msg-level"] = "all=v"
+
+        optional_options = {"profile", "log-file", "msg-level"}
         for key, value in options.items():
             try:
                 self._check(
