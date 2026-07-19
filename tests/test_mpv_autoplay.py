@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from player.mpv_player import MpvPlayer
+from player.mpv_player import MpvError, MpvPlayer
 from resolver.models import VideoInfo, VideoQuality
 from ui.main_window import MainWindow
 
@@ -53,6 +53,38 @@ class MpvLoadAutoplayTests(unittest.TestCase):
         MpvPlayer.load(state, "https://example.com/quality.mp4", autoplay=False)
 
         self.assertNotIn(("pause", "no"), state.properties)
+
+
+class MpvOptionCompatibilityTests(unittest.TestCase):
+    def test_missing_optional_fast_profile_does_not_abort_initialization(self) -> None:
+        options: list[str] = []
+
+        class FakeLib:
+            @staticmethod
+            def mpv_set_option_string(_handle, key: bytes, _value: bytes) -> int:
+                name = key.decode("utf-8")
+                options.append(name)
+                return -1 if name == "profile" else 0
+
+        def check(result: int, message: str) -> None:
+            if result < 0:
+                raise MpvError(message)
+
+        state = SimpleNamespace(
+            video_widget=SimpleNamespace(winId=lambda: 1),
+            config=SimpleNamespace(
+                get=lambda _key, default=None: default,
+                effective_proxy=lambda: ("", ""),
+            ),
+            _handle=object(),
+            _lib=FakeLib(),
+            _check=check,
+        )
+
+        MpvPlayer._configure_before_initialize(state)
+
+        self.assertIn("profile", options)
+        self.assertIn("wid", options)
 
 
 class QualitySwitchAutoplayTests(unittest.TestCase):

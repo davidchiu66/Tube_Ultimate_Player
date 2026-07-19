@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import logging
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from services.config_service import ConfigService
 MPV_FORMAT_STRING = 1
 MPV_FORMAT_FLAG = 3
 MPV_FORMAT_DOUBLE = 5
+
+
+logger = logging.getLogger("tube_player.mpv")
 
 
 class MpvError(RuntimeError):
@@ -218,15 +222,21 @@ class MpvPlayer(QObject):
         if proxy:
             options["http-proxy"] = proxy
 
+        optional_options = {"profile"}
         for key, value in options.items():
-            self._check(
-                self._lib.mpv_set_option_string(
-                    self._handle,
-                    key.encode("utf-8"),
-                    str(value).encode("utf-8"),
-                ),
-                f"设置 mpv 选项失败: {key}",
-            )
+            try:
+                self._check(
+                    self._lib.mpv_set_option_string(
+                        self._handle,
+                        key.encode("utf-8"),
+                        str(value).encode("utf-8"),
+                    ),
+                    f"设置 mpv 选项失败: {key}",
+                )
+            except MpvError:
+                if key not in optional_options:
+                    raise
+                logger.warning("optional mpv option is unavailable key=%s value=%s", key, value)
 
     def _poll_properties(self) -> None:
         duration = self.duration()
