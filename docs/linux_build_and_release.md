@@ -3,18 +3,17 @@
 ## 当前支持边界
 
 - 架构：仅 `x86_64/amd64`
-- 官方目标：Ubuntu 22.04、Ubuntu 24.04
-- Fedora：首期使用 AppImage，稳定后再增加 RPM
+- 官方目标：Fedora RPM/COPR；Ubuntu 保留 CI 与本地技术验证
 - 显示系统：X11，或 Wayland 桌面会话中的 XWayland
 - 原生 Wayland：首版不支持；启动器在 Wayland 会话中默认设置 `QT_QPA_PLATFORM=xcb`
-- 发布产物：增强 AppImage 与增强 DEB，均优先自带 Deno、FFmpeg/FFprobe、yt-dlp；AppImage 必须自带 libmpv
-- 自动升级：只检测和下载 Linux 资产，不自动提权、安装 DEB 或替换 AppImage
+- 发布产物：Fedora SRPM/RPM，通过 Fedora COPR 面向用户分发
+- 自动升级：Linux 原生包交给系统包管理器/COPR 仓库处理，应用内不自动提权安装 RPM
 
 完整技术评估见 [`linux_release_feasibility_and_solution.md`](linux_release_feasibility_and_solution.md)。
 
-## Ubuntu 构建依赖
+## Ubuntu 技术验证依赖
 
-推荐在 Ubuntu 22.04 x86_64 中构建，以保持较低的 glibc 基线：
+推荐在 Ubuntu 22.04 x86_64 中验证 X11/libmpv 基础能力：
 
 ```bash
 sudo apt-get update
@@ -52,6 +51,37 @@ xvfb-run -a -s "-screen 0 1280x720x24" \
 烟雾测试会用 FFmpeg 生成短视频，创建真实 Qt/X11 窗口，初始化 libmpv 并确认播放位置开始推进。
 Linux 默认使用兼容性较好的 mpv `vo=gpu`；Windows 继续使用 `vo=gpu-next`。
 Linux 同时允许 `gpu-sw=yes` 软件 GPU 兜底；只有硬件上下文不可用时才回退到 Mesa llvmpipe 等软件渲染器。
+
+## Fedora RPM 构建
+
+RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt-dlp。COPR 会从 SRPM 构建最终二进制 RPM。
+
+本地 Fedora 环境可执行：
+
+```bash
+sudo dnf install -y copr-cli desktop-file-utils dnf-plugins-core git gzip python3-devel rpm-build rpmdevtools tar
+
+VERSION="$(tr -d '\r\n' < app_version.txt)"
+TOPDIR="$PWD/build/rpm"
+mkdir -p "$TOPDIR"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} dist/rpm
+git archive --format=tar --prefix="tube-ultimate-player-${VERSION}/" HEAD \
+  | gzip -n > "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar.gz"
+cp packaging/rpm/tube-ultimate-player.spec "$TOPDIR/SPECS/"
+rpmbuild -bs --define "_topdir $TOPDIR" --define "version $VERSION" \
+  "$TOPDIR/SPECS/tube-ultimate-player.spec"
+dnf builddep -y dist/rpm/*.src.rpm
+rpmbuild --rebuild dist/rpm/*.src.rpm --define "_topdir $TOPDIR"
+```
+
+发布到 COPR 前，需要在 GitHub 仓库配置：
+
+- `COPR_CONFIG` secret：COPR API token 配置内容
+- `COPR_PROJECT` repository variable：目标项目，例如 `davidchiu66/tube-ultimate-player`
+- `COPR_CHROOTS` repository variable：可选 chroot 列表，例如 `fedora-41-x86_64 fedora-42-x86_64`
+
+## 历史增强运行时
+
+以下 AppDir/AppImage/DEB 构建说明仅保留给本地排障和历史追溯；正式发布工作流已取消增强 AppImage/DEB 构建。
 
 ## 准备增强运行时
 
@@ -149,15 +179,15 @@ $XDG_VIDEOS_DIR/Tube_Ultimate_Player/
 ## GitHub Actions
 
 - `test-linux.yml`：Ubuntu 22.04 单元测试及 Xvfb/libmpv 播放烟雾测试
-- `release-linux.yml`：准备增强运行时、构建 AppImage/DEB、校验内容并上传构建产物
+- `release-linux-rpm-copr.yml`：构建 Fedora SRPM/RPM，并可提交到 Fedora COPR
 
-在 Linux Runner 完成首次成功构建和人工图形验收前，Linux 产物不应并入正式 GitHub Release 发布任务。
+增强 AppImage/DEB 已不并入正式 GitHub Release 发布任务。
 
 ## 发布验收
 
-- AppImage 和 DEB 均能在 Ubuntu 22.04/24.04 普通用户会话启动
+- RPM 能通过 COPR 在目标 Fedora chroot 构建
 - GNOME/KDE Wayland 会话通过 XWayland 正常嵌入播放
-- `libmpv`、Deno、FFmpeg/FFprobe、yt-dlp 均从包内加载
+- `libmpv`、FFmpeg/FFprobe、yt-dlp 从 Fedora 系统依赖或 PATH 加载
 - 首页、搜索、播放、字幕、下载、Cookie 和 DLNA 基础功能通过
-- AppImage/DEB 包含许可证、版权信息、构建说明及 SHA256
-- 不调用 `sudo`、`pkexec` 或系统包管理器执行自动升级
+- RPM 包含许可证、版权信息和构建说明
+- 应用内不调用 `sudo`、`pkexec` 或系统包管理器执行自动升级

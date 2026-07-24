@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT="/usr/share/tube-ultimate-player"
+export PYTHONPATH="$APP_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    export QT_QPA_PLATFORM="${TUBE_PLAYER_QPA_PLATFORM:-xcb}"
+fi
+
+exec /usr/bin/python3 "$APP_ROOT/main.py" "$@"

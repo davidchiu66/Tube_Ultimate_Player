@@ -79,6 +79,18 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("Exec=Tube_Ultimate_Player %U", desktop)
         self.assertIn("Icon=tube-ultimate-player", desktop)
 
+    def test_rpm_packaging_uses_fedora_system_dependencies(self) -> None:
+        root = Path(build_linux.__file__).resolve().parent
+        spec = (root / "packaging" / "rpm" / "tube-ultimate-player.spec").read_text(encoding="utf-8")
+        launcher = (root / "packaging" / "rpm" / "tube-ultimate-player").read_text(encoding="utf-8")
+
+        self.assertIn("Requires:       mpv-libs", spec)
+        self.assertIn("Requires:       yt-dlp", spec)
+        self.assertIn("Requires:       ffmpeg", spec)
+        self.assertNotIn("with_deno_ffmpeg", spec)
+        self.assertNotIn(" download js player ", spec)
+        self.assertIn('/usr/bin/python3 "$APP_ROOT/main.py"', launcher)
+
 
 if __name__ == "__main__":
     unittest.main()

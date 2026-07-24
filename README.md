@@ -39,7 +39,7 @@
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
 - 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
-- Linux 首版面向 x86_64 的 X11/XWayland，提供自带 libmpv、Deno、FFmpeg 和 yt-dlp 的增强 AppImage/DEB 构建链路
+- Linux 首版面向 x86_64 的 X11/XWayland；已取消增强 AppImage/DEB 发布构建，转向 Fedora RPM 与 COPR 发布链路
 
 ## 界面与流程
 
@@ -135,7 +135,7 @@ Tube_Ultimate_Player/
 ├── .github/workflows/        # 发布工作流
 ├── app_version.txt           # 当前正式版本号
 ├── build_installer.py        # 安装包构建脚本
-├── build_linux.py            # Linux AppDir 与 DEB 构建脚本
+├── build_linux.py            # Linux AppDir 与历史 DEB 本地构建脚本
 ├── build_portable.py         # 便携版构建脚本
 ├── build_portable_with_deno_ffmpeg.py # 自带 Deno/FFmpeg 的免安装便携版脚本
 └── main.py
@@ -190,7 +190,7 @@ Linux 使用 XDG Base Directory，配置、数据、缓存与日志分别写入�
 - `release-installer.yml`：仅构建安装包
 - `release-installer-with-deno-ffmpeg.yml`：构建自带 Deno、FFmpeg 与 FFprobe 的增强安装包和增强便携版
 - `test-linux.yml`：Ubuntu 单元测试与 Xvfb/libmpv 嵌入播放烟雾测试
-- `release-linux.yml`：构建增强 AppImage 与增强 DEB，并校验捆绑运行时、许可证和 SHA256
+- `release-linux-rpm-copr.yml`：构建 Fedora SRPM/RPM，并可提交到 Fedora COPR
 
 正式发布流程会：
 
@@ -199,8 +199,8 @@ Linux 使用 XDG Base Directory，配置、数据、缓存与日志分别写入�
 3. 下载最新 `yt-dlp.exe`
 4. 从 SourceForge 下载 `libmpv-2.dll`
 5. 结合仓库中的其余 `3rdpart` 依赖构建产物
-6. 运行 Ubuntu X11/libmpv 烟雾测试并构建增强 AppImage/DEB
-7. 上传 Windows 普通/增强产物及 Linux 增强产物，并发布到 GitHub Releases
+6. 运行 Ubuntu X11/libmpv 烟雾测试；Linux 发布通过 Fedora RPM/COPR 工作流完成
+7. 上传 Windows 普通/增强产物，并发布到 GitHub Releases
 
 正式发布同时提供普通版本和增强版本。增强安装包及增强便携版文件名带有
 `_with_deno_ffmpeg` 后缀，体积更大，但可直接使用内置 Deno 与 FFmpeg。
@@ -221,16 +221,16 @@ python build_portable.py --with-deno-ffmpeg
 
 输出文件名为 `Tube_Ultimate_Player_portable_v<version>_with_deno_ffmpeg.zip`，解压后即可运行。
 
-### Linux 增强 AppImage 与 DEB
+### Fedora RPM 与 COPR
 
-Linux 构建会优先生成：
+Linux 发布工作流会生成 Fedora SRPM/RPM，并可提交到 COPR：
 
 ```text
-Tube_Ultimate_Player_v<version>_x86_64_with_deno_ffmpeg.AppImage
-tube-ultimate-player_<version>_amd64_with_deno_ffmpeg.deb
+tube-ultimate-player-<version>-1.fc*.src.rpm
+tube-ultimate-player-<version>-1.fc*.noarch.rpm
 ```
 
-AppImage 必须捆绑 libmpv；增强产物同时包含 Deno、FFmpeg/FFprobe 和 yt-dlp。Linux 首版只下载升级包，不自动提权或安装。完整构建、依赖和验收流程见
+RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt-dlp。发布到 COPR 需要配置 `COPR_CONFIG` secret，并可通过 `COPR_PROJECT`、`COPR_CHROOTS` 仓库变量指定目标项目和 chroot。完整构建、依赖和验收流程见
 [`docs/linux_build_and_release.md`](docs/linux_build_and_release.md)。
 
 ## JS Runtime 说明
@@ -269,8 +269,8 @@ AppImage 必须捆绑 libmpv；增强产物同时包含 Deno、FFmpeg/FFprobe �
 - 新增面向 Ubuntu 22.04/24.04 x86_64 的 Linux 支持。
 - Wayland 桌面通过 XWayland/xcb 运行，首版暂不支持原生 Wayland 嵌入。
 - Linux 遵循 XDG 配置、数据、缓存、状态和视频目录规范。
-- AppImage 捆绑 libmpv，并优先提供自带 Deno、FFmpeg/FFprobe、yt-dlp 的增强版本。
-- 新增增强 AppImage、DEB 构建链路及 Ubuntu Xvfb/libmpv 播放烟雾测试。
+- 已取消增强 AppImage/DEB 发布构建，Linux 发布改为 Fedora RPM/COPR。
+- 保留 Ubuntu Xvfb/libmpv 播放烟雾测试，持续验证 Linux 播放基础能力。
 - 支持 Linux Chrome/Chromium/Brave/Firefox 原生、Snap 和 Flatpak Cookie Profile 探测。
 - Linux 在线升级只下载匹配资产，不自动提权或安装系统包。
 - 修复 Ubuntu CI 直接运行 libmpv 烟雾测试时的项目模块导入路径。

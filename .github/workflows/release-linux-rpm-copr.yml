@@ -1,0 +1,122 @@
+name: Build RPM and Publish to Fedora COPR
+
+on:
+  workflow_dispatch:
+    inputs:
+      copr_project:
+        description: "COPR project in owner/project format. Falls back to repository variable COPR_PROJECT."
+        required: false
+        type: string
+      chroots:
+        description: "Optional COPR chroots, for example: fedora-41-x86_64 fedora-42-x86_64"
+        required: false
+        type: string
+      submit_copr:
+        description: "Submit the SRPM to Fedora COPR"
+        required: true
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-rpm-and-copr:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    permissions:
+      contents: read
+    steps:
+      - name: Install build tools
+        run: |
+          dnf install -y \
+            copr-cli desktop-file-utils dnf-plugins-core git gzip python3-devel rpm-build rpmdevtools tar
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Trust checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build source RPM
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '\r\n' < app_version.txt)"
+          TOPDIR="$PWD/build/rpm"
+          mkdir -p "$TOPDIR"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} dist/rpm
+          git archive \
+            --format=tar \
+            --prefix="tube-ultimate-player-${VERSION}/" \
+            --output="$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar" \
+            HEAD
+          gzip -n "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar"
+          tar -tzf "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar.gz" >/dev/null
+          cp packaging/rpm/tube-ultimate-player.spec "$TOPDIR/SPECS/"
+          sed -i "s/^Version:.*/Version:        ${VERSION}/" "$TOPDIR/SPECS/tube-ultimate-player.spec"
+          rpmbuild -bs \
+            --define "_topdir $TOPDIR" \
+            "$TOPDIR/SPECS/tube-ultimate-player.spec"
+          cp "$TOPDIR"/SRPMS/*.src.rpm dist/rpm/
+
+      - name: Validate binary RPM build
+        run: |
+          VERSION="$(tr -d '\r\n' < app_version.txt)"
+          SRPM="$(find dist/rpm -maxdepth 1 -name '*.src.rpm' -print -quit)"
+          dnf builddep -y "$SRPM"
+          rpmbuild --rebuild "$SRPM" \
+            --define "_topdir $PWD/build/rpm"
+          cp build/rpm/RPMS/noarch/*.rpm dist/rpm/
+          rpm -qpi dist/rpm/*.src.rpm
+          rpm -qpi dist/rpm/*.noarch.rpm
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_rpm
+          path: dist/rpm/*
+          if-no-files-found: error
+
+      - name: Configure COPR credentials
+        if: ${{ github.event_name == 'push' || github.event.inputs.submit_copr == 'true' }}
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          if [ -z "$COPR_CONFIG" ]; then
+            echo "COPR_CONFIG secret is required to submit builds." >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.config"
+          printf '%s\n' "$COPR_CONFIG" > "$HOME/.config/copr"
+          chmod 0600 "$HOME/.config/copr"
+
+      - name: Submit source RPM to Fedora COPR
+        if: ${{ github.event_name == 'push' || github.event.inputs.submit_copr == 'true' }}
+        env:
+          INPUT_COPR_PROJECT: ${{ github.event.inputs.copr_project }}
+          VAR_COPR_PROJECT: ${{ vars.COPR_PROJECT }}
+          SECRET_COPR_PROJECT: ${{ secrets.COPR_PROJECT }}
+          INPUT_CHROOTS: ${{ github.event.inputs.chroots }}
+          VAR_COPR_CHROOTS: ${{ vars.COPR_CHROOTS }}
+          SECRET_COPR_CHROOTS: ${{ secrets.COPR_CHROOTS }}
+        run: |
+          set -euo pipefail
+          COPR_PROJECT="${INPUT_COPR_PROJECT:-${VAR_COPR_PROJECT:-$SECRET_COPR_PROJECT}}"
+          if [ -z "$COPR_PROJECT" ]; then
+            echo "COPR project is required. Set workflow input copr_project, repository variable COPR_PROJECT, or repository secret COPR_PROJECT." >&2
+            exit 1
+          fi
+          CHROOTS="${INPUT_CHROOTS:-${VAR_COPR_CHROOTS:-${SECRET_COPR_CHROOTS:-fedora-44-x86_64 fedora-43-x86_64}}}"
+          SRPM="$(find dist/rpm -maxdepth 1 -name '*.src.rpm' -print -quit)"
+          copr-cli modify "$COPR_PROJECT" --disable_createrepo true
+          chroot_args=()
+          for chroot in $CHROOTS; do
+            chroot_args+=(--chroot "$chroot")
+          done
+          if [ -n "$CHROOTS" ]; then
+            copr-cli build "${chroot_args[@]}" "$COPR_PROJECT" "$SRPM"
+          else
+            copr-cli build "$COPR_PROJECT" "$SRPM"
+          fi
+          copr-cli regenerate-repos "$COPR_PROJECT"

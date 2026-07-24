@@ -19,6 +19,7 @@ cookie.txt
 
 # Windows / packaging
 *.spec
+!packaging/rpm/*.spec
 dist/
 build/
 *.msi
