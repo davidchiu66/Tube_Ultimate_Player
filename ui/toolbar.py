@@ -40,6 +40,7 @@ def _draw_fallback_icon(name: str, size: int) -> QIcon:
         "fa5s.search": _draw_search_icon,
         "fa5s.link": _draw_link_icon,
         "fa5s.home": _draw_home_icon,
+        "fa5s.list": _draw_list_icon,
         "fa5s.play-circle": _draw_play_circle_icon,
         "fa5s.download": _draw_download_icon,
         "fa5s.star": _draw_star_icon,
@@ -75,6 +76,12 @@ def _draw_home_icon(painter: QPainter, size: float) -> None:
     path.lineTo(size * 0.76, size * 0.82)
     path.lineTo(size * 0.76, size * 0.4)
     painter.drawPath(path)
+
+
+def _draw_list_icon(painter: QPainter, size: float) -> None:
+    for y in (0.3, 0.5, 0.7):
+        painter.drawPoint(QPointF(size * 0.24, size * y))
+        painter.drawLine(QPointF(size * 0.38, size * y), QPointF(size * 0.78, size * y))
 
 
 def _draw_play_circle_icon(painter: QPainter, size: float) -> None:
@@ -226,6 +233,7 @@ class PlayerToolbar(QWidget):
     search_requested = Signal(str)
     url_requested = Signal()
     home_clicked = Signal()
+    playlist_clicked = Signal()
     player_clicked = Signal()
     download_clicked = Signal()
     favorite_clicked = Signal()
@@ -246,6 +254,7 @@ class PlayerToolbar(QWidget):
         self.search_button = ToolbarButton("搜索", "fa5s.search", "搜索在线视频", self)
         self.url_button = ToolbarButton("播放URL", "fa5s.link", "打开网络视频地址", self)
         self.home_button = ToolbarButton("首页", "fa5s.home", "查看首页视频列表", self)
+        self.playlist_button = ToolbarButton("播放列表", "fa5s.list", "查看播放列表", self)
         self.player_button = ToolbarButton("播放器", "fa5s.play-circle", "返回播放器界面", self)
         self.download_button = ToolbarButton("下载列表", "fa5s.download", "查看下载任务", self)
         self.favorite_button = ToolbarButton("收藏", "fa5s.star", "查看收藏视频", self)
@@ -259,6 +268,7 @@ class PlayerToolbar(QWidget):
         self.search_button.clicked.connect(self._emit_search)
         self.url_button.clicked.connect(self.url_requested.emit)
         self.home_button.clicked.connect(self.home_clicked.emit)
+        self.playlist_button.clicked.connect(self.playlist_clicked.emit)
         self.player_button.clicked.connect(self.player_clicked.emit)
         self.download_button.clicked.connect(self.download_clicked.emit)
         self.favorite_button.clicked.connect(self.favorite_clicked.emit)
@@ -275,6 +285,7 @@ class PlayerToolbar(QWidget):
         layout.addWidget(self.search_button)
         layout.addWidget(self.url_button)
         layout.addWidget(self.home_button)
+        layout.addWidget(self.playlist_button)
         layout.addWidget(self.player_button)
         layout.addWidget(self.download_button)
         layout.addWidget(self.favorite_button)
@@ -284,6 +295,7 @@ class PlayerToolbar(QWidget):
         layout.addWidget(self.topmost_button)
 
         self._setup_shortcuts()
+        self._set_responsive_mode("icon")
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -319,6 +331,9 @@ class PlayerToolbar(QWidget):
         mode = "icon" if width < 1220 else "full"
         if mode == self._compact_mode:
             return
+        self._set_responsive_mode(mode)
+
+    def _set_responsive_mode(self, mode: str) -> None:
         self._compact_mode = mode
         icon_only = mode == "icon"
         self.search_box.set_compact_mode(icon_only)
@@ -326,6 +341,7 @@ class PlayerToolbar(QWidget):
             self.search_button,
             self.url_button,
             self.home_button,
+            self.playlist_button,
             self.player_button,
             self.download_button,
             self.favorite_button,

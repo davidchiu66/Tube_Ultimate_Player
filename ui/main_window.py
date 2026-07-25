@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         self.search_button = self.top_bar_widget.search_button
         self.play_url_button = self.top_bar_widget.url_button
         self.home_nav = self.top_bar_widget.home_button
+        self.playlist_nav = self.top_bar_widget.playlist_button
         self.player_nav = self.top_bar_widget.player_button
         self.download_nav = self.top_bar_widget.download_button
         self.favorite_nav = self.top_bar_widget.favorite_button
@@ -198,6 +199,7 @@ class MainWindow(QMainWindow):
         self.top_bar_widget.search_requested.connect(self._toolbar_search_requested)
         self.play_url_button.clicked.connect(self._show_play_url_dialog)
         self.home_nav.clicked.connect(self._show_home)
+        self.playlist_nav.clicked.connect(self._show_playlist_page)
         self.player_nav.clicked.connect(lambda: self.stack.setCurrentWidget(self.player_page))
         self.download_nav.clicked.connect(lambda: self.stack.setCurrentWidget(self.download_page))
         self.favorite_nav.clicked.connect(self._show_favorites)
@@ -215,6 +217,8 @@ class MainWindow(QMainWindow):
         self.playlist_page.play_entry_requested.connect(self._play_playlist_from_page)
         self.playlist_page.download_entries_requested.connect(self._download_playlist_entries)
         self.playlist_page.save_requested.connect(self._save_active_playlist)
+        self.playlist_page.load_saved_requested.connect(self._load_saved_playlist)
+        self.playlist_page.delete_saved_requested.connect(self._delete_saved_playlist)
         self.playlist_page.auto_play_changed.connect(self._set_playlist_auto_play)
         self.favorite_page.play_requested.connect(self.play_url)
         self.favorite_page.remove_requested.connect(self._remove_favorite)
@@ -274,12 +278,50 @@ class MainWindow(QMainWindow):
     def _resize_for_available_screen(self) -> None:
         screen = QGuiApplication.primaryScreen()
         if screen is None:
-            self.resize(1180, 760)
+            self.resize(960, 640)
             return
         available = screen.availableGeometry()
-        width = min(1180, max(900, available.width() - 80))
-        height = min(760, max(560, available.height() - 80))
+        width = self._adaptive_window_length(available.width(), preferred=1180, minimum=720)
+        height = self._adaptive_window_length(available.height(), preferred=760, minimum=520)
+        self.setMinimumSize(min(640, width), min(420, height))
         self.resize(width, height)
+        self._move_inside_available_geometry()
+
+    @staticmethod
+    def _adaptive_window_length(available: int, *, preferred: int, minimum: int) -> int:
+        if available <= 0:
+            return preferred
+        margin = max(24, min(80, int(available * 0.06)))
+        usable = max(1, available - margin)
+        if usable < minimum:
+            return usable
+        return min(preferred, usable)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_inside_available_screen)
+
+    def _fit_inside_available_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        target_width = min(self.width(), available.width())
+        target_height = min(self.height(), available.height())
+        if target_width != self.width() or target_height != self.height():
+            self.resize(target_width, target_height)
+        self._move_inside_available_geometry()
+
+    def _move_inside_available_geometry(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), available.left()), max(available.left(), available.right() - frame.width() + 1))
+        y = min(max(frame.y(), available.top()), max(available.top(), available.bottom() - frame.height() + 1))
+        if x != frame.x() or y != frame.y():
+            self.move(x, y)
 
     def _restore_download_tasks(self) -> None:
         for task in self.download_manager.tasks():
@@ -496,6 +538,7 @@ class MainWindow(QMainWindow):
         self.current_playlist_index = -1
         self.current_playlist_key = ""
         self.current_playlist_auto_play = True
+        self.playlist_page.clear_playlist()
         self.player_page.clear_playlist_context()
 
     def _play_playlist_from_page(self, playlist: PlaylistInfo, index: int) -> None:
@@ -625,6 +668,7 @@ class MainWindow(QMainWindow):
     def _refresh_saved_playlists(self, current_key: str = "") -> None:
         playlists = self.playlists.all_playlists()
         selected_key = current_key or self.current_playlist_key
+        self.playlist_page.set_saved_playlists(playlists, selected_key)
         self.player_page.set_playlist_saved_items(playlists, selected_key)
 
     def _saved_to_playlist(self, saved: SavedPlaylist) -> PlaylistInfo:
@@ -1358,6 +1402,10 @@ class MainWindow(QMainWindow):
 
     def _show_player_page(self) -> None:
         self.stack.setCurrentWidget(self.player_page)
+
+    def _show_playlist_page(self) -> None:
+        self._refresh_saved_playlists()
+        self.stack.setCurrentWidget(self.playlist_page)
 
     def _show_favorites(self) -> None:
         self.favorite_page.refresh()

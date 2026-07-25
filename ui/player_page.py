@@ -23,6 +23,7 @@ from resolver.models import VideoInfo
 from services.config_service import ConfigService
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 from ui.playlist_overlay import PlaylistOverlay
+from ui.thumbnail_cache import read_image_reply
 
 
 class PlayerPage(QWidget):
@@ -214,6 +215,28 @@ class PlayerPage(QWidget):
         self.playlist_overlay = PlaylistOverlay(self)
         self.playlist_overlay.hide()
 
+        self.shortcut_hint = QLabel(self)
+        self.shortcut_hint.setObjectName("ShortcutHint")
+        self.shortcut_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.shortcut_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.shortcut_hint.setStyleSheet(
+            """
+            QLabel#ShortcutHint {
+                background-color: rgba(0, 0, 0, 204);
+                color: white;
+                border-radius: 12px;
+                font-size: 22px;
+                font-weight: 600;
+                padding: 14px 24px;
+            }
+            """
+        )
+        self.shortcut_hint.hide()
+        self._shortcut_hint_timer = QTimer(self)
+        self._shortcut_hint_timer.setSingleShot(True)
+        self._shortcut_hint_timer.setInterval(1600)
+        self._shortcut_hint_timer.timeout.connect(self.shortcut_hint.hide)
+
         self.play_button.clicked.connect(self.play_pause_requested)
         self.stop_button.clicked.connect(self.stop_requested)
         self.download_button.clicked.connect(self.download_requested)
@@ -245,6 +268,7 @@ class PlayerPage(QWidget):
         super().resizeEvent(event)
         self._position_control_panel(animated=False)
         self.playlist_overlay.relayout(self.rect())
+        self._position_shortcut_hint()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.MouseButtonRelease and self._control_interaction_active:
@@ -429,7 +453,13 @@ class PlayerPage(QWidget):
         if layout:
             layout.setContentsMargins(0, 0, 0, 0) if fullscreen else layout.setContentsMargins(16, 16, 16, 16)
         self.fullscreen_button.setText("退出全屏" if fullscreen else "全屏")
-        self._show_controls()
+        self._control_pointer_inside = False
+        self._control_interaction_active = False
+        if self._controls_visible:
+            self._controls_visible = False
+            self._position_control_panel(animated=True)
+        else:
+            self._position_control_panel(animated=False)
 
     def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = True) -> None:
         self._playlist_count = len(playlist.entries) if playlist is not None else 0
@@ -474,9 +504,9 @@ class PlayerPage(QWidget):
 
     @Slot()
     def _thumbnail_finished(self, reply: QNetworkReply) -> None:
-        data = reply.readAll()
+        data, failure = read_image_reply(reply)
         pixmap = QPixmap()
-        if pixmap.loadFromData(data):
+        if not failure and pixmap.loadFromData(data):
             self.thumbnail_label.setPixmap(
                 pixmap.scaled(
                     self.thumbnail_label.size(),
@@ -484,6 +514,9 @@ class PlayerPage(QWidget):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+        else:
+            self.thumbnail_label.setPixmap(QPixmap())
+            self.thumbnail_label.setText("封面")
         reply.deleteLater()
 
     def _position_control_panel(self, animated: bool) -> None:
@@ -505,6 +538,20 @@ class PlayerPage(QWidget):
         else:
             self._controls_animation.stop()
             self.control_panel.move(target)
+
+    def _show_shortcut_hint(self, text: str) -> None:
+        self.shortcut_hint.setText(text)
+        self.shortcut_hint.adjustSize()
+        self._position_shortcut_hint()
+        self.shortcut_hint.raise_()
+        self.shortcut_hint.show()
+        self._shortcut_hint_timer.start()
+
+    def _position_shortcut_hint(self) -> None:
+        self.shortcut_hint.adjustSize()
+        x = max(0, (self.width() - self.shortcut_hint.width()) // 2)
+        y = max(0, (self.height() - self.shortcut_hint.height()) // 2)
+        self.shortcut_hint.move(x, y)
 
     def _on_seek_start(self) -> None:
         self._seeking = True
@@ -654,12 +701,15 @@ class PlayerPage(QWidget):
             "cast": self._shortcut_cast,
             "fullscreen": self._shortcut_fullscreen,
             "fullscreen_keypad": self._shortcut_fullscreen,
+            "fullscreen_exit": self._shortcut_exit_fullscreen,
             "seek_backward_10": lambda: self._shortcut_seek(-10.0),
             "seek_forward_10": lambda: self._shortcut_seek(10.0),
             "seek_backward_60": lambda: self._shortcut_seek(-60.0),
             "seek_forward_60": lambda: self._shortcut_seek(60.0),
             "volume_up": lambda: self._shortcut_volume(5),
             "volume_down": lambda: self._shortcut_volume(-5),
+            "speed_up": lambda: self._shortcut_speed_step(1),
+            "speed_down": lambda: self._shortcut_speed_step(-1),
             "mute": self._shortcut_toggle_mute,
             "seek_start": self._shortcut_seek_start,
             "seek_end": self._shortcut_seek_end,
@@ -721,6 +771,10 @@ class PlayerPage(QWidget):
         if self._shortcut_context_active():
             self.fullscreen_requested.emit()
 
+    def _shortcut_exit_fullscreen(self) -> None:
+        if self._shortcut_context_active() and self._fullscreen:
+            self.fullscreen_requested.emit()
+
     def _shortcut_seek(self, delta: float) -> None:
         if not self._shortcut_context_active():
             return
@@ -735,7 +789,9 @@ class PlayerPage(QWidget):
         if self._cast_active and not self._cast_volume_supported:
             return
         target = max(0, min(100, self.volume_slider.value() + int(delta)))
-        self.volume_slider.setValue(target)
+        if target != self.volume_slider.value():
+            self.volume_slider.setValue(target)
+            self._show_shortcut_hint(f"音量 {target}%")
 
     def _shortcut_toggle_mute(self) -> None:
         if not self._shortcut_context_active():
@@ -748,6 +804,14 @@ class PlayerPage(QWidget):
             self.volume_slider.setValue(0)
         else:
             self.volume_slider.setValue(max(1, min(100, self._volume_before_mute)))
+
+    def _shortcut_speed_step(self, delta: int) -> None:
+        if not self._shortcut_context_active() or not self.speed_combo.isEnabled():
+            return
+        target = max(0, min(self.speed_combo.count() - 1, self.speed_combo.currentIndex() + int(delta)))
+        if target != self.speed_combo.currentIndex():
+            self.speed_combo.setCurrentIndex(target)
+            self._show_shortcut_hint(f"倍速 {float(self.speed_combo.currentData()):g}x")
 
     def _shortcut_seek_start(self) -> None:
         if self._shortcut_context_active():

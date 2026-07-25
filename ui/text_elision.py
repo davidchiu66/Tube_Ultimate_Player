@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtGui import QFontMetrics, QTextLayout, QTextOption
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QLabel
 
 
@@ -11,50 +11,80 @@ def elide_multiline_text(label: QLabel, text: str, width: int, max_lines: int) -
         return ""
 
     line_width = max(1, int(width))
-    layout = QTextLayout(source, label.font())
-    option = QTextOption()
-    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-    layout.setTextOption(option)
-
-    lines: list[tuple[int, int]] = []
-    layout.beginLayout()
-    try:
-        while len(lines) <= max_lines:
-            line = layout.createLine()
-            if not line.isValid():
-                break
-            line.setLineWidth(line_width)
-            lines.append((line.textStart(), line.textLength()))
-    finally:
-        layout.endLayout()
-
+    metrics = label.fontMetrics()
+    lines = _wrap_text(metrics, source, line_width, max_lines + 1)
     if not lines:
-        return _elide_with_three_dots(label.fontMetrics(), source, line_width)
+        return _elide_with_three_dots(metrics, source, line_width)
 
     visible_lines = lines[:max_lines]
-    result = [source[start : start + length].strip() for start, length in visible_lines]
-    last_start, last_length = visible_lines[-1]
-    has_overflow = len(lines) > max_lines or last_start + last_length < len(source)
+    result = [line.strip() for line in visible_lines]
+    has_overflow = len(lines) > max_lines
     if has_overflow:
-        result[-1] = _elide_with_three_dots(label.fontMetrics(), source[last_start:], line_width)
+        overflow_text = " ".join(lines[max_lines - 1 :]).strip()
+        result[-1] = _elide_with_three_dots(metrics, overflow_text, line_width)
     return "\n".join(result)
+
+
+def _wrap_text(metrics: QFontMetrics, text: str, width: int, max_lines: int) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    last_space = -1
+    for index, char in enumerate(text):
+        candidate = current + char
+        if not current or _text_width(metrics, candidate) <= width:
+            current = candidate
+            if char.isspace():
+                last_space = len(current) - 1
+            continue
+
+        if last_space > 0:
+            line = current[:last_space].rstrip()
+            remainder = current[last_space + 1 :] + char
+        else:
+            line = current.rstrip()
+            remainder = char
+        if line:
+            lines.append(line)
+            if len(lines) >= max_lines:
+                lines.append(remainder + text[index + 1 :])
+                return lines
+        current = remainder.lstrip()
+        last_space = max((index for index, value in enumerate(current) if value.isspace()), default=-1)
+
+    if current.strip():
+        lines.append(current.rstrip())
+    return lines
 
 
 def _elide_with_three_dots(metrics: QFontMetrics, text: str, width: int) -> str:
     source = str(text or "").strip()
     suffix = "..."
-    if metrics.horizontalAdvance(source) <= width:
+    if _text_width(metrics, source) <= width:
         return source
 
-    available = width - metrics.horizontalAdvance(suffix)
+    available = width - _text_width(metrics, suffix)
     if available <= 0:
         return suffix
 
     low, high = 0, len(source)
     while low < high:
         middle = (low + high + 1) // 2
-        if metrics.horizontalAdvance(source[:middle]) <= available:
+        if _text_width(metrics, source[:middle]) <= available:
             low = middle
         else:
             high = middle - 1
     return f"{source[:low].rstrip()}{suffix}"
+
+
+def _text_width(metrics: QFontMetrics, text: str) -> int:
+    width = metrics.horizontalAdvance(text)
+    if not text:
+        return width
+    fallback = max(1, metrics.averageCharWidth())
+    char_widths = [metrics.horizontalAdvance(char) for char in text]
+    if width > 0 and all(char_width > 0 or char.isspace() for char, char_width in zip(text, char_widths)):
+        return width
+    total = 0
+    for char, char_width in zip(text, char_widths):
+        total += char_width if char_width > 0 else fallback
+    return total

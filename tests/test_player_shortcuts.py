@@ -37,7 +37,7 @@ class PlayerShortcutTests(unittest.TestCase):
 
     def test_extended_playback_shortcuts_are_registered(self) -> None:
         sequences = {shortcut.key().toString() for shortcut in self.page.findChildren(QShortcut)}
-        self.assertTrue({"M", "Home", "End", "PgUp", "PgDown"}.issubset(sequences))
+        self.assertTrue({"M", "Home", "End", "PgUp", "PgDown", "Esc", "Z", "X"}.issubset(sequences))
 
     def test_action_and_large_seek_shortcuts_are_registered(self) -> None:
         sequences = {shortcut.key().toString() for shortcut in self.page.findChildren(QShortcut)}
@@ -89,6 +89,15 @@ class PlayerShortcutTests(unittest.TestCase):
 
         self.assertEqual(values, [85, 80])
 
+    def test_volume_shortcut_shows_center_hint(self) -> None:
+        self.page.set_volume(80)
+
+        self.page._shortcut_volume(5)
+
+        self.assertTrue(self.page.shortcut_hint.isVisible())
+        self.assertEqual(self.page.shortcut_hint.text(), "音量 85%")
+        self.assertEqual(self.page._shortcut_hint_timer.interval(), 1600)
+
     def test_mute_toggles_previous_volume(self) -> None:
         values: list[int] = []
         self.page.set_volume(65)
@@ -98,6 +107,76 @@ class PlayerShortcutTests(unittest.TestCase):
         self.page._shortcut_toggle_mute()
 
         self.assertEqual(values, [0, 65])
+
+    def test_speed_shortcuts_step_between_available_rates(self) -> None:
+        values: list[float] = []
+        self.page.set_speed(1.0)
+        self.page.speed_changed.connect(values.append)
+
+        self.page._shortcut_speed_step(1)
+        self.page._shortcut_speed_step(-1)
+
+        self.assertEqual(values, [1.25, 1.0])
+
+    def test_speed_shortcut_shows_center_hint(self) -> None:
+        self.page.set_speed(1.0)
+
+        self.page._shortcut_speed_step(1)
+
+        self.assertTrue(self.page.shortcut_hint.isVisible())
+        self.assertEqual(self.page.shortcut_hint.text(), "倍速 1.25x")
+        self.assertEqual(self.page._shortcut_hint_timer.interval(), 1600)
+
+    def test_speed_shortcuts_keep_current_rate_at_bounds(self) -> None:
+        values: list[float] = []
+        self.page.speed_changed.connect(values.append)
+
+        self.page.speed_combo.setCurrentIndex(0)
+        values.clear()
+        self.page._shortcut_speed_step(-1)
+
+        self.assertEqual(self.page.speed_combo.currentIndex(), 0)
+        self.assertEqual(values, [])
+
+        last_index = self.page.speed_combo.count() - 1
+        self.page.speed_combo.setCurrentIndex(last_index)
+        values.clear()
+        self.page._shortcut_speed_step(1)
+
+        self.assertEqual(self.page.speed_combo.currentIndex(), last_index)
+        self.assertEqual(values, [])
+
+    def test_exit_fullscreen_shortcut_only_emits_while_fullscreen(self) -> None:
+        requests: list[bool] = []
+        self.page.fullscreen_requested.connect(lambda: requests.append(True))
+
+        self.page.set_fullscreen(False)
+        self.page._shortcut_exit_fullscreen()
+        self.page.set_fullscreen(True)
+        self.page._shortcut_exit_fullscreen()
+
+        self.assertEqual(requests, [True])
+
+    def test_fullscreen_changes_hide_visible_controls(self) -> None:
+        self.page._controls_visible = True
+        self.page._control_pointer_inside = True
+        self.page._control_interaction_active = True
+
+        self.page.set_fullscreen(True)
+
+        self.assertFalse(self.page._controls_visible)
+        self.assertFalse(self.page._control_pointer_inside)
+        self.assertFalse(self.page._control_interaction_active)
+
+        self.page._controls_visible = True
+        self.page._control_pointer_inside = True
+        self.page._control_interaction_active = True
+
+        self.page.set_fullscreen(False)
+
+        self.assertFalse(self.page._controls_visible)
+        self.assertFalse(self.page._control_pointer_inside)
+        self.assertFalse(self.page._control_interaction_active)
 
     def test_home_and_end_seek_to_media_boundaries(self) -> None:
         targets: list[float] = []

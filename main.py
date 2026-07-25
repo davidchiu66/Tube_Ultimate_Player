@@ -9,7 +9,8 @@ from platform_support import configure_qt_platform_environment, is_root_user, li
 
 configure_qt_platform_environment()
 
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app_paths import APP_NAME, asset_path, ensure_runtime_dirs, resource_path
@@ -34,6 +35,9 @@ def main() -> int:
         logger.warning(
             "application is running as root; desktop session, cookies, audio and created file ownership may be limited"
         )
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
     logger.info("Qt platform backend=%s", app.platformName())
     app.setApplicationName(APP_NAME)

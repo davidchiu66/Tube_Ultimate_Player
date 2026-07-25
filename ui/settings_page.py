@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -151,13 +151,20 @@ class SettingsPage(QWidget):
         form.addRow("FFmpeg 目录", ffmpeg_dir_row)
         form.addRow("DLNA 媒体服务端口", self.dlna_media_server_port_spin)
 
-        general_tab = QWidget()
-        general_layout = QVBoxLayout(general_tab)
+        general_content = QWidget()
+        general_content.setMinimumWidth(560)
+        general_layout = QVBoxLayout(general_content)
         general_layout.setContentsMargins(16, 16, 16, 16)
         general_layout.setSpacing(14)
         general_layout.addWidget(self.system_hint_label)
         general_layout.addLayout(form)
         general_layout.addStretch(1)
+        general_tab = QScrollArea()
+        general_tab.setWidgetResizable(True)
+        general_tab.setFrameShape(QScrollArea.Shape.NoFrame)
+        general_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        general_tab.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        general_tab.setWidget(general_content)
 
         self.shortcut_edits: dict[str, QKeySequenceEdit] = {}
         shortcut_form = QFormLayout()
