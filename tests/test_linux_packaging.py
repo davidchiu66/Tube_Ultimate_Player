@@ -87,6 +87,7 @@ class LinuxPackagingTests(unittest.TestCase):
         self.assertIn("Requires:       mpv-libs", spec)
         self.assertIn("Requires:       yt-dlp", spec)
         self.assertIn("Requires:       ffmpeg", spec)
+        self.assertNotIn("python3dist(py7zr)", spec)
         self.assertNotIn("with_deno_ffmpeg", spec)
         self.assertNotIn(" download js player ", spec)
         self.assertIn('/usr/bin/python3 "$APP_ROOT/main.py"', launcher)

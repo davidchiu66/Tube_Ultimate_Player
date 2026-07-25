@@ -14,7 +14,6 @@ BuildRequires:  python3-devel
 Requires:       python3
 Requires:       python3dist(pyside6)
 Requires:       python3dist(qtawesome)
-Requires:       python3dist(py7zr)
 Requires:       ffmpeg
 Requires:       mpv-libs
 Requires:       yt-dlp
@@ -65,5 +64,8 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/tube-ultimate-player.
 %{_datadir}/tube-ultimate-player/
 
 %changelog
+* Sat Jul 25 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-1
+- Drop py7zr from Fedora RPM runtime dependencies.
+
 * Fri Jul 24 2026 davidchiu66 <chinamen@gmail.com> - 0.2.18-1
 - Add Fedora RPM packaging for COPR builds.
