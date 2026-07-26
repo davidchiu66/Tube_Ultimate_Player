@@ -4,119 +4,296 @@ on:
   workflow_dispatch:
     inputs:
       copr_project:
-        description: "COPR project in owner/project format. Falls back to repository variable COPR_PROJECT."
+        description: "COPR project in owner/project format"
         required: false
         type: string
+
       chroots:
-        description: "Optional COPR chroots, for example: fedora-41-x86_64 fedora-42-x86_64"
+        description: "COPR chroots separated by spaces"
         required: false
         type: string
+        default: "fedora-43-x86_64 fedora-44-x86_64"
+
       submit_copr:
         description: "Submit the SRPM to Fedora COPR"
         required: true
         type: boolean
         default: true
+
   push:
     tags:
       - "v*"
 
+concurrency:
+  group: rpm-copr-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-rpm-and-copr:
+    name: Build SRPM and submit to COPR
     runs-on: ubuntu-latest
-    container: fedora:latest
+    container:
+      image: fedora:latest
+
     permissions:
       contents: read
-    steps:
-      - name: Install build tools
-        run: |
-          dnf install -y \
-            copr-cli desktop-file-utils dnf-plugins-core git gzip python3-devel rpm-build rpmdevtools tar
 
-      - name: Checkout
+    timeout-minutes: 120
+
+    steps:
+      - name: Install RPM and COPR tools
+        run: |
+          set -euo pipefail
+
+          dnf install -y \
+            copr-cli \
+            desktop-file-utils \
+            dnf-plugins-core \
+            git \
+            gzip \
+            python3-devel \
+            rpm-build \
+            rpmdevtools \
+            tar
+
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           lfs: false
 
       - name: Trust checkout directory
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Build source RPM
+      - name: Read and validate version
+        id: version
+        shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(tr -d '\r\n' < app_version.txt)"
-          TOPDIR="$PWD/build/rpm"
-          mkdir -p "$TOPDIR"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} dist/rpm
+
+          VERSION="$(tr -d '\r\n ' < app_version.txt)"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){2}([._~-][0-9A-Za-z]+)*$ ]]; then
+            echo "Invalid version in app_version.txt: $VERSION" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+
+            if [[ "$TAG_VERSION" != "$VERSION" ]]; then
+              echo "Tag version and app_version.txt do not match." >&2
+              echo "Tag version: $TAG_VERSION" >&2
+              echo "File version: $VERSION" >&2
+              exit 1
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+
+      - name: Prepare RPM source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+          TOPDIR="$GITHUB_WORKSPACE/build/rpm"
+
+          rm -rf "$TOPDIR" "$GITHUB_WORKSPACE/dist/rpm"
+
+          mkdir -p \
+            "$TOPDIR/BUILD" \
+            "$TOPDIR/BUILDROOT" \
+            "$TOPDIR/RPMS" \
+            "$TOPDIR/SOURCES" \
+            "$TOPDIR/SPECS" \
+            "$TOPDIR/SRPMS" \
+            "$GITHUB_WORKSPACE/dist/rpm"
+
           git archive \
             --format=tar \
             --prefix="tube-ultimate-player-${VERSION}/" \
             --output="$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar" \
             HEAD
-          gzip -n "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar"
-          tar -tzf "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar.gz" >/dev/null
-          cp packaging/rpm/tube-ultimate-player.spec "$TOPDIR/SPECS/"
-          sed -i "s/^Version:.*/Version:        ${VERSION}/" "$TOPDIR/SPECS/tube-ultimate-player.spec"
-          rpmbuild -bs \
-            --define "_topdir $TOPDIR" \
+
+          gzip -n \
+            "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar"
+
+          tar -tzf \
+            "$TOPDIR/SOURCES/tube-ultimate-player-${VERSION}.tar.gz" \
+            > /dev/null
+
+          cp \
+            packaging/rpm/tube-ultimate-player.spec \
             "$TOPDIR/SPECS/tube-ultimate-player.spec"
-          cp "$TOPDIR"/SRPMS/*.src.rpm dist/rpm/
 
-      - name: Validate binary RPM build
+          sed -i \
+            "s/^Version:.*/Version:        ${VERSION}/" \
+            "$TOPDIR/SPECS/tube-ultimate-player.spec"
+
+      - name: Build source RPM
+        shell: bash
         run: |
-          VERSION="$(tr -d '\r\n' < app_version.txt)"
-          SRPM="$(find dist/rpm -maxdepth 1 -name '*.src.rpm' -print -quit)"
-          dnf builddep -y "$SRPM"
-          rpmbuild --rebuild "$SRPM" \
-            --define "_topdir $PWD/build/rpm"
-          cp build/rpm/RPMS/noarch/*.rpm dist/rpm/
-          rpm -qpi dist/rpm/*.src.rpm
-          rpm -qpi dist/rpm/*.noarch.rpm
+          set -euo pipefail
 
-      - name: Upload RPM artifacts
+          TOPDIR="$GITHUB_WORKSPACE/build/rpm"
+          SPEC="$TOPDIR/SPECS/tube-ultimate-player.spec"
+
+          rpmbuild \
+            -bs \
+            --define "_topdir $TOPDIR" \
+            "$SPEC"
+
+          find "$TOPDIR/SRPMS" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.src.rpm' \
+            -exec cp -v {} "$GITHUB_WORKSPACE/dist/rpm/" \;
+
+          SRPM_COUNT="$(find "$GITHUB_WORKSPACE/dist/rpm" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.src.rpm' \
+            | wc -l)"
+
+          if [[ "$SRPM_COUNT" -ne 1 ]]; then
+            echo "Expected exactly one source RPM, found $SRPM_COUNT." >&2
+            exit 1
+          fi
+
+      - name: Validate binary RPM locally
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TOPDIR="$GITHUB_WORKSPACE/build/rpm"
+
+          SRPM="$(find "$GITHUB_WORKSPACE/dist/rpm" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.src.rpm' \
+            -print \
+            -quit)"
+
+          if [[ -z "$SRPM" ]]; then
+            echo "Source RPM was not found." >&2
+            exit 1
+          fi
+
+          dnf builddep -y "$SRPM"
+
+          rpmbuild \
+            --rebuild "$SRPM" \
+            --define "_topdir $TOPDIR"
+
+          find "$TOPDIR/RPMS" \
+            -type f \
+            -name '*.rpm' \
+            -exec cp -v {} "$GITHUB_WORKSPACE/dist/rpm/" \;
+
+          BINARY_COUNT="$(find "$GITHUB_WORKSPACE/dist/rpm" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.rpm' \
+            ! -name '*.src.rpm' \
+            | wc -l)"
+
+          if [[ "$BINARY_COUNT" -lt 1 ]]; then
+            echo "No binary RPM was generated." >&2
+            exit 1
+          fi
+
+      - name: Inspect generated RPM packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Generated RPM files:"
+          find "$GITHUB_WORKSPACE/dist/rpm" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.rpm' \
+            -printf '%f\n' \
+            | sort
+
+          for rpm_file in "$GITHUB_WORKSPACE"/dist/rpm/*.rpm; do
+            echo
+            echo "Inspecting $rpm_file"
+            rpm -qpi "$rpm_file"
+          done
+
+      - name: Upload GitHub RPM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Tube_Ultimate_Player_rpm
-          path: dist/rpm/*
+          name: Tube_Ultimate_Player_${{ steps.version.outputs.version }}_RPM
+          path: dist/rpm/
           if-no-files-found: error
+          retention-days: 30
 
       - name: Configure COPR credentials
-        if: ${{ github.event_name == 'push' || github.event.inputs.submit_copr == 'true' }}
+        if: ${{ github.event_name == 'push' || inputs.submit_copr }}
+        shell: bash
         env:
           COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
         run: |
-          if [ -z "$COPR_CONFIG" ]; then
-            echo "COPR_CONFIG secret is required to submit builds." >&2
+          set -euo pipefail
+
+          if [[ -z "${COPR_CONFIG:-}" ]]; then
+            echo "COPR_CONFIG secret is required." >&2
             exit 1
           fi
+
           mkdir -p "$HOME/.config"
           printf '%s\n' "$COPR_CONFIG" > "$HOME/.config/copr"
           chmod 0600 "$HOME/.config/copr"
 
+          copr-cli whoami
+
       - name: Submit source RPM to Fedora COPR
-        if: ${{ github.event_name == 'push' || github.event.inputs.submit_copr == 'true' }}
+        if: ${{ github.event_name == 'push' || inputs.submit_copr }}
+        shell: bash
         env:
-          INPUT_COPR_PROJECT: ${{ github.event.inputs.copr_project }}
+          INPUT_COPR_PROJECT: ${{ inputs.copr_project }}
           VAR_COPR_PROJECT: ${{ vars.COPR_PROJECT }}
-          SECRET_COPR_PROJECT: ${{ secrets.COPR_PROJECT }}
-          INPUT_CHROOTS: ${{ github.event.inputs.chroots }}
+          INPUT_CHROOTS: ${{ inputs.chroots }}
           VAR_COPR_CHROOTS: ${{ vars.COPR_CHROOTS }}
-          SECRET_COPR_CHROOTS: ${{ secrets.COPR_CHROOTS }}
         run: |
           set -euo pipefail
-          COPR_PROJECT="${INPUT_COPR_PROJECT:-${VAR_COPR_PROJECT:-$SECRET_COPR_PROJECT}}"
-          if [ -z "$COPR_PROJECT" ]; then
-            echo "COPR project is required. Set workflow input copr_project, repository variable COPR_PROJECT, or repository secret COPR_PROJECT." >&2
+
+          COPR_PROJECT="${INPUT_COPR_PROJECT:-${VAR_COPR_PROJECT:-}}"
+          CHROOTS="${INPUT_CHROOTS:-${VAR_COPR_CHROOTS:-fedora-43-x86_64 fedora-44-x86_64}}"
+
+          if [[ -z "$COPR_PROJECT" ]]; then
+            echo "COPR project is required." >&2
+            echo "Set the copr_project workflow input or COPR_PROJECT repository variable." >&2
             exit 1
           fi
-          CHROOTS="${INPUT_CHROOTS:-${VAR_COPR_CHROOTS:-${SECRET_COPR_CHROOTS:-fedora-44-x86_64 fedora-43-x86_64}}}"
-          SRPM="$(find dist/rpm -maxdepth 1 -name '*.src.rpm' -print -quit)"
-          copr-cli modify "$COPR_PROJECT" --disable_createrepo true
+
+          SRPM="$(find "$GITHUB_WORKSPACE/dist/rpm" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.src.rpm' \
+            -print \
+            -quit)"
+
+          if [[ -z "$SRPM" ]]; then
+            echo "Source RPM was not found." >&2
+            exit 1
+          fi
+
           chroot_args=()
+
           for chroot in $CHROOTS; do
             chroot_args+=(--chroot "$chroot")
           done
-          if [ -n "$CHROOTS" ]; then
-            copr-cli build "${chroot_args[@]}" "$COPR_PROJECT" "$SRPM"
-          else
-            copr-cli build "$COPR_PROJECT" "$SRPM"
-          fi
-          copr-cli regenerate-repos "$COPR_PROJECT"
+
+          echo "COPR project: $COPR_PROJECT"
+          echo "COPR chroots: $CHROOTS"
+          echo "Source RPM: $SRPM"
+
+          copr-cli build \
+            "${chroot_args[@]}" \
+            "$COPR_PROJECT" \
+            "$SRPM"

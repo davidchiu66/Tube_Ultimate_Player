@@ -18,7 +18,7 @@ config/user_config.json
 cookie.txt
 
 # Windows / packaging
-*.spec
+!*.spec
 !packaging/rpm/*.spec
 dist/
 build/

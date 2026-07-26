@@ -1,6 +1,6 @@
 Name:           tube-ultimate-player
-Version:        0.2.19
-Release:        2%{?dist}
+Version:        0.2.20
+Release:        1%{?dist}
 Summary:        YouTube and Bilibili desktop video player
 
 License:        MIT
@@ -71,11 +71,20 @@ sed -i \
 install -m 0644 \
     docs/assets/icons/app-icon-256.png \
     %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
+    's|^Exec=.*|Exec=tube-ultimate-player %%U|' \
+    %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
+install -m 0644 \
+    docs/assets/icons/app-icon-256.png \
+    %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
+
+desktop-file-validate \
+    %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 desktop-file-validate \
     %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
 %files
+%license LICENSE
 %license LICENSE
 %doc README.md
 %doc docs/linux_build_and_release.md
@@ -83,8 +92,16 @@ desktop-file-validate \
 %{_datadir}/applications/tube-ultimate-player.desktop
 %{_datadir}/icons/hicolor/256x256/apps/%{name}.png
 %{_datadir}/%{name}/
+%doc docs/linux_build_and_release.md
+%{_bindir}/tube-ultimate-player
+%{_datadir}/applications/tube-ultimate-player.desktop
+%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
+%{_datadir}/%{name}/
 
 %changelog
+* Sun Jul 26 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-2
+- Escape the desktop file field code in the RPM spec.
+
 * Sun Jul 26 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-2
 - Escape the desktop file field code in the RPM spec.
 
