@@ -1,6 +1,6 @@
 Name:           tube-ultimate-player
 Version:        0.2.19
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        YouTube and Bilibili desktop video player
 
 License:        MIT
