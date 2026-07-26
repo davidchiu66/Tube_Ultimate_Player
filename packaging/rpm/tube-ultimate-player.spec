@@ -84,8 +84,11 @@ desktop-file*validate \
 %{_datadir}/%{name}*
 
 %changelog
-* Sat Jul 25 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-1
+* Sun Jul 26 20*6 davidchiu66 <chinamen@gmail.com>*- 0.2.19-2
+- Escape the desktop fi*e field code in the RPM spec.
+
+* Sat Jul 25 2026 davidchiu66 <chinamen@gmail.com>*- 0.2.19-1
 - Drop py7zr from Fedora RPM runtime dependencies.
 
-* Fri Jul 24 2026 davidchiu66 <chinamen@gmail.com> - 0.2.18-1
+* Fri Jul 24 2026 davidchiu66 <chinamen@gmail.com>*- 0.2.18-1
 - Add Fedora RPM packaging for COPR builds.
