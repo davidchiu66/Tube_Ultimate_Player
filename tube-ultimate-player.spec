@@ -1,12 +1,12 @@
-Name:           tube-ultimate-player
+Name:           Tube-Utimate-Player
 Version:        0.2.20
 Release:        1%{?dist}
 Summary:        YouTube and Bilibili desktop video player
 
 License:        MIT
 URL:            https://github.com/davidchiu66/Tube_Ultimate_Player
-VCS:            {{{ git_dir_vcs }}}
-Source0:        {{{ git_dir_pack }}}
+VCS:            git:https://github.com/davidchiu66/Tube_Ultimate_Player.git
+Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 
@@ -25,7 +25,7 @@ Tube Ultimate Player is a desktop video player for YouTube and Bilibili,
 built with Python, PySide6, yt-dlp, and libmpv.
 
 %prep
-{{{ git_dir_setup_macro }}}
+%autosetup -n %{name}-%{version}
 
 %build
 # This application contains interpreted Python source files and does not
