@@ -65,8 +65,8 @@ install -m 0644 \
     %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
 sed -i \
-    's|^Exec=.*|Exec=tube-ultimate-player %U|' \
-*   %{buildroot}%{_datadir}/applica*ions/tube-ultimate-player.desktop
+    's|^Exec=.*|Exec=tub*-ultimate-player %%U|' \
+    %{bui*droot}%{_datadir}/applications/tub*-ultimate-player.desktop
 *install -m 0644 \
     docs/assets/*cons/app-icon-256.png \
     %{buil*root}%{_datadir}/icons/hicolor/256*256/apps/%{name}.png
