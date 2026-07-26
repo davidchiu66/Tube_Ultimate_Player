@@ -65,30 +65,31 @@ install -m 0644 \
     %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
 sed -i \
-    's|^Exec=.*|Exec=tub*-ultimate-player %%U|' \
-    %{bui*droot}%{_datadir}/applications/tub*-ultimate-player.desktop
-*install -m 0644 \
-    docs/assets/*cons/app-icon-256.png \
-    %{buil*root}%{_datadir}/icons/hicolor/256*256/apps/%{name}.png
+    's|^Exec=.*|Exec=tube-ultimate-player %%U|' \
+    %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
-desktop-file*validate \
-    %{buildroot}%{_data*ir}/applications/tube-ultimate-pla*er.desktop
+install -m 0644 \
+    docs/assets/icons/app-icon-256.png \
+    %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
+
+desktop-file-validate \
+    %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
 %files
-%license LICENS*
+%license LICENSE
 %doc README.md
-%doc docs/linux_bu*ld_and_release.md
-%{_bindir}/tube-*ltimate-player
-%{_datadir}/applica*ions/tube-ultimate-player.desktop
-*{_datadir}/icons/hicolor/256x256/a*ps/%{name}.png
-%{_datadir}/%{name}*
+%doc docs/linux_build_and_release.md
+%{_bindir}/tube-ultimate-player
+%{_datadir}/applications/tube-ultimate-player.desktop
+%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
+%{_datadir}/%{name}/
 
 %changelog
-* Sun Jul 26 20*6 davidchiu66 <chinamen@gmail.com>*- 0.2.19-2
-- Escape the desktop fi*e field code in the RPM spec.
+* Sun Jul 26 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-2
+- Escape the desktop file field code in the RPM spec.
 
-* Sat Jul 25 2026 davidchiu66 <chinamen@gmail.com>*- 0.2.19-1
+* Sat Jul 25 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-1
 - Drop py7zr from Fedora RPM runtime dependencies.
 
-* Fri Jul 24 2026 davidchiu66 <chinamen@gmail.com>*- 0.2.18-1
+* Fri Jul 24 2026 davidchiu66 <chinamen@gmail.com> - 0.2.18-1
 - Add Fedora RPM packaging for COPR builds.
