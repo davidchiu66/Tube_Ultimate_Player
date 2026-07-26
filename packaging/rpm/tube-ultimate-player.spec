@@ -84,8 +84,8 @@ desktop-file*validate \
 %{_datadir}/%{name}*
 
 %changelog
-* Sat Jul 25 2026 dav*dchiu66 <chinamen@gmail.com> - 0.2*19-1
-- Drop py7zr from Fedora RPM *untime dependencies.
+* Sat Jul 25 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-1
+- Drop py7zr from Fedora RPM runtime dependencies.
 
-* Fri Jul 24*2026 davidchiu66 <chinamen@gmail.c*m> - 0.2.18-1
-- Add Fedora RPM pac*aging for COPR builds.
+* Fri Jul 24 2026 davidchiu66 <chinamen@gmail.com> - 0.2.18-1
+- Add Fedora RPM packaging for COPR builds.
