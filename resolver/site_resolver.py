@@ -9,6 +9,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import datetime as _dt
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
@@ -1002,6 +1003,7 @@ def _creator_entry_from_bilibili_archive(
         thumbnail=_normalize_bilibili_thumbnail(str(item.get("pic") or "")),
         position=position,
         availability="",
+        upload_date=_bilibili_upload_date(item),
     )
 
 
@@ -1017,6 +1019,7 @@ def _playlist_entry_from_dict(item: dict) -> PlaylistEntry:
         thumbnail=str(item.get("thumbnail") or ""),
         position=int(item.get("position") or 0),
         availability=str(item.get("availability") or ""),
+        upload_date=str(item.get("upload_date") or ""),
     )
 
 
@@ -1039,6 +1042,7 @@ def _favorite_entry_from_media(media: dict, media_id: str, position: int) -> Pla
         thumbnail=_normalize_bilibili_thumbnail(str(media.get("cover") or "")),
         position=position,
         availability="",
+        upload_date=_bilibili_upload_date(media),
     )
 
 
@@ -1069,6 +1073,7 @@ def _watch_later_entry_from_item(item: dict, position: int) -> PlaylistEntry | N
         thumbnail=_normalize_bilibili_thumbnail(str(item.get("pic") or "")),
         position=position,
         availability="",
+        upload_date=_bilibili_upload_date(item),
     )
 
 
@@ -1087,6 +1092,7 @@ def _home_video_from_bilibili_item(item: dict) -> HomeVideo | None:
         uploader=str((item.get("owner") or {}).get("name") or "").strip(),
         duration=int(item.get("duration") or 0),
         thumbnail=_normalize_thumbnail(str(item.get("pic") or "")),
+        upload_date=_bilibili_upload_date(item),
     )
 
 
@@ -1105,11 +1111,35 @@ def _home_video_from_search_item(item: dict) -> HomeVideo | None:
         uploader=_strip_html(str(item.get("author") or "").strip()),
         duration=_parse_duration_to_seconds(item.get("duration") or 0),
         thumbnail=_normalize_bilibili_thumbnail(str(item.get("pic") or "")),
+        upload_date=_bilibili_upload_date(item),
     )
 
 
 def _strip_html(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", str(text or ""))).strip()
+
+
+def _bilibili_upload_date(item: dict) -> str:
+    """从 B 站条目里取发布时间并换算成 YYYYMMDD。
+
+    不同接口字段名不一：rcmd/搜索用 pubdate，历史用 senddate，收藏用 ctime/pubtime。
+    值是 unix 秒；取不到或非法时返回空串（列表里就留空）。
+    """
+    for key in ("pubdate", "senddate", "ctime", "pubtime", "created"):
+        raw = item.get(key)
+        if raw in (None, "", 0):
+            continue
+        try:
+            timestamp = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if timestamp <= 0:
+            continue
+        try:
+            return _dt.datetime.fromtimestamp(timestamp).strftime("%Y%m%d")
+        except (OverflowError, OSError, ValueError):
+            continue
+    return ""
 
 
 def _normalize_bilibili_url(url: str) -> str:

@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS playlist_item (
     thumbnail TEXT,
     position INTEGER NOT NULL,
     availability TEXT,
+    upload_date TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -107,6 +108,7 @@ class SQLiteManager:
             self._ensure_column(conn, "history", "source_site", "TEXT NOT NULL DEFAULT 'youtube'")
             self._ensure_column(conn, "history", "uploader", "TEXT")
             self._ensure_column(conn, "favorite", "source_site", "TEXT NOT NULL DEFAULT 'youtube'")
+            self._ensure_column(conn, "playlist_item", "upload_date", "TEXT")
             conn.execute(
                 "UPDATE history SET source_site = 'bilibili' "
                 "WHERE source_site = 'youtube' AND (lower(webpage_url) LIKE '%bilibili.com/%' "

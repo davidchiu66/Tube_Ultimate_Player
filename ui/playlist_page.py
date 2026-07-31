@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
 from resolver.source_utils import source_site_label
 from ui.player_page import format_seconds
+from ui.text_elision import format_upload_date
 
 
 class PlaylistPage(QWidget):
@@ -67,9 +68,9 @@ class PlaylistPage(QWidget):
         self.select_all_button = QPushButton("全选")
         self.auto_play_checkbox = QCheckBox("自动连播")
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setObjectName("LibraryTable")
-        self.table.setHorizontalHeaderLabels(["标题", "来源", "作者", "时长", "序号", "状态", "操作"])
+        self.table.setHorizontalHeaderLabels(["标题", "来源", "作者", "时长", "更新时间", "序号", "状态", "操作"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -81,9 +82,10 @@ class PlaylistPage(QWidget):
         self.table.setColumnWidth(1, 90)
         self.table.setColumnWidth(2, 140)
         self.table.setColumnWidth(3, 90)
-        self.table.setColumnWidth(4, 70)
-        self.table.setColumnWidth(5, 90)
-        self.table.setColumnWidth(6, 150)
+        self.table.setColumnWidth(4, 110)
+        self.table.setColumnWidth(5, 70)
+        self.table.setColumnWidth(6, 90)
+        self.table.setColumnWidth(7, 150)
         self.table.verticalHeader().setDefaultSectionSize(40)
 
         header_row = QHBoxLayout()
@@ -216,6 +218,7 @@ class PlaylistPage(QWidget):
             source_site_label(entry.source_site, entry.webpage_url),
             entry.uploader or "未知作者",
             format_seconds(entry.duration or 0),
+            format_upload_date(getattr(entry, "upload_date", "")) or "—",
             str(entry.position or row + 1),
             entry.availability or "可播放",
         ]
@@ -224,7 +227,7 @@ class PlaylistPage(QWidget):
             if column == 0:
                 item.setData(Qt.ItemDataRole.UserRole, row)
                 item.setData(Qt.ItemDataRole.UserRole + 1, entry.webpage_url)
-            if column in (1, 3, 4, 5):
+            if column in (1, 3, 4, 5, 6):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, column, item)
 
@@ -242,7 +245,7 @@ class PlaylistPage(QWidget):
         download_button.clicked.connect(lambda _=False, index=row: self._download_row(index))
         action_layout.addWidget(play_button)
         action_layout.addWidget(download_button)
-        self.table.setCellWidget(row, 6, actions)
+        self.table.setCellWidget(row, 7, actions)
 
     def _play_selected(self) -> None:
         rows = self._selected_rows()

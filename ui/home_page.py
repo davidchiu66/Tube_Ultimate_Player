@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from resolver.models import HomeVideo
 from ui.player_page import format_seconds
-from ui.text_elision import elide_multiline_text
+from ui.text_elision import elide_multiline_text, format_upload_date
 from ui.thumbnail_cache import ThumbnailCache
 
 
@@ -74,6 +74,9 @@ class HomeVideoCard(QFrame):
             meta.append(video.uploader)
         if video.duration:
             meta.append(format_seconds(video.duration))
+        upload_date = format_upload_date(getattr(video, "upload_date", ""))
+        if upload_date:
+            meta.append(upload_date)
         self.meta_label = QLabel(" | ".join(meta) if meta else video.source_site.title())
         self.meta_label.setObjectName("MetaLabel")
         self.meta_label.setFixedHeight(22)

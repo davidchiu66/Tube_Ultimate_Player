@@ -13,6 +13,7 @@ class HomeVideo:
     uploader: str = ""
     duration: int = 0
     thumbnail: str = ""
+    upload_date: str = ""  # YYYYMMDD，与 VideoInfo.upload_date 同格式；拿不到时为空
 
 
 @dataclass
@@ -27,6 +28,7 @@ class PlaylistEntry:
     thumbnail: str = ""
     position: int = 0
     availability: str = ""
+    upload_date: str = ""
 
     def to_home_video(self) -> HomeVideo:
         return HomeVideo(
@@ -37,6 +39,7 @@ class PlaylistEntry:
             uploader=self.uploader,
             duration=self.duration,
             thumbnail=self.thumbnail,
+            upload_date=self.upload_date,
         )
 
 

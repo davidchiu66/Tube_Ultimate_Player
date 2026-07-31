@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import datetime as _dt
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -608,6 +609,7 @@ class YoutubeResolver:
             thumbnail=thumbnail,
             position=position,
             availability=str(entry.get("availability") or ""),
+            upload_date=_youtube_upload_date(entry),
         )
 
     @staticmethod
@@ -638,6 +640,7 @@ class YoutubeResolver:
             thumbnail=thumbnail,
             position=position,
             availability=str(entry.get("availability") or ""),
+            upload_date=_youtube_upload_date(entry),
         )
 
     @staticmethod
@@ -674,6 +677,7 @@ class YoutubeResolver:
             uploader=str(entry.get("uploader") or entry.get("channel") or "").strip(),
             duration=int(entry.get("duration") or 0),
             thumbnail=thumbnail,
+            upload_date=_youtube_upload_date(entry),
         )
 
     @staticmethod
@@ -871,6 +875,31 @@ def _video_id_from_watch_url(url: str) -> str:
 def _clean_video_id(value: str) -> str:
     candidate = str(value or "").strip()
     return candidate if VIDEO_ID_PATTERN.match(candidate) else ""
+
+
+def _youtube_upload_date(entry: dict) -> str:
+    """从 yt-dlp 条目取 YYYYMMDD。扁平列表常常一个都没有，此时返回空串。
+
+    优先级：upload_date（已是 YYYYMMDD）→ timestamp → release_timestamp（unix 秒）。
+    """
+    raw_date = str(entry.get("upload_date") or "").strip()
+    if len(raw_date) == 8 and raw_date.isdigit():
+        return raw_date
+    for key in ("timestamp", "release_timestamp"):
+        value = entry.get(key)
+        if value in (None, "", 0):
+            continue
+        try:
+            timestamp = int(value)
+        except (TypeError, ValueError):
+            continue
+        if timestamp <= 0:
+            continue
+        try:
+            return _dt.datetime.fromtimestamp(timestamp).strftime("%Y%m%d")
+        except (OverflowError, OSError, ValueError):
+            continue
+    return ""
 
 
 def _playlist_id_from_url(url: str) -> str:

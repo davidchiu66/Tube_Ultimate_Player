@@ -51,7 +51,7 @@ class PlaylistRepository:
 
             entry_rows = conn.execute(
                 """
-                SELECT playlist_id, video_id, title, webpage_url, uploader, duration, thumbnail, position, availability
+                SELECT playlist_id, video_id, title, webpage_url, uploader, duration, thumbnail, position, availability, upload_date
                 FROM playlist_item
                 WHERE playlist_key = ?
                 ORDER BY position ASC, id ASC
@@ -122,8 +122,8 @@ class PlaylistRepository:
                 """
                 INSERT INTO playlist_item (
                     playlist_key, playlist_id, video_id, title, webpage_url, uploader, duration,
-                    thumbnail, position, availability, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    thumbnail, position, availability, upload_date, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -137,6 +137,7 @@ class PlaylistRepository:
                         entry.thumbnail,
                         int(entry.position),
                         entry.availability,
+                        entry.upload_date,
                         now,
                     )
                     for entry in playlist_entries
@@ -182,6 +183,7 @@ class PlaylistRepository:
             thumbnail=str(entry.thumbnail),
             position=int(entry.position or 0),
             availability=str(entry.availability or ""),
+            upload_date=str(entry.upload_date or ""),
         )
 
     @staticmethod
@@ -197,7 +199,16 @@ class PlaylistRepository:
             thumbnail=str(row["thumbnail"] or ""),
             position=int(row["position"] or 0),
             availability=str(row["availability"] or ""),
+            upload_date=str(_row_value(row, "upload_date") or ""),
         )
+
+
+def _row_value(row, key: str):
+    """从 sqlite3.Row 安全取列：列不存在时（极老的库）返回 None 而不是抛错。"""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
 
 
 def _detect_source_site(url: str) -> str:

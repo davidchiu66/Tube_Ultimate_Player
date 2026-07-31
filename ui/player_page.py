@@ -23,6 +23,7 @@ from resolver.models import VideoInfo
 from services.config_service import ConfigService
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 from ui.playlist_overlay import PlaylistOverlay
+from ui.text_elision import format_upload_date
 from ui.thumbnail_cache import read_image_reply
 
 
@@ -407,9 +408,15 @@ class PlayerPage(QWidget):
         self._position = 0.0
         self.progress_slider.setValue(0)
         self.title_label.setText(video.title)
-        self.meta_label.setText(
-            f"时长 {format_seconds(video.duration)} | 清晰度 {selected_quality} | 字幕 {len(video.subtitles)} 个"
-        )
+        meta_parts = [
+            f"时长 {format_seconds(video.duration)}",
+            f"清晰度 {selected_quality}",
+            f"字幕 {len(video.subtitles)} 个",
+        ]
+        upload_date = format_upload_date(getattr(video, "upload_date", ""))
+        if upload_date:
+            meta_parts.append(f"更新 {upload_date}")
+        self.meta_label.setText(" | ".join(meta_parts))
         self.duration_label.setText(format_seconds(video.duration))
         self._duration = float(video.duration or 0)
 

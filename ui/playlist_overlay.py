@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
-from ui.text_elision import elide_multiline_text, format_seconds
+from ui.text_elision import elide_multiline_text, format_seconds, format_upload_date
 from ui.thumbnail_cache import ThumbnailCache
 
 
@@ -119,6 +119,9 @@ class PlaylistItemWidget(QFrame):
         if self.entry.duration:
             duration = format_seconds(self.entry.duration)
             meta = f"{meta} - {duration}" if meta else duration
+        upload_date = format_upload_date(getattr(self.entry, "upload_date", ""))
+        if upload_date:
+            meta = f"{meta} - {upload_date}" if meta else upload_date
         self.meta_label.setText(meta)
 
     def _apply_title(self) -> None:

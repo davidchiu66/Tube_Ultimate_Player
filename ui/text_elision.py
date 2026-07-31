@@ -140,3 +140,18 @@ def format_seconds(seconds: int | float) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def format_upload_date(value: str) -> str:
+    """把 yt-dlp / B 站换算出的 YYYYMMDD 显示成 YYYY-MM-DD；拿不到时返回空串。
+
+    列表里的更新时间是「有就显示、没有就留空」——YouTube 扁平列表经常不带日期，
+    强行补全需要对每条再解析一次，与首页性能优化冲突，因此不做。
+    """
+    text = str(value or "").strip()
+    if len(text) != 8 or not text.isdigit():
+        return ""
+    year, month, day = text[:4], text[4:6], text[6:8]
+    if not ("0001" <= year and "01" <= month <= "12" and "01" <= day <= "31"):
+        return ""
+    return f"{year}-{month}-{day}"
