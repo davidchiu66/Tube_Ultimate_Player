@@ -125,6 +125,15 @@ class LazyPageTests(unittest.TestCase):
         patcher = patch.object(MainWindow, "load_home", lambda _self: None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # MainWindow 用的是真实 ConfigService / DownloadManager，关闭时会把配置与
+        # 下载任务写回**真实**运行目录。单测不许碰用户数据，这里把两处落盘掐掉。
+        for target, attribute in (
+            ("services.config_service.ConfigService.save", None),
+            ("download.download_manager.DownloadManager._save_tasks", None),
+        ):
+            silence = patch(target, lambda *_args, **_kwargs: None)
+            silence.start()
+            self.addCleanup(silence.stop)
         self.window = MainWindow()
         self.addCleanup(self.window.deleteLater)
         self.addCleanup(self.window.close)

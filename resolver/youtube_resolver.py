@@ -166,6 +166,18 @@ class YoutubeResolver:
             raise RuntimeError(f"yt-dlp 返回的首页 JSON 无法解析: {exc}") from exc
 
         entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
+        if not entries:
+            kind, value = self._cookie_source(url)
+            ytdlp_logger.warning("首页返回 0 条内容 cookie_source=%s:%s", kind, value)
+            retried = self._retry_empty_result(
+                url,
+                f"home-page-{page}",
+                lambda browser: self._build_home_command(url, total_needed, override_cookie_browser=browser),
+            )
+            if retried is None:
+                raise RuntimeError(self._empty_result_message(url, "首页"))
+            info = json.loads(retried.stdout)
+            entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
         videos = [video for entry in entries if (video := self._parse_home_entry(entry))]
         start = (page - 1) * page_size
         end = start + page_size
@@ -223,6 +235,19 @@ class YoutubeResolver:
             raise RuntimeError(f"yt-dlp 返回的搜索 JSON 无法解析: {exc}") from exc
 
         entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
+        if not entries:
+            # 搜索结果为空也可能是真的没有匹配，所以只换 Cookie 源再试一次，
+            # 仍然为空就照实返回空列表，不当成错误。
+            kind, value = self._cookie_source(url)
+            ytdlp_logger.warning("搜索返回 0 条内容 query=%s cookie_source=%s:%s", query, kind, value)
+            retried = self._retry_empty_result(
+                url,
+                f"search-page-{page}",
+                lambda browser: self._build_home_command(url, total_needed, override_cookie_browser=browser),
+            )
+            if retried is not None:
+                info = json.loads(retried.stdout)
+                entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
         videos = [video for entry in entries if (video := self._parse_home_entry(entry))]
         start = (page - 1) * page_size
         end = start + page_size
@@ -348,14 +373,65 @@ class YoutubeResolver:
                 return result
         return result
 
-    def _alternate_cookie_browsers(self) -> list[str]:
+    def _alternate_cookie_browsers(self, *, include_current: bool = False) -> list[str]:
         current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser()
         browsers: list[str] = []
         for _label, value in detect_browser_cookie_sources():
-            if not value or value == current or value in browsers:
+            if not value or value in browsers:
+                continue
+            if value == current and not include_current:
                 continue
             browsers.append(value)
         return browsers
+
+    def _cookie_source(self, url: str) -> tuple[str, str]:
+        """当前请求会用哪种 Cookie 源，与 _build_*_command 的分支顺序保持一致。
+
+        返回 ("browser", spec) / ("file", path) / ("none", "")。
+        """
+        explicit = self.config.explicit_cookie_browser()
+        if explicit:
+            return ("browser", explicit)
+        cookie_file = self.config.cookie_file_for_url(url)
+        if cookie_file:
+            return ("file", cookie_file)
+        auto = self.config.auto_cookie_browser_for_site(self.config.cookie_site_for_url(url))
+        if auto:
+            return ("browser", auto)
+        return ("none", "")
+
+    def _retry_empty_result(self, url: str, attempt_prefix: str, builder) -> subprocess.CompletedProcess[str] | None:
+        """结果为空时逐个换浏览器 Cookie 再试。
+
+        yt-dlp 对「Cookie 无效」并不报错：退出码 0、JSON 里 entries 为空。所以
+        只靠 returncode 判断永远发现不了这种失败，必须按内容判断后另找 Cookie 源。
+        """
+        for index, browser in enumerate(self._alternate_cookie_browsers(include_current=True), start=1):
+            ytdlp_logger.warning("空结果，改用浏览器 Cookie 重试 source=%s url=%s", browser, url)
+            result = self._run_ytdlp(builder(browser), url, f"{attempt_prefix}-empty-retry-{index}")
+            if result.returncode == 0 and _json_entry_count(result.stdout) > 0:
+                return result
+        return None
+
+    def _empty_result_message(self, url: str, what: str) -> str:
+        kind, value = self._cookie_source(url)
+        if kind == "file":
+            return (
+                f"YouTube {what}没有返回任何内容。当前使用的是 Cookie 文件（{value}），"
+                "它可能已失效、内容不完整或不属于已登录账号。"
+                "请在设置页重新粘贴 Cookie，或把「从浏览器读取 Cookie」设为自动检测。"
+            )
+        if kind == "browser":
+            return (
+                f"YouTube {what}没有返回任何内容。当前从浏览器 {value} 读取 Cookie，"
+                "该浏览器可能没有登录 YouTube、Cookie 已过期，或运行中的浏览器锁住了 Cookie 库。"
+                "请在设置页换一个浏览器、关闭该浏览器后重试，或手动粘贴 Cookie。"
+            )
+        return (
+            f"YouTube {what}没有返回任何内容，且当前没有配置任何 Cookie。"
+            "YouTube 可能要求登录或把本次访问判定为机器人。"
+            "请在设置页配置 Cookie（推荐「从浏览器读取 Cookie」→ 自动检测）。"
+        )
 
     def _build_command(
         self,
@@ -875,6 +951,17 @@ def _video_id_from_watch_url(url: str) -> str:
 def _clean_video_id(value: str) -> str:
     candidate = str(value or "").strip()
     return candidate if VIDEO_ID_PATTERN.match(candidate) else ""
+
+
+def _json_entry_count(payload: str) -> int:
+    """数一下 yt-dlp 输出里的 entries 条数，解析失败按 0 处理。"""
+    try:
+        info = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    if not isinstance(info, dict):
+        return 0
+    return sum(1 for entry in (info.get("entries") or []) if isinstance(entry, dict))
 
 
 def _youtube_upload_date(entry: dict) -> str:

@@ -12,6 +12,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -67,6 +68,18 @@ class SettingsSaveTests(unittest.TestCase):
             empty.write_text("", encoding="utf-8")
             self.config.set(f"cookies.{site}.file", str(empty))
         self.config.set("download.save_dir", str(self.root / "downloads"))
+        # SettingsPage.load() 会 config.load() 重新读盘，内存里的 set 会被丢掉；
+        # 不先落盘，写入路径就会退回 default_cookie_file()，那是**真实**运行目录。
+        self.config.save()
+        # 双保险：即使某条路径没配置，兜底路径也必须留在临时目录里，
+        # 单测绝不能碰用户真实的 Cookie 文件。
+        patcher = patch.object(
+            ConfigService,
+            "default_cookie_file",
+            lambda _self, site="": str(self.root / f"default_cookie_{site or 'unknown'}.txt"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _page(self) -> SettingsPage:
         page = SettingsPage(self.config)
@@ -107,6 +120,36 @@ class SettingsSaveTests(unittest.TestCase):
         self.assertEqual(written.read_text(encoding="utf-8"), "Cookie: SID=abc")
         # 写入后内容非空，cookie_file 又能重新把它当作可用的 Cookie 文件。
         self.assertEqual(self.config.cookie_file("youtube"), str(written))
+
+
+class RealPathIsolationTests(unittest.TestCase):
+    """守卫：SettingsPage 的 Cookie 写入不得落在真实运行目录。
+
+    曾经真实发生过 —— 用例只在内存里 set 了 cookies.<site>.file，而
+    SettingsPage.load() 会 config.load() 重新读盘把它丢掉，写入路径于是退回
+    default_cookie_file()，把用户真实的 cookie_youtube.txt 覆盖成了用例的占位值。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_in_memory_config_survives_the_page_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            default_path = root / "default.json"
+            default_path.write_text("{}", encoding="utf-8")
+            config = ConfigService(default_path=default_path, user_path=root / "user.json")
+            target = root / "cookie_youtube.txt"
+            config.set("cookies.youtube.file", str(target))
+            config.save()
+
+            page = SettingsPage(config)
+            self.addCleanup(page.deleteLater)
+
+            # 走完一次 load() 之后，配置里仍然是临时路径。
+            self.assertEqual(Path(config.cookie_file_path("youtube")), target)
+            self.assertEqual(page._cookie_file_path("youtube", for_write=True), target)
 
 
 if __name__ == "__main__":
