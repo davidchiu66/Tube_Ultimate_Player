@@ -195,6 +195,24 @@ class ConfigService:
     def cookie_file_for_url(self, target_url: str) -> str:
         return self.cookie_file(self.cookie_site_for_url(target_url))
 
+    def cookie_file_path(self, site: str = "") -> str:
+        """该站点 Cookie 文件的落盘位置，**不检查内容**，且保证非空。
+
+        与 cookie_file() 分工不同：后者回答「这个文件能不能拿给 yt-dlp 用」，空文件
+        返回空串；本方法回答「该往哪里写」。写入路径绝不能为空 —— Path("") 会解析成
+        当前目录，写它会得到 PermissionError: '.'。
+        """
+        normalized_site = self._normalize_cookie_site(site)
+        value = str(self.get(f"cookies.{normalized_site}.file", "") or "").strip()
+        if not value and normalized_site == self.default_home_source():
+            value = str(self.get("youtube.cookie_file", "") or "").strip()
+        if not value:
+            return self.default_cookie_file(normalized_site)
+        path = Path(value)
+        if not path.is_absolute():
+            path = RUNTIME_ROOT / path
+        return str(path)
+
     def default_cookie_file(self, site: str = "") -> str:
         normalized_site = self._normalize_cookie_site(site)
         if sys.platform.startswith("linux"):

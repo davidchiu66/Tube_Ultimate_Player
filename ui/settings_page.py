@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -35,6 +36,9 @@ from services.config_service import (
 from services.cookie_service import secure_cookie_file
 from services.runtime_install_service import RuntimeStatus
 from services.shortcut_service import SHORTCUT_DEFINITIONS
+
+
+logger = logging.getLogger("tube_player.ui")
 
 
 class SettingsPage(QWidget):
@@ -296,11 +300,19 @@ class SettingsPage(QWidget):
             return
         self._store_cookie_draft()
         cookie_paths: dict[str, Path] = {}
+        cookie_errors: list[str] = []
         for site, text in self._cookie_texts.items():
             cookie_path = self._cookie_file_path(site, for_write=True)
-            cookie_path.parent.mkdir(parents=True, exist_ok=True)
-            cookie_path.write_text(text.strip(), encoding="utf-8")
-            secure_cookie_file(cookie_path)
+            # Cookie 写盘失败不能中断整个保存：否则默认首页、代理、快捷键等设置
+            # 全部一起丢掉，而用户只会看到「设置好像没生效」。
+            try:
+                cookie_path.parent.mkdir(parents=True, exist_ok=True)
+                cookie_path.write_text(text.strip(), encoding="utf-8")
+                secure_cookie_file(cookie_path)
+            except OSError as exc:
+                logger.exception("写入 Cookie 文件失败 site=%s path=%s", site, cookie_path)
+                cookie_errors.append(f"{site}: {exc}")
+                continue
             cookie_paths[site] = cookie_path
 
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
@@ -326,6 +338,12 @@ class SettingsPage(QWidget):
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
         self.settings_saved.emit()
+        if cookie_errors:
+            QMessageBox.warning(
+                self,
+                "Cookie 保存失败",
+                "其余设置已保存，但以下站点的 Cookie 文件写入失败：\n" + "\n".join(cookie_errors),
+            )
 
     def _shortcut_values(self) -> dict[str, str] | None:
         values: dict[str, str] = {}
@@ -432,13 +450,11 @@ class SettingsPage(QWidget):
         self.cookie_content_label.setText(f"{label} Cookie 内容")
 
     def _cookie_file_path(self, site: str, *, for_write: bool = False) -> Path:
+        # 必须走 cookie_file_path 而不是 cookie_file：后者对空文件返回空串，
+        # Path("") 会变成当前目录，写入时报 PermissionError: '.'。
         configured = str(self.config.get(f"cookies.{site}.file", "") or "").strip()
-        if configured:
-            return Path(self.config.cookie_file(site))
-        if not for_write:
-            legacy_or_configured = self.config.cookie_file(site)
-            if legacy_or_configured:
-                return Path(legacy_or_configured)
+        if configured or not for_write:
+            return Path(self.config.cookie_file_path(site))
         return Path(self.config.default_cookie_file(site))
 
     def _read_cookie_text(self, site: str) -> str:
