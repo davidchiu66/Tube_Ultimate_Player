@@ -365,3 +365,43 @@ SELECT COUNT(*) FROM moz_cookies WHERE host LIKE ? AND name IN (...)
 8. **期次顺序**：按第 5 节（D1 → 观测 → 投屏加固 → 功能）执行（推荐），还是先做功能增强？
 
 只要 3、4、6 三条（会直接改变交互）明确，其余按推荐值执行也可以 —— 你回一句「按推荐来」我就开工。
+
+---
+
+## 9. 实施记录（2026-07-31）
+
+已按第 5 节的六期全部落地，每期单独提交。全量单测从 213 项增至 **287 项，OK**。
+
+| 期次 | 提交 | 新增/改造测试 |
+| --- | --- | --- |
+| 1（D1） | `bc9c97e` | `test_dlna_cast_progress.py` 7 项 |
+| 2（D2/D3 观测） | `75e755b` 前一提交 | `test_dlna_media_server.py` 1 → 8 项 |
+| 3（D2/D3 加固） | `75e755b` | 同上 → 16 项，`test_dlna_access_control` +3，`test_dlna_sender` +3 |
+| 4（E2/E3/E6） | `43920d0` | `test_download_page_order.py` 5、`test_wheel_volume.py` 6、`test_url_history.py` 7 |
+| 5（E1） | `2271e81` | `test_upload_date.py` 9 项 |
+| 6（E4/E5） | `2788b7d` | `test_cookie_probe.py` 10、`test_download_batch.py` 7 |
+
+### 与方案的偏差（均为实现时发现的更优解）
+
+1. **D1 的时长守卫本已存在**：`_dlna_action_succeeded` 里原本就有 `if duration > 0` 判断，
+   所以「远端 TrackDuration ≤ 0 不覆盖时长」无需改代码，只补了注释与守门用例。
+2. **未采纳 `-fflags +genpts` 与 `-max_interleave_delta 0`**：前者会改写本已有效的时间戳，
+   后者会让 FFmpeg 无限等待落后的音频流、反而饿死电视。改为 `-max_muxing_queue_size 4096`
+   —— 「Too many packets buffered for output stream」本身就是中途退出的一支。
+3. **`log_message` 保持 DEBUG**：改为在 `_serve` 里单独记一条 INFO（方法/Range/UA/客户端），
+   避免与 `send_response` 的自动日志重复；token 只记前 6 字符，不把取流凭据写进日志。
+4. **令牌基础 TTL 提到 2 小时**：仅靠滑动窗口不够 —— 电视用一条长连接读完整部片子时中途
+   没有新请求，窗口无从顺延。
+5. **DIDL 的 DLNA 标志位始终输出**（不只在传 duration 时）：标志位是电视兼容性所需，
+   与时长是否已知无关；`duration` 属性仍只在已知时输出，保证旧行为兼容。
+6. **E4 保留旧行为兜底**：探测无结果时 `auto_cookie_browser_for_site` 回退到「第一个浏览器」，
+   避免探测失败导致 Cookie 功能完全不可用。
+7. **E6 按用户输入的原始 URL 回填标题**：yt-dlp 会归一化 URL，用 `webpage_url` 匹配不到历史条目。
+8. **未做设置页的「清空 URL 历史」入口**：对话框内右键已有「删除此条 / 清空历史」，不再重复。
+
+### 仍需真机验证的部分
+
+D2/D3 的修复无法在本地自证 —— 单测只能覆盖命令构造、响应头与续传逻辑。请按 6.3 的人工步骤
+复现一次，并把 `logs/` 里 `tube_player.dlna.http` 的记录发我：现在日志会明确写出收尾原因
+（`client_disconnected` / `ffmpeg_eof` / `ffmpeg_error`）、退出码、已转发字节、最后的
+`out_time` 与 FFmpeg stderr 尾部。若仍偶发，日志会直接指向 3.5 里的两条后备方案。
