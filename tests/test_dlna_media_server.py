@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import io
 import sys
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from dlna.media_server import (
     DlnaMediaSource,
     _DlnaRequestHandler,
+    _range_start,
     _summarize_ffmpeg_stderr,
     build_ffmpeg_mux_command,
 )
@@ -182,6 +185,170 @@ class MuxCommandObservabilityTests(unittest.TestCase):
         self.assertIn("-progress", command)
         self.assertEqual(command[command.index("-progress") + 1], "pipe:2")
         self.assertEqual(command[command.index("-loglevel") + 1], "warning")
+
+
+class InputResilienceTests(unittest.TestCase):
+    """两路输入都要带重连与超时，且必须落在各自的 -i 之前才是 per-input 选项。"""
+
+    def _command(self, audio_codec: str = "mp4a.40.2") -> list[str]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ffmpeg = Path(temp_dir) / "ffmpeg"
+            ffmpeg.touch()
+            source = DlnaMediaSource(
+                title="resilience",
+                video_url="https://cdn/video.m4s",
+                audio_url="https://cdn/audio.m4s",
+                headers={"Referer": "https://www.bilibili.com/"},
+                audio_codec=audio_codec,
+                ffmpeg_path=str(ffmpeg),
+            )
+            return build_ffmpeg_mux_command(source)
+
+    def test_both_inputs_carry_reconnect_options(self) -> None:
+        command = self._command()
+
+        self.assertEqual(command.count("-reconnect"), 2)
+        self.assertEqual(command.count("-reconnect_streamed"), 2)
+        self.assertEqual(command.count("-reconnect_on_network_error"), 2)
+        self.assertEqual(command.count("-rw_timeout"), 2)
+
+    def test_reconnect_options_precede_their_own_input(self) -> None:
+        command = self._command()
+        input_positions = [index for index, value in enumerate(command) if value == "-i"]
+        reconnect_positions = [index for index, value in enumerate(command) if value == "-reconnect"]
+
+        self.assertEqual(len(input_positions), 2)
+        self.assertEqual(len(reconnect_positions), 2)
+        # 第 n 个 -reconnect 必须出现在第 n 个 -i 之前，且不早于上一个 -i。
+        self.assertLess(reconnect_positions[0], input_positions[0])
+        self.assertLess(input_positions[0], reconnect_positions[1])
+        self.assertLess(reconnect_positions[1], input_positions[1])
+
+    def test_aac_source_still_copies_audio(self) -> None:
+        command = self._command("mp4a.40.2")
+
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-af", command)
+
+    def test_non_aac_source_transcodes_with_resample_sync(self) -> None:
+        command = self._command("opus")
+
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+        self.assertIn("-af", command)
+        self.assertIn("aresample=async=1:first_pts=0", command)
+
+    def test_muxing_queue_guard_is_present(self) -> None:
+        command = self._command()
+
+        self.assertEqual(command[command.index("-max_muxing_queue_size") + 1], "4096")
+        self.assertIn("+resend_headers", command)
+        self.assertEqual(command[-1], "pipe:1")
+
+
+class ContentFeatureHeaderTests(unittest.TestCase):
+    """三条 serve 路径都要发 contentFeatures.dlna.org，OP 位按可 Range 性区分。"""
+
+    def test_muxed_stream_is_advertised_as_non_seekable(self) -> None:
+        handler = _FakeHandler()
+        source = DlnaMediaSource(
+            title="features",
+            video_url="https://example.invalid/video",
+            audio_url="https://example.invalid/audio",
+            ffmpeg_path=sys.executable,
+        )
+        owner = SimpleNamespace(track_process=lambda _p: None, untrack_process=lambda _p: None)
+
+        with patch("dlna.media_server.build_ffmpeg_mux_command", return_value=[sys.executable, "-c", ""]):
+            handler._serve_muxed(owner, source, head_only=True)
+
+        headers = dict(handler.sent_headers)
+        self.assertIn("DLNA.ORG_OP=00", headers["contentFeatures.dlna.org"])
+
+    def test_local_file_is_advertised_as_seekable(self) -> None:
+        handler = _FakeHandler()
+        handler.headers = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media = Path(temp_dir) / "clip.mp4"
+            media.write_bytes(b"0123456789")
+            source = DlnaMediaSource(title="local", video_url="", file_path=str(media))
+
+            handler._serve_file(source, head_only=True)
+
+        headers = dict(handler.sent_headers)
+        self.assertIn("DLNA.ORG_OP=01", headers["contentFeatures.dlna.org"])
+
+
+class RangeStartTests(unittest.TestCase):
+    def test_request_and_response_range_forms_are_parsed(self) -> None:
+        self.assertEqual(_range_start("bytes=100-"), 100)
+        self.assertEqual(_range_start("bytes 200-299/1000"), 200)
+        self.assertEqual(_range_start("bytes=-500"), 0)
+        self.assertEqual(_range_start(""), 0)
+        self.assertEqual(_range_start("items=1-2"), 0)
+
+
+class ProxyResumeTests(unittest.TestCase):
+    """单文件直投：上游中途报错要按已发字节续传，最终字节流必须与不中断时一致。"""
+
+    PAYLOAD = bytes(range(256)) * 8
+
+    class _FlakyResponse:
+        """读到 fail_after 字节后抛一次 OSError，模拟上游连接被回收。"""
+
+        def __init__(self, payload: bytes, fail_after: int | None) -> None:
+            self.payload = payload
+            self.fail_after = fail_after
+            self.served = 0
+
+        def read(self, size: int) -> bytes:
+            if self.fail_after is not None and self.served >= self.fail_after:
+                raise OSError("upstream reset")
+            end = self.served + size
+            if self.fail_after is not None:
+                end = min(end, self.fail_after)
+            chunk = self.payload[self.served:end]
+            self.served = end
+            return chunk
+
+    def _run(self, fail_after: int | None, *, attempts_available: int = 3):
+        handler = _FakeHandler()
+        opened: list[str] = []
+        first = self._FlakyResponse(self.PAYLOAD, fail_after)
+
+        def fake_open(request, timeout=None):
+            value = request.headers.get("Range") or request.headers.get("range") or ""
+            opened.append(value)
+            start = _range_start(value)
+            remaining = attempts_available - len(opened)
+            return self._FlakyResponse(self.PAYLOAD[start:], None if remaining >= 0 else 0)
+
+        opener = SimpleNamespace(open=fake_open)
+        source = DlnaMediaSource(title="resume", video_url="https://cdn/movie.mp4")
+        with patch("dlna.media_server.time.sleep", lambda _seconds: None):
+            handler._forward_with_resume(
+                first,
+                opener=opener,
+                source=source,
+                headers={"User-Agent": "test"},
+                base_offset=0,
+            )
+        return handler, opened
+
+    def test_uninterrupted_stream_needs_no_retry(self) -> None:
+        handler, opened = self._run(None)
+
+        self.assertEqual(handler.wfile.getvalue(), self.PAYLOAD)
+        self.assertEqual(opened, [])
+
+    def test_interrupted_stream_resumes_from_sent_offset(self) -> None:
+        handler, opened = self._run(600)
+
+        self.assertEqual(handler.wfile.getvalue(), self.PAYLOAD)
+        self.assertEqual(opened, ["bytes=600-"])
+
+    def test_resume_gives_up_after_the_attempt_limit(self) -> None:
+        with self.assertRaises(OSError):
+            self._run(100, attempts_available=0)
 
 
 if __name__ == "__main__":

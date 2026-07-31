@@ -1163,7 +1163,13 @@ class MainWindow(QMainWindow):
             logger.exception("DLNA media server preparation failed")
             self.toast.show_message(f"投屏媒体服务启动失败：{exc}")
             return
-        metadata = build_didl_lite(video.title, media_url, source.output_mime_type)
+        metadata = build_didl_lite(
+            video.title,
+            media_url,
+            source.output_mime_type,
+            duration=float(video.duration or 0),
+            seekable=not source.requires_mux,
+        )
         remote_seek = 0.0 if source.requires_mux else position
         self._dlna_cast_pending = True
         self._dlna_pending_cast_request_id = self._dlna_action_sequence + 1
@@ -1204,7 +1210,13 @@ class MainWindow(QMainWindow):
             self.toast.show_message(f"投屏媒体服务启动失败：{exc}")
             return
 
-        metadata = build_didl_lite(title, media_url, source.output_mime_type)
+        metadata = build_didl_lite(
+            title,
+            media_url,
+            source.output_mime_type,
+            duration=self.mpv.duration(),
+            seekable=True,
+        )
         self._dlna_cast_pending = True
         self._dlna_pending_cast_request_id = self._dlna_action_sequence + 1
         self._dlna_pending_position_offset = 0.0

@@ -6,6 +6,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
+from dlna.features import dlna_content_features
 from dlna.models import DlnaDevice
 
 
@@ -149,12 +150,24 @@ class DlnaController:
         return payload
 
 
-def build_didl_lite(title: str, media_url: str, mime_type: str) -> str:
+def build_didl_lite(
+    title: str,
+    media_url: str,
+    mime_type: str,
+    duration: float = 0.0,
+    seekable: bool = False,
+) -> str:
     media_class = "object.item.videoItem.movie"
     if mime_type.startswith("audio/"):
         media_class = "object.item.audioItem.musicTrack"
     elif mime_type.startswith("image/"):
         media_class = "object.item.imageItem.photo"
+    # 缺少 DLNA 标志位时，不少电视会按最保守的路径处理甚至提前结束播放；
+    # duration 则让渲染器知道总时长（实时封装的流本身不带时长信息）。
+    protocol_info = f"http-get:*:{escape(mime_type)}:{dlna_content_features(seekable=seekable)}"
+    duration_attribute = ""
+    if duration and float(duration) > 0:
+        duration_attribute = f' duration="{escape(format_didl_duration(duration))}"'
     return (
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
@@ -163,9 +176,20 @@ def build_didl_lite(title: str, media_url: str, mime_type: str) -> str:
         '<item id="1" parentID="0" restricted="1">'
         f"<dc:title>{escape(str(title or '在线视频'))}</dc:title>"
         f"<upnp:class>{media_class}</upnp:class>"
-        f'<res protocolInfo="http-get:*:{escape(mime_type)}:*">{escape(media_url)}</res>'
+        f'<res protocolInfo="{protocol_info}"{duration_attribute}>{escape(media_url)}</res>'
         "</item></DIDL-Lite>"
     )
+
+
+def format_didl_duration(seconds: float) -> str:
+    """DIDL-Lite 的 res@duration 用 H:MM:SS.mmm（小时不补零）。"""
+    total = max(0.0, float(seconds or 0.0))
+    hours, remainder = divmod(int(total), 3600)
+    minutes, secs = divmod(remainder, 60)
+    milliseconds = int(round((total - int(total)) * 1000))
+    if milliseconds >= 1000:
+        milliseconds = 999
+    return f"{hours}:{minutes:02d}:{secs:02d}.{milliseconds:03d}"
 
 
 def format_dlna_time(seconds: float) -> str:

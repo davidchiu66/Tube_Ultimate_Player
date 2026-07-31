@@ -17,12 +17,31 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from dlna.features import dlna_content_features
+
 
 logger = logging.getLogger("tube_player.dlna.http")
 
-# 每个 token 的有效期（秒）。DLNA 设备通常在投屏开始后立即发起请求，
-# 30 分钟足以覆盖长视频的完整播放；过期后 token 自动失效，防止长期暴露。
-_TOKEN_TTL = 1800.0
+# 每个 token 的基础有效期（秒）。取 2 小时是为了覆盖「电视用一条长连接把整部片子
+# 读完」的情形 —— 这种模式下中途没有新请求，滑动窗口无从顺延，只能靠基础 TTL 撑住。
+# authorize() 每次放行都会顺延，stop_streams() 仍然立即清空令牌。
+_TOKEN_TTL = 7200.0
+
+# 投屏时推流节奏由电视决定：管道背压会让 FFmpeg 长时间不读上游，空闲连接被 CDN
+# 回收或一次 TCP reset 就会让 FFmpeg 结束那一路输入 —— 视频路踩到表现为「没播完
+# 就退出」，音频路踩到表现为「画面还在但没声音」。这组选项必须放在各自的 -i 之前
+# 才会被当成 per-input 选项。
+_INPUT_RESILIENCE = (
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_on_network_error", "1",
+    "-reconnect_on_http_error", "4xx,5xx",
+    "-reconnect_delay_max", "10",
+    "-rw_timeout", "20000000",      # 20s，单位微秒
+)
+
+# 单文件直投路径上游中断后的续传次数上限。
+_PROXY_RESUME_ATTEMPTS = 3
 
 
 @dataclass(slots=True)
@@ -109,6 +128,9 @@ class DlnaMediaServer:
 
         中继会把本机 Cookie/请求头转发到上游，甚至可读取本地文件，
         因此必须限制只有目标设备能取流，局域网内其他主机一律拒绝。
+
+        有效期是滑动窗口：每次放行都顺延，否则电视在缓冲不足时重新发起 GET
+        一旦越过 TTL 就拿到 404，长视频必然被中断。停止投屏仍然立即清空令牌。
         """
         registered = self._registered(token)
         if registered is None:
@@ -126,6 +148,10 @@ class DlnaMediaServer:
                 allowed,
             )
             return None
+        with self._sources_lock:
+            current = self._sources.get(token)
+            if current is not None:
+                current.expires_at = time.monotonic() + _TOKEN_TTL
         return registered.source
 
     def _registered(self, token: str) -> _RegisteredSource | None:
@@ -275,12 +301,70 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
                     self.send_header(name, value)
             self.send_header("Accept-Ranges", response.headers.get("Accept-Ranges") or "bytes")
             self.send_header("transferMode.dlna.org", "Streaming")
+            self.send_header("contentFeatures.dlna.org", dlna_content_features(seekable=True))
             self.send_header("Connection", "close")
             self.end_headers()
             if head_only:
                 return
-            while chunk := response.read(256 * 1024):
-                self.wfile.write(chunk)
+            self._forward_with_resume(
+                response,
+                opener=opener,
+                source=source,
+                headers=headers,
+                base_offset=_range_start(content_range) or _range_start(incoming_range),
+            )
+
+    def _forward_with_resume(
+        self,
+        response,
+        *,
+        opener: urllib.request.OpenerDirector,
+        source: DlnaMediaSource,
+        headers: dict[str, str],
+        base_offset: int,
+    ) -> None:
+        """转发上游字节，上游中途报错时按已发送字节数带 Range 续传。
+
+        读与写分开捕获：读失败是上游抖动，值得重试；写失败是电视断开，
+        必须原样抛给上层记账，不能在这里重试。
+        """
+        current = response
+        forwarded = 0
+        attempt = 0
+        while True:
+            try:
+                chunk = current.read(256 * 1024)
+            except (urllib.error.URLError, OSError) as exc:
+                attempt += 1
+                if attempt > _PROXY_RESUME_ATTEMPTS:
+                    logger.error(
+                        "DLNA 直投上游中断且续传次数用尽 offset=%s title=%s detail=%s",
+                        base_offset + forwarded,
+                        source.title,
+                        exc,
+                    )
+                    raise
+                resume_at = base_offset + forwarded
+                logger.warning(
+                    "DLNA 直投上游中断，按 Range 续传 attempt=%s offset=%s title=%s detail=%s",
+                    attempt,
+                    resume_at,
+                    source.title,
+                    exc,
+                )
+                time.sleep(min(0.5 * (2 ** attempt), 4.0))
+                current = opener.open(
+                    urllib.request.Request(
+                        source.video_url,
+                        headers={**headers, "Range": f"bytes={resume_at}-"},
+                    ),
+                    timeout=30,
+                )
+                continue
+            if not chunk:
+                return
+            self.wfile.write(chunk)
+            forwarded += len(chunk)
 
     def _serve_file(self, source: DlnaMediaSource, head_only: bool) -> None:
         path = Path(source.file_path)
@@ -302,6 +386,7 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
         if partial:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
         self.send_header("transferMode.dlna.org", "Streaming")
+        self.send_header("contentFeatures.dlna.org", dlna_content_features(seekable=True))
         self.send_header("Connection", "close")
         self.end_headers()
         if head_only:
@@ -321,6 +406,8 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", source.output_mime_type)
         self.send_header("Accept-Ranges", "none")
         self.send_header("transferMode.dlna.org", "Streaming")
+        # 实时转封装的管道流既不能 Range 也不能 TimeSeek，OP 必须是 00。
+        self.send_header("contentFeatures.dlna.org", dlna_content_features(seekable=False))
         self.send_header("Connection", "close")
         self.end_headers()
         if head_only:
@@ -437,8 +524,20 @@ def build_ffmpeg_mux_command(source: DlnaMediaSource) -> list[str]:
     if any(codec in audio_codec for codec in ("aac", "mp4a")):
         command.extend(["-c:a", "copy"])
     else:
-        command.extend(["-c:a", "aac", "-b:a", "192k"])
-    command.extend(["-mpegts_flags", "+resend_headers", "-f", "mpegts", "pipe:1"])
+        # 转码路径下补重采样同步：两路输入各自独立重定基准，时间戳会随时间漂移，
+        # 漂到一定程度电视就直接丢音轨。
+        command.extend(["-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1:first_pts=0"])
+    # -max_muxing_queue_size 是针对「Too many packets buffered for output stream」的：
+    # 两路输入分片大小不一致时 FFmpeg 会因为这个错误直接退出，正是中途中断的一支。
+    command.extend(
+        [
+            "-max_muxing_queue_size", "4096",
+            "-muxdelay", "0",
+            "-mpegts_flags", "+resend_headers",
+            "-f", "mpegts",
+            "pipe:1",
+        ]
+    )
     return command
 
 
@@ -518,6 +617,19 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int, bo
     return (start, end, True)
 
 
+def _range_start(value: str) -> int:
+    """从 `bytes=100-` 或 `bytes 100-199/1000` 里取起始偏移，取不到返回 0。"""
+    text = str(value or "").strip()
+    if not text.lower().startswith("bytes"):
+        return 0
+    remainder = text[5:].lstrip("= ")
+    start_text = remainder.partition("-")[0].strip()
+    try:
+        return max(0, int(start_text))
+    except ValueError:
+        return 0
+
+
 def _upstream_headers(headers: dict[str, str]) -> dict[str, str]:
     result = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -544,6 +656,7 @@ def _ffmpeg_input_options(source: DlnaMediaSource) -> list[str]:
         header_lines.append(f"{name}: {value}")
     if header_lines:
         result.extend(["-headers", "\r\n".join(header_lines) + "\r\n"])
+    result.extend(_INPUT_RESILIENCE)
     return result
 
 

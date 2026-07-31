@@ -10,7 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from dlna.controller import DlnaController, build_didl_lite, format_dlna_time, parse_dlna_time
+from dlna.controller import (
+    DlnaController,
+    build_didl_lite,
+    format_didl_duration,
+    format_dlna_time,
+    parse_dlna_time,
+)
 from dlna.discovery import (
     SEARCH_TARGETS,
     _deduplicate_devices,
@@ -165,6 +171,28 @@ class DlnaProtocolTests(unittest.TestCase):
         metadata = build_didl_lite("A & B <Video>", "http://host/media/1?a=1&b=2", "video/mp4")
         self.assertIn("A &amp; B &lt;Video&gt;", metadata)
         self.assertIn("a=1&amp;b=2", metadata)
+
+    def test_didl_metadata_carries_dlna_flags(self) -> None:
+        # 缺少 DLNA 标志位时不少电视会按最保守的路径处理甚至提前结束播放。
+        streaming = build_didl_lite("Video", "http://host/media/1", "video/mp2t")
+        seekable = build_didl_lite("Video", "http://host/media/1", "video/mp4", seekable=True)
+
+        self.assertIn("DLNA.ORG_OP=00", streaming)
+        self.assertIn("DLNA.ORG_FLAGS=", streaming)
+        self.assertIn("DLNA.ORG_OP=01", seekable)
+
+    def test_didl_duration_is_emitted_only_when_known(self) -> None:
+        without = build_didl_lite("Video", "http://host/media/1", "video/mp2t")
+        with_duration = build_didl_lite("Video", "http://host/media/1", "video/mp4", duration=3723.5)
+
+        self.assertNotIn("duration=", without)
+        self.assertIn('duration="1:02:03.500"', with_duration)
+
+    def test_didl_duration_format(self) -> None:
+        self.assertEqual(format_didl_duration(0), "0:00:00.000")
+        self.assertEqual(format_didl_duration(75), "0:01:15.000")
+        self.assertEqual(format_didl_duration(3723.5), "1:02:03.500")
+        self.assertEqual(format_didl_duration(-5), "0:00:00.000")
 
     def test_dlna_time_round_trip(self) -> None:
         self.assertEqual(format_dlna_time(3723), "01:02:03")

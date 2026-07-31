@@ -63,6 +63,37 @@ class AuthorizeTests(unittest.TestCase):
 
         self.assertIsNone(self.relay.authorize(old_token, "192.168.1.20"))
 
+    def test_successful_authorize_extends_the_deadline(self) -> None:
+        # 滑动窗口：电视缓冲不足时会重新发起 GET，每次放行都要顺延有效期，
+        # 否则长视频越过 TTL 后拿到 404 且不可恢复。
+        token = self._register(ttl=5.0)
+        with self.relay._sources_lock:
+            before = self.relay._sources[token].expires_at
+
+        self.assertIs(self.relay.authorize(token, "192.168.1.20"), self.source)
+
+        with self.relay._sources_lock:
+            after = self.relay._sources[token].expires_at
+        self.assertGreater(after, before)
+
+    def test_rejected_authorize_does_not_extend_the_deadline(self) -> None:
+        token = self._register(ttl=5.0)
+        with self.relay._sources_lock:
+            before = self.relay._sources[token].expires_at
+
+        self.assertIsNone(self.relay.authorize(token, "192.168.1.99"))
+
+        with self.relay._sources_lock:
+            self.assertEqual(self.relay._sources[token].expires_at, before)
+
+    def test_stop_streams_invalidates_even_a_refreshed_token(self) -> None:
+        token = self._register()
+        self.relay.authorize(token, "192.168.1.20")
+
+        self.relay.stop_streams()
+
+        self.assertIsNone(self.relay.authorize(token, "192.168.1.20"))
+
 
 class RelayHttpAccessTests(unittest.TestCase):
     """端到端：未授权来源与过期 token 都只能拿到 404。"""
