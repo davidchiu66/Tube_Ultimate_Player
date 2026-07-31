@@ -1,5 +1,5 @@
 Name:           Tube-Utimate-Player
-Version:        0.2.20
+Version:        0.2.21
 Release:        1%{?dist}
 Summary:        YouTube and Bilibili desktop video player
 
@@ -99,6 +99,10 @@ desktop-file-validate \
 %{_datadir}/%{name}/
 
 %changelog
+* Fri Jul 31 2026 davidchiu66 <chinamen@gmail.com> - 0.2.21-1
+- Verify update packages, harden archive extraction and DLNA relay access.
+- Fix the online upgrade launcher and improve home page and startup performance.
+
 * Sun Jul 26 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-2
 - Escape the desktop file field code in the RPM spec.
 
