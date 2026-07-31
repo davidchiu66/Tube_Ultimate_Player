@@ -51,6 +51,7 @@ from ui.toolbar import PlayerToolbar
 from ui.toast import Toast
 from ui.url_dialog import UrlPlayDialog
 from workers.archive_extract_worker import ArchiveExtractWorker
+from workers.cookie_probe_worker import CookieProbeWorker
 from workers.creator_videos_worker import CreatorVideosWorker
 from workers.dlna_worker import DlnaActionWorker
 from workers.home_worker import HomeWorker
@@ -200,6 +201,7 @@ class MainWindow(QMainWindow):
         self._refresh_favorite_views()
         QTimer.singleShot(0, self.load_home)
         QTimer.singleShot(1200, self._maybe_prompt_ffmpeg_install)
+        QTimer.singleShot(300, self._start_cookie_probe)
         if is_root_user():
             QTimer.singleShot(0, self._show_root_session_warning)
         self.top_bar_widget.set_topmost_state(self._is_topmost)
@@ -270,6 +272,9 @@ class MainWindow(QMainWindow):
         page.pause_requested.connect(self.download_manager.pause_task)
         page.start_requested.connect(self.download_manager.start_task)
         page.delete_requested.connect(self.download_manager.delete_task)
+        page.pause_tasks_requested.connect(self._pause_download_tasks)
+        page.start_tasks_requested.connect(self._start_download_tasks)
+        page.delete_tasks_requested.connect(self._delete_download_tasks)
         page.play_file_requested.connect(self.play_local_file)
         self.download_manager.task_added.connect(page.add_task)
         self.download_manager.task_changed.connect(page.update_task)
@@ -296,6 +301,7 @@ class MainWindow(QMainWindow):
         page.settings_saved.connect(self._settings_saved)
         page.install_node_requested.connect(self._install_node_runtime)
         page.open_node_site_requested.connect(self._open_node_official_site)
+        page.reprobe_cookies_requested.connect(self._reprobe_cookies)
         page.set_runtime_status(self.runtime_install_service.detect_runtime_status())
         return page
 
@@ -1883,6 +1889,63 @@ class MainWindow(QMainWindow):
             f"{message}\n\n将为你打开 Node.js 官网下载页。",
         )
         self.runtime_install_service.open_official_site()
+
+    def _start_cookie_probe(self) -> None:
+        """启动后异步探测各站点的登录 Cookie 浏览器（仅「自动检测」模式）。"""
+        if not self.config.cookie_auto_probe_enabled():
+            return
+        worker = CookieProbeWorker()
+        worker.signals.success.connect(self._cookie_probe_finished)
+        worker.signals.error.connect(self._cookie_probe_failed)
+        # 优先级设低：探测只影响后续请求的 Cookie 选择，不该和首页加载抢线程。
+        self.thread_pool.start(worker, -1)
+
+    @Slot(object)
+    @_skip_after_shutdown
+    def _cookie_probe_finished(self, mapping) -> None:
+        result = dict(mapping or {})
+        self.config.set_probed_cookie_browsers(result)
+        self.config.save()
+        missing = [site for site in ("bilibili", "youtube") if not result.get(site)]
+        settings_page = self._created_page("settings")
+        if settings_page is not None:
+            settings_page.set_cookie_probe_result(result, missing)
+        if not missing:
+            logger.info("cookie probe matched every site result=%s", result)
+            return
+        labels = {"bilibili": "Bilibili", "youtube": "YouTube"}
+        names = "、".join(labels[site] for site in missing)
+        # 提示用 toast 而不是模态框：启动时弹窗打断使用，设置页另有常驻提示。
+        self.toast.show_message(f"未在任何浏览器中找到 {names} 的登录 Cookie，请在设置中手动配置")
+
+    @Slot(str)
+    @_skip_after_shutdown
+    def _cookie_probe_failed(self, message: str) -> None:
+        logger.warning("cookie probe failed: %s", message)
+
+    def _pause_download_tasks(self, task_ids: list) -> None:
+        self._report_batch_download("暂停", self.download_manager.pause_tasks(list(task_ids)), len(task_ids))
+
+    def _start_download_tasks(self, task_ids: list) -> None:
+        self._report_batch_download("启动", self.download_manager.start_tasks(list(task_ids)), len(task_ids))
+
+    def _delete_download_tasks(self, task_ids: list) -> None:
+        self._report_batch_download("删除", self.download_manager.delete_tasks(list(task_ids)), len(task_ids))
+
+    def _report_batch_download(self, action: str, changed: int, requested: int) -> None:
+        skipped = max(0, requested - changed)
+        message = f"已{action} {changed} 个任务"
+        if skipped:
+            message += f"，跳过 {skipped} 个"
+        self.toast.show_message(message)
+
+    def _reprobe_cookies(self) -> None:
+        """设置页手动触发重新探测，不必重启应用。"""
+        if not self.config.cookie_auto_probe_enabled():
+            self.toast.show_message("请先把「从浏览器读取 Cookie」设为自动检测")
+            return
+        self.toast.show_message("正在检测各站点的登录 Cookie...")
+        self._start_cookie_probe()
 
     def _maybe_prompt_ffmpeg_install(self) -> None:
         if self.ffmpeg_install_service.is_available():

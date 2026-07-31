@@ -42,6 +42,9 @@ class DownloadPage(QWidget):
     start_requested = Signal(str)
     delete_requested = Signal(str)
     play_file_requested = Signal(str)
+    pause_tasks_requested = Signal(list)
+    start_tasks_requested = Signal(list)
+    delete_tasks_requested = Signal(list)
 
     def __init__(self) -> None:
         super().__init__()
@@ -76,6 +79,7 @@ class DownloadPage(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self._double_clicked)
         self.table.setColumnWidth(1, 90)
@@ -87,14 +91,47 @@ class DownloadPage(QWidget):
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit, 1)
 
+        self.pause_selected_button = QPushButton("暂停选中")
+        self.pause_all_button = QPushButton("暂停所有")
+        self.start_selected_button = QPushButton("启动选中")
+        self.start_all_button = QPushButton("启动所有")
+        self.delete_selected_button = QPushButton("删除选中")
+        self.delete_all_button = QPushButton("删除所有")
+        self._batch_buttons = (
+            self.pause_selected_button,
+            self.pause_all_button,
+            self.start_selected_button,
+            self.start_all_button,
+            self.delete_selected_button,
+            self.delete_all_button,
+        )
+        batch_row = QHBoxLayout()
+        batch_row.setContentsMargins(0, 0, 0, 0)
+        batch_row.setSpacing(8)
+        for button in self._batch_buttons:
+            button.setFixedHeight(28)
+            button.setObjectName("LibraryActionButton")
+            batch_row.addWidget(button)
+        batch_row.addStretch(1)
+
+        self.pause_selected_button.clicked.connect(lambda: self._emit_batch("pause", selected_only=True))
+        self.pause_all_button.clicked.connect(lambda: self._emit_batch("pause", selected_only=False))
+        self.start_selected_button.clicked.connect(lambda: self._emit_batch("start", selected_only=True))
+        self.start_all_button.clicked.connect(lambda: self._emit_batch("start", selected_only=False))
+        self.delete_selected_button.clicked.connect(lambda: self._emit_batch("delete", selected_only=True))
+        self.delete_all_button.clicked.connect(lambda: self._emit_batch("delete", selected_only=False))
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         layout.addWidget(title)
         layout.addLayout(search_row)
+        layout.addLayout(batch_row)
         layout.addWidget(self.table, 1)
 
         self.search_edit.textChanged.connect(self._apply_filter)
+        self.table.itemSelectionChanged.connect(self._update_batch_buttons)
+        self._update_batch_buttons()
 
     def add_task(self, task: DownloadTask) -> None:
         if task.task_id in self._rows:
@@ -192,6 +229,7 @@ class DownloadPage(QWidget):
         for item_id, item_row in list(self._rows.items()):
             if item_row > row:
                 self._rows[item_id] = item_row - 1
+        self._update_batch_buttons()
 
     def _apply_filter(self, _text: str = "") -> None:
         query = self.search_edit.text().strip().casefold()
@@ -209,6 +247,77 @@ class DownloadPage(QWidget):
                 )
             ).casefold()
             self.table.setRowHidden(row, bool(query and query not in haystack))
+        self._update_batch_buttons()
+
+    # ------------------------------------------------------------------
+    # 批量操作
+    # ------------------------------------------------------------------
+
+    PAUSABLE = (STATUS_QUEUED, STATUS_DOWNLOADING)
+    STARTABLE = (STATUS_PAUSED, STATUS_FAILED)
+
+    def _visible_task_ids(self) -> list[str]:
+        """当前筛选后可见的任务，按表格从上到下的顺序。
+
+        「所有」按这个口径而不是整张表：用户搜索之后点「删除所有」，
+        期望删的几乎一定是眼前这些。
+        """
+        ordered = sorted(self._rows.items(), key=lambda item: item[1])
+        return [task_id for task_id, row in ordered if not self.table.isRowHidden(row)]
+
+    def _selected_task_ids(self) -> list[str]:
+        rows = {index.row() for index in self.table.selectionModel().selectedRows()}
+        ordered = sorted(self._rows.items(), key=lambda item: item[1])
+        return [task_id for task_id, row in ordered if row in rows and not self.table.isRowHidden(row)]
+
+    def _candidates(self, action: str, task_ids: list[str]) -> list[str]:
+        if action == "delete":
+            return list(task_ids)
+        allowed = self.PAUSABLE if action == "pause" else self.STARTABLE
+        return [task_id for task_id in task_ids if (self._tasks.get(task_id) and self._tasks[task_id].status in allowed)]
+
+    def _emit_batch(self, action: str, *, selected_only: bool) -> None:
+        task_ids = self._selected_task_ids() if selected_only else self._visible_task_ids()
+        if not task_ids:
+            QMessageBox.information(self, "提示", "没有可操作的任务。")
+            return
+        candidates = self._candidates(action, task_ids)
+        if not candidates:
+            QMessageBox.information(self, "提示", "选中的任务当前都不支持该操作。")
+            return
+        if action == "delete" and not self._confirm_delete(len(candidates), selected_only=selected_only):
+            return
+        signal = {
+            "pause": self.pause_tasks_requested,
+            "start": self.start_tasks_requested,
+            "delete": self.delete_tasks_requested,
+        }[action]
+        signal.emit(candidates)
+
+    def _confirm_delete(self, count: int, *, selected_only: bool) -> bool:
+        scope = "选中的" if selected_only else "列表中当前显示的"
+        # 如实说明只删记录：DownloadManager.delete_task 不动本地文件。
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            f"将删除{scope} {count} 个下载任务记录。\n\n已下载的本地文件不会被删除。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _update_batch_buttons(self) -> None:
+        visible = self._visible_task_ids()
+        selected = self._selected_task_ids()
+        self.pause_selected_button.setEnabled(bool(self._candidates("pause", selected)))
+        self.start_selected_button.setEnabled(bool(self._candidates("start", selected)))
+        self.delete_selected_button.setEnabled(bool(selected))
+        self.pause_all_button.setEnabled(bool(self._candidates("pause", visible)))
+        self.start_all_button.setEnabled(bool(self._candidates("start", visible)))
+        self.delete_all_button.setEnabled(bool(visible))
+        self.pause_all_button.setToolTip(f"暂停当前列表中显示的 {len(visible)} 个任务")
+        self.start_all_button.setToolTip(f"启动当前列表中显示的 {len(visible)} 个任务")
+        self.delete_all_button.setToolTip(f"删除当前列表中显示的 {len(visible)} 个任务记录")
 
     def _double_clicked(self, row: int, _column: int) -> None:
         task_id = self._task_id_for_row(row)

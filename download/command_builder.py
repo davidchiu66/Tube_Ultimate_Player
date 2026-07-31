@@ -109,7 +109,7 @@ def build_download_command(
         command.extend(["--cookies-from-browser", cookie_browser])
     elif cookie_file:
         command.extend(["--cookies", prepare_cookie_file(cookie_file, task.url)])
-    elif auto_cookie_browser := config.auto_cookie_browser():
+    elif auto_cookie_browser := config.auto_cookie_browser_for_site(config.cookie_site_for_url(task.url)):
         command.extend(["--cookies-from-browser", auto_cookie_browser])
 
     command.append(task.url)

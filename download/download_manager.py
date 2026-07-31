@@ -129,6 +129,67 @@ class DownloadManager(QObject):
         self._save_tasks()
         self._schedule()
 
+    def pause_tasks(self, task_ids: list[str]) -> int:
+        """批量暂停，返回真正被暂停的条数。
+
+        逐条走 pause_task 会按条落盘与调度（20 条就是 20 次写盘 20 次调度），
+        所以这里自己改状态、最后统一落盘 + 调度一次。
+        """
+        changed = 0
+        for task_id in list(task_ids or []):
+            task = self._find(task_id)
+            if not task or task.status not in (STATUS_QUEUED, STATUS_DOWNLOADING):
+                continue
+            task.status = STATUS_PAUSED
+            task.touch()
+            self.task_changed.emit(task)
+            worker = self._workers.get(task_id)
+            if worker:
+                worker.stop()
+            changed += 1
+        if changed:
+            logger.info("download batch pause count=%s", changed)
+            self._save_tasks()
+            self._schedule()
+        return changed
+
+    def start_tasks(self, task_ids: list[str]) -> int:
+        changed = 0
+        for task_id in list(task_ids or []):
+            task = self._find(task_id)
+            if not task or task.status not in (STATUS_PAUSED, STATUS_FAILED):
+                continue
+            task.status = STATUS_QUEUED
+            task.error_message = ""
+            task.touch()
+            self.task_changed.emit(task)
+            changed += 1
+        if changed:
+            logger.info("download batch start count=%s", changed)
+            self._save_tasks()
+            self._schedule()
+        return changed
+
+    def delete_tasks(self, task_ids: list[str]) -> int:
+        """批量删除任务记录。与 delete_task 一致：不动本地已下载文件。"""
+        targets = [task for task_id in list(task_ids or []) if (task := self._find(task_id)) is not None]
+        if not targets:
+            return 0
+        doomed = {task.task_id for task in targets}
+        for task in targets:
+            task.status = STATUS_DELETED
+            worker = self._workers.pop(task.task_id, None)
+            if worker:
+                worker.stop()
+        self._tasks = [item for item in self._tasks if item.task_id not in doomed]
+        for task in targets:
+            self._unregister_task(task)
+            self.task_removed.emit(task.task_id)
+        logger.info("download batch delete count=%s", len(targets))
+        self._save_tasks()
+        self._schedule()
+        return len(targets)
+
     def reload_settings(self) -> None:
         self.config.load()
         self._max_concurrent = self.config.download_max_concurrent()

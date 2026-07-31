@@ -278,6 +278,30 @@ class ConfigService:
             return ""
         return detect_browser_cookie_source()
 
+    def auto_cookie_browser_for_site(self, site: str) -> str:
+        """自动模式下该站点应使用的浏览器 Cookie 源。
+
+        优先用启动探测出的「登录过该站点」的浏览器；没有探测结果时回退到
+        探测到的第一个浏览器（旧行为），保证功能不因探测失败而完全不可用。
+        """
+        browser = str(self.get("youtube.cookie_browser", "") or "").strip()
+        if browser != "auto":
+            return ""
+        normalized_site = self._normalize_cookie_site(site)
+        probed = str(self.get(f"cookies.{normalized_site}.auto_browser", "") or "").strip()
+        if probed:
+            return probed
+        return detect_browser_cookie_source()
+
+    def set_probed_cookie_browsers(self, mapping: dict[str, str]) -> None:
+        """保存启动探测结果：{site: browser_spec}。未命中的站点清空其记录。"""
+        for site in ("bilibili", "youtube"):
+            spec = str(mapping.get(site, "") or "").strip()
+            self.set(f"cookies.{site}.auto_browser", spec)
+
+    def cookie_auto_probe_enabled(self) -> bool:
+        return str(self.get("youtube.cookie_browser", "") or "").strip() == "auto"
+
     def js_runtime(self) -> str:
         runtime = str(self.get("youtube.js_runtime", "auto") or "").strip()
         if not runtime:

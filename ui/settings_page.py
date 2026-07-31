@@ -41,6 +41,7 @@ class SettingsPage(QWidget):
     settings_saved = Signal()
     install_node_requested = Signal()
     open_node_site_requested = Signal()
+    reprobe_cookies_requested = Signal()
 
     def __init__(self, config: ConfigService) -> None:
         super().__init__()
@@ -90,6 +91,18 @@ class SettingsPage(QWidget):
         self.cookie_content_label = QLabel()
 
         self.cookie_browser_combo = QComboBox()
+
+        self.cookie_probe_label = QLabel()
+        self.cookie_probe_label.setObjectName("MetaLabel")
+        self.cookie_probe_label.setWordWrap(True)
+        self.reprobe_cookie_button = QPushButton("重新检测")
+        self.reprobe_cookie_button.clicked.connect(self.reprobe_cookies_requested.emit)
+        cookie_probe_row = QHBoxLayout()
+        cookie_probe_row.setContentsMargins(0, 0, 0, 0)
+        cookie_probe_row.setSpacing(8)
+        cookie_probe_row.addWidget(self.cookie_probe_label, 1)
+        cookie_probe_row.addWidget(self.reprobe_cookie_button)
+        self._cookie_probe_row = cookie_probe_row
 
         self.cookie_profile_edit = QLineEdit()
         self.cookie_profile_edit.setPlaceholderText("Default / Profile 1")
@@ -154,6 +167,7 @@ class SettingsPage(QWidget):
         form.addRow("代理模式", self.proxy_mode_combo)
         form.addRow("配置代理", self.proxy_edit)
         form.addRow("从浏览器读取 Cookie", self.cookie_browser_combo)
+        form.addRow("Cookie 检测结果", self._cookie_probe_row)
         form.addRow("浏览器 Profile", self.cookie_profile_edit)
         form.addRow(self.cookie_content_label, self.cookie_edit)
         form.addRow("JS Runtime", self.js_runtime_combo)
@@ -259,6 +273,7 @@ class SettingsPage(QWidget):
         index = self.cookie_browser_combo.findData(browser)
         self.cookie_browser_combo.setCurrentIndex(index if index >= 0 else 0)
         self.cookie_profile_edit.setText(str(self.config.get("youtube.cookie_browser_profile", "") or ""))
+        self.refresh_cookie_probe_from_config()
         runtime = str(self.config.get("youtube.js_runtime", "auto") or "")
         runtime_index = self.js_runtime_combo.findData(runtime)
         self.js_runtime_combo.setCurrentIndex(runtime_index if runtime_index >= 0 else 0)
@@ -363,13 +378,35 @@ class SettingsPage(QWidget):
     def _populate_cookie_browser_combo(self, _selected: str) -> None:
         self.cookie_browser_combo.blockSignals(True)
         self.cookie_browser_combo.clear()
-        self.cookie_browser_combo.addItem("自动检测（默认浏览器优先）", "auto")
+        self.cookie_browser_combo.addItem("自动检测（按站点选择已登录的浏览器）", "auto")
         self.cookie_browser_combo.addItem("不从浏览器读取", "")
 
         detected = detect_browser_cookie_sources()
         for label, value in detected:
             self.cookie_browser_combo.addItem(label, value)
         self.cookie_browser_combo.blockSignals(False)
+
+    def set_cookie_probe_result(self, result: dict[str, str], missing: list[str]) -> None:
+        """展示启动探测的结果；某站点没找到时给出手动配置引导。"""
+        labels = {"bilibili": "Bilibili", "youtube": "YouTube"}
+        parts = [f"{labels[site]}：{spec}" for site, spec in result.items() if spec]
+        if missing:
+            names = "、".join(labels[site] for site in missing)
+            parts.append(f"未找到 {names} 的登录 Cookie，请在下方手动粘贴 Cookie")
+        self.cookie_probe_label.setText("；".join(parts) if parts else "尚未检测")
+
+    def refresh_cookie_probe_from_config(self) -> None:
+        result = {
+            site: str(self.config.get(f"cookies.{site}.auto_browser", "") or "").strip()
+            for site in ("bilibili", "youtube")
+        }
+        missing = [site for site, spec in result.items() if not spec]
+        if not self.config.cookie_auto_probe_enabled():
+            self.cookie_probe_label.setText("仅在「自动检测」模式下生效")
+            self.reprobe_cookie_button.setEnabled(False)
+            return
+        self.reprobe_cookie_button.setEnabled(True)
+        self.set_cookie_probe_result(result, missing)
 
     def _switch_cookie_site(self, site: str) -> None:
         if self._loading_settings or site == self._cookie_site:

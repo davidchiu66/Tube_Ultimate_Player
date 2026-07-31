@@ -914,7 +914,7 @@ class BilibiliResolver:
             if header:
                 return header
 
-        auto = self.config.auto_cookie_browser()
+        auto = self.config.auto_cookie_browser_for_site(self.config.cookie_site_for_url(url))
         if auto:
             tried.add(auto)
             header = load_browser_cookie_header(auto, url)

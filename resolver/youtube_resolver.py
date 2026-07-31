@@ -400,7 +400,7 @@ class YoutubeResolver:
             command.extend(["--cookies-from-browser", cookie_browser])
         elif cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif auto_cookie_browser := self.config.auto_cookie_browser():
+        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
             command.extend(["--cookies-from-browser", auto_cookie_browser])
 
         command.append(url)
@@ -443,7 +443,7 @@ class YoutubeResolver:
             command.extend(["--cookies-from-browser", cookie_browser])
         elif cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif auto_cookie_browser := self.config.auto_cookie_browser():
+        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
             command.extend(["--cookies-from-browser", auto_cookie_browser])
 
         command.append(url)
@@ -486,7 +486,7 @@ class YoutubeResolver:
             command.extend(["--cookies-from-browser", cookie_browser])
         elif cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif auto_cookie_browser := self.config.auto_cookie_browser():
+        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
             command.extend(["--cookies-from-browser", auto_cookie_browser])
 
         command.append(url)
