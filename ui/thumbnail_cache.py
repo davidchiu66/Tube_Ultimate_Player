@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from collections import OrderedDict
 
 from PySide6.QtCore import QByteArray, QObject, QUrl, Qt
@@ -17,7 +18,8 @@ class ThumbnailCache(QObject):
         super().__init__(parent)
         self._max_items = max(50, int(max_items))
         self._pixmaps: OrderedDict[tuple[str, int, int], QPixmap] = OrderedDict()
-        self._in_flight: dict[tuple[str, int, int], list[QLabel]] = {}
+        # 等待者只持弱引用：页面切换后卡片可以正常回收，回调也不会让已销毁的控件复活。
+        self._in_flight: dict[tuple[str, int, int], list[weakref.ReferenceType[QLabel]]] = {}
 
     def load(
         self,
@@ -43,14 +45,28 @@ class ThumbnailCache(QObject):
             label.setText("")
             return
 
-        waiters = self._in_flight.setdefault(key, [])
-        if label not in waiters:
-            waiters.append(label)
-        if len(waiters) > 1:
+        waiters = self._in_flight.get(key)
+        if waiters is not None:
+            # 同一张图已在请求中，只登记等待者，不重复发起网络请求。
+            if not any(ref() is label for ref in waiters):
+                waiters.append(weakref.ref(label))
             return
 
+        self._in_flight[key] = [weakref.ref(label)]
         reply = network.get(QNetworkRequest(QUrl(normalized)))
         reply.finished.connect(lambda: self._handle_finished(reply, key, error_text))
+
+    def cancel_for(self, label: QLabel) -> None:
+        """注销某个控件的等待登记，供页面清空卡片前调用。"""
+        for key in list(self._in_flight):
+            waiters = self._in_flight[key]
+            remaining = [ref for ref in waiters if ref() is not None and ref() is not label]
+            if len(remaining) != len(waiters):
+                self._in_flight[key] = remaining
+
+    def pending_count(self) -> int:
+        """在途请求数，供测试与诊断使用。"""
+        return len(self._in_flight)
 
     def _handle_finished(
         self,
@@ -79,13 +95,21 @@ class ThumbnailCache(QObject):
         else:
             logger.debug("thumbnail decode failed url=%s bytes=%s", key[0], data.size())
 
-        for label in waiters:
-            if success:
-                label.setPixmap(cached)
-                label.setText("")
-            else:
-                label.setPixmap(QPixmap())
-                label.setText(error_text)
+        for ref in waiters:
+            label = ref()
+            if label is None:
+                continue
+            # 控件的 C++ 对象可能已被销毁（页面切换、卡片重建），此时逐个吞掉
+            # RuntimeError，避免一个失效控件中断同批次其余等待者的回填。
+            try:
+                if success:
+                    label.setPixmap(cached)
+                    label.setText("")
+                else:
+                    label.setPixmap(QPixmap())
+                    label.setText(error_text)
+            except RuntimeError:
+                logger.debug("thumbnail target already destroyed url=%s", key[0])
         reply.deleteLater()
 
 

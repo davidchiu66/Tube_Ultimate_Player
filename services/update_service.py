@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -8,8 +9,10 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from app_paths import APP_DIR, SOURCE_DIR, UPDATE_DIR, read_app_version
@@ -22,48 +25,106 @@ REPO_SLUG = "davidchiu66/Tube_Ultimate_Player"
 REPO_URL = f"https://github.com/{REPO_SLUG}"
 RELEASES_API = f"https://api.github.com/repos/{REPO_SLUG}/releases"
 
-INSTALLER_LAUNCHER_SCRIPT = r'''param(
-    [Parameter(Mandatory=$true)][string]$InstallerPath,
-    [Parameter(Mandatory=$true)][int]$ParentPid
-)
+LAUNCHER_COMMON_PRELUDE = r'''function Write-UpgradeLog {
+    param([string]$Message)
+    $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $Message
+    try { Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 } catch { }
+}
 
-$ErrorActionPreference = "Stop"
-$logPath = Join-Path ([System.IO.Path]::GetDirectoryName($InstallerPath)) "installer-launch.log"
+function Wait-ForProcessExit {
+    param([int]$TargetPid, [string]$ExecutablePath, [int]$TimeoutSeconds = 120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $alive = @()
+        if ($TargetPid -gt 0) {
+            $alive += @(Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)
+        }
+        if ($ExecutablePath) {
+            $leaf = [System.IO.Path]::GetFileNameWithoutExtension($ExecutablePath)
+            $alive += @(Get-Process -Name $leaf -ErrorAction SilentlyContinue | Where-Object {
+                try { $_.Path -and ($_.Path -eq $ExecutablePath) } catch { $false }
+            })
+        }
+        if ($alive.Count -eq 0) { return $true }
+        Start-Sleep -Milliseconds 300
+    }
+    return $false
+}
+
+function Start-UpgradeProcess {
+    param([string]$FilePath, [string]$WorkingDirectory)
+    $arguments = @{ FilePath = $FilePath; PassThru = $true }
+    if ($WorkingDirectory) { $arguments["WorkingDirectory"] = $WorkingDirectory }
+    try {
+        $process = Start-Process @arguments
+        Write-UpgradeLog ("已启动 {0}，进程 Id={1}" -f $FilePath, $process.Id)
+        return $process
+    }
+    catch {
+        Write-UpgradeLog ("直接启动失败，尝试以管理员身份启动：" + $_.Exception.Message)
+        $arguments["Verb"] = "RunAs"
+        $process = Start-Process @arguments
+        Write-UpgradeLog ("已提权启动 {0}，进程 Id={1}" -f $FilePath, $process.Id)
+        return $process
+    }
+}
+'''
+
+INSTALLER_LAUNCHER_SCRIPT = r'''$ErrorActionPreference = "Stop"
+$script:LogPath = Join-Path ([System.IO.Path]::GetDirectoryName($InstallerPath)) "installer-launch.log"
+
+__COMMON__
+
+Write-UpgradeLog ("启动器开始运行 pid={0} 安装包={1} 父进程={2}" -f $PID, $InstallerPath, $ParentPid)
 
 try {
-    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
-    Start-Process -FilePath $InstallerPath
+    if (-not (Wait-ForProcessExit -TargetPid $ParentPid -ExecutablePath $AppExecutable -TimeoutSeconds 120)) {
+        Write-UpgradeLog "等待旧版进程退出超时，仍继续启动安装程序"
+    } else {
+        Write-UpgradeLog "旧版进程已退出"
+    }
+    Start-Sleep -Milliseconds 800
+    if (-not (Test-Path -LiteralPath $InstallerPath)) {
+        throw "安装包不存在：$InstallerPath"
+    }
+    $process = Start-UpgradeProcess -FilePath $InstallerPath -WorkingDirectory ([System.IO.Path]::GetDirectoryName($InstallerPath))
+    Start-Sleep -Seconds 2
+    if ($process.HasExited -and $process.ExitCode -ne 0) {
+        throw "安装程序启动后立即退出，退出代码: $($process.ExitCode)"
+    }
+    Write-UpgradeLog "安装程序启动成功"
 }
 catch {
-    ($_ | Out-String) | Out-File -LiteralPath $logPath -Encoding UTF8
+    Write-UpgradeLog ("失败：" + ($_ | Out-String))
     Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show(
-        "新版安装程序启动失败。请查看日志：`n$logPath`n`n$($_.Exception.Message)",
+        "新版安装程序启动失败。请查看日志：`n$script:LogPath`n`n$($_.Exception.Message)",
         "Tube_Ultimate_Player 升级失败",
         [System.Windows.MessageBoxButton]::OK,
         [System.Windows.MessageBoxImage]::Error
     ) | Out-Null
 }
-'''
+'''.replace("__COMMON__", LAUNCHER_COMMON_PRELUDE)
 
-PORTABLE_UPDATER_SCRIPT = r'''param(
-    [Parameter(Mandatory=$true)][string]$ArchivePath,
-    [Parameter(Mandatory=$true)][string]$TargetDir,
-    [Parameter(Mandatory=$true)][string]$RestartExecutable,
-    [Parameter(Mandatory=$true)][int]$ParentPid
-)
-
-$ErrorActionPreference = "Stop"
+PORTABLE_UPDATER_SCRIPT = r'''$ErrorActionPreference = "Stop"
 $workRoot = Join-Path ([System.IO.Path]::GetDirectoryName($ArchivePath)) ("portable-update-" + [System.Guid]::NewGuid().ToString("N"))
-$logPath = Join-Path ([System.IO.Path]::GetDirectoryName($ArchivePath)) "portable-update.log"
+$script:LogPath = Join-Path ([System.IO.Path]::GetDirectoryName($ArchivePath)) "portable-update.log"
+
+__COMMON__
+
+Write-UpgradeLog ("便携版升级开始 pid={0} 升级包={1} 目标目录={2}" -f $PID, $ArchivePath, $TargetDir)
 
 try {
-    Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+    if (-not (Wait-ForProcessExit -TargetPid $ParentPid -ExecutablePath $RestartExecutable -TimeoutSeconds 120)) {
+        Write-UpgradeLog "等待旧版进程退出超时，文件替换可能失败"
+    } else {
+        Write-UpgradeLog "旧版进程已退出"
+    }
     Start-Sleep -Milliseconds 800
     New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $workRoot)
+    Write-UpgradeLog "升级包解压完成"
 
     $sourceRoot = $workRoot
     $topItems = @(Get-ChildItem -LiteralPath $workRoot -Force)
@@ -74,18 +135,21 @@ try {
     }
 
     & robocopy.exe $sourceRoot $TargetDir /E /COPY:DAT /DCOPY:DAT /R:10 /W:1 /NFL /NDL /NJH /NJS /NP
-    if ($LASTEXITCODE -ge 8) {
-        throw "文件替换失败，Robocopy 退出代码: $LASTEXITCODE"
+    $robocopyExit = $LASTEXITCODE
+    Write-UpgradeLog ("Robocopy 退出代码: {0}" -f $robocopyExit)
+    if ($robocopyExit -ge 8) {
+        throw "文件替换失败，Robocopy 退出代码: $robocopyExit"
     }
 
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Start-Process -FilePath $RestartExecutable -WorkingDirectory $TargetDir
+    Start-UpgradeProcess -FilePath $RestartExecutable -WorkingDirectory $TargetDir | Out-Null
+    Write-UpgradeLog "便携版升级完成并已重启应用"
 }
 catch {
-    ($_ | Out-String) | Out-File -LiteralPath $logPath -Encoding UTF8
+    Write-UpgradeLog ("失败：" + ($_ | Out-String))
     Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show(
-        "便携版自动升级失败。请查看日志：`n$logPath`n`n$($_.Exception.Message)",
+        "便携版自动升级失败。请查看日志：`n$script:LogPath`n`n$($_.Exception.Message)",
         "Tube_Ultimate_Player 升级失败",
         [System.Windows.MessageBoxButton]::OK,
         [System.Windows.MessageBoxImage]::Error
@@ -96,7 +160,60 @@ finally {
         Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
-'''
+'''.replace("__COMMON__", LAUNCHER_COMMON_PRELUDE)
+
+
+# 升级包只允许来自 GitHub 官方发布域名，防止被重定向到第三方主机。
+TRUSTED_DOWNLOAD_HOSTS = (
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
+)
+
+HASH_CHUNK_SIZE = 1024 * 1024
+SHA256_PATTERN = re.compile(r"\b([a-fA-F0-9]{64})\b")
+
+# powershell.exe 命令行总长上限（Windows 为 32767），留出可执行文件与开关的余量。
+MAX_ENCODED_COMMAND_CHARS = 30000
+
+
+def quote_powershell_literal(value: str) -> str:
+    """把值包成 PowerShell 单引号字面量：单引号成对转义，其中不做任何变量展开。"""
+    text = str(value)
+    if "\x00" in text or "\r" in text or "\n" in text:
+        raise RuntimeError("升级参数包含非法字符，已终止升级")
+    return "'" + text.replace("'", "''") + "'"
+
+
+def build_launcher_command(
+    powershell: str,
+    script_body: str,
+    parameters: dict[str, str | int],
+) -> list[str]:
+    """把升级脚本连同参数编译成 -EncodedCommand 形式的命令行。
+
+    原实现把脚本写到用户可写的 updates 目录再以 -File 执行，从写入到执行之间存在
+    TOCTOU 窗口：任何本地进程都能替换脚本内容，进而以本进程权限执行任意代码
+    （安装版还可能被提权到管理员）。改为内联传递后磁盘上不再有可篡改的脚本。
+    """
+    prelude_lines = [f"${name} = {quote_powershell_literal(value)}" for name, value in parameters.items()]
+    script = "\n".join(prelude_lines) + "\n" + script_body
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    if len(encoded) > MAX_ENCODED_COMMAND_CHARS:
+        raise RuntimeError("升级脚本参数过长，无法启动升级程序")
+    return [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-EncodedCommand",
+        encoded,
+    ]
 
 
 @dataclass(slots=True)
@@ -105,6 +222,7 @@ class ReleaseAsset:
     download_url: str
     size: int
     content_type: str = ""
+    digest: str = ""
 
 
 @dataclass(slots=True)
@@ -184,6 +302,7 @@ class UpdateService:
                 download_url=str(asset.get("browser_download_url", "")),
                 size=int(asset.get("size", 0) or 0),
                 content_type=str(asset.get("content_type", "")),
+                digest=str(asset.get("digest", "") or ""),
             )
             for asset in payload.get("assets", [])
         ]
@@ -264,6 +383,72 @@ class UpdateService:
         filename = asset.name or "update_package.bin"
         return self.updates_dir() / filename
 
+    def resolve_expected_sha256(self, release: ReleaseInfo, asset: ReleaseAsset) -> str:
+        """按 asset digest -> 校验和清单资产 -> Release 正文 的顺序解析期望哈希。"""
+        digest = normalize_sha256(asset.digest)
+        if digest:
+            logger.info("update hash source=asset-digest asset=%s", asset.name)
+            return digest
+
+        for checksum_asset in release.assets:
+            if checksum_asset is asset or not _is_checksum_asset(checksum_asset.name, asset.name):
+                continue
+            try:
+                ensure_trusted_download_url(checksum_asset.download_url)
+                with self.open_url(checksum_asset.download_url) as response:
+                    text = response.read(256 * 1024).decode("utf-8", errors="replace")
+            except (RuntimeError, OSError, urllib.error.URLError) as exc:
+                logger.warning("读取校验和清单失败 name=%s error=%s", checksum_asset.name, exc)
+                continue
+            bare_allowed = checksum_asset.name.lower().endswith((".sha256", ".sha256sum"))
+            digest = extract_sha256_for(text, asset.name, allow_bare=bare_allowed)
+            if digest:
+                logger.info("update hash source=%s asset=%s", checksum_asset.name, asset.name)
+                return digest
+
+        digest = extract_sha256_for(release.body, asset.name)
+        if digest:
+            logger.info("update hash source=release-body asset=%s", asset.name)
+            return digest
+
+        logger.warning("未在发布信息中找到 %s 的 SHA256 校验值", asset.name)
+        return ""
+
+    def verify_authenticode(self, package_path: str | Path) -> None:
+        """无法取得哈希时的兜底：校验 Windows 数字签名，签名无效则拒绝执行。"""
+        package = Path(package_path).resolve()
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("升级包缺少 SHA256 校验值，已终止升级")
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            raise RuntimeError("升级包缺少 SHA256 校验值，且未找到 PowerShell 无法校验数字签名")
+        command = [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "$ErrorActionPreference='Stop';"
+            f"(Get-AuthenticodeSignature -LiteralPath '{package}').Status.ToString()",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.exception("authenticode 校验执行失败 path=%s", package)
+            raise RuntimeError(f"无法校验升级包数字签名：{exc}") from exc
+        status = (completed.stdout or "").strip().splitlines()[-1:] or [""]
+        if status[0].strip() != "Valid":
+            logger.error("authenticode 校验未通过 path=%s status=%s", package, status[0].strip())
+            raise RuntimeError(f"升级包数字签名校验未通过（{status[0].strip() or '未知状态'}），已终止升级")
+        logger.info("authenticode 校验通过 path=%s", package)
+
     def launch_installer(self, package_path: str | Path) -> None:
         package = Path(package_path).resolve()
         if not package.is_file():
@@ -276,29 +461,36 @@ class UpdateService:
         powershell = shutil.which("powershell.exe")
         if not powershell:
             raise RuntimeError("未找到 Windows PowerShell，无法在应用退出后启动安装程序")
-        script_path = self.updates_dir() / "installer_launcher.ps1"
-        script_path.write_text(INSTALLER_LAUNCHER_SCRIPT, encoding="utf-8-sig")
-        command = [
-            powershell,
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script_path),
-            "-InstallerPath",
-            str(package),
-            "-ParentPid",
-            str(os.getpid()),
-        ]
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        parameters = {
+            "InstallerPath": str(package),
+            "ParentPid": str(os.getpid()),
+            "AppExecutable": str(Path(sys.executable).resolve()),
+        }
+        command = build_launcher_command(powershell, INSTALLER_LAUNCHER_SCRIPT, parameters)
+        self._spawn_launcher(command, "升级安装程序")
+
+    def _spawn_launcher(self, command: list[str], label: str) -> None:
+        """以独立进程启动 PowerShell 升级脚本。
+
+        注意：不能使用 DETACHED_PROCESS —— powershell.exe 在没有控制台的情况下会立即以
+        退出码 0 结束且不执行脚本任何一行，这会导致升级包"下载完成却从未被执行"。
+        CREATE_NO_WINDOW 会为子进程分配一个不可见控制台，脚本可正常运行，
+        且 Windows 不会因父进程退出而结束子进程。
+        """
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            subprocess.Popen(command, close_fds=True, creationflags=creation_flags)
+            process = subprocess.Popen(
+                command,
+                close_fds=True,
+                creationflags=creation_flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except OSError as exc:
-            logger.exception("failed to launch update installer path=%s", package)
-            raise RuntimeError(f"无法启动升级安装程序：{exc}") from exc
+            logger.exception("failed to launch %s command=%s", label, command[:1])
+            raise RuntimeError(f"无法启动{label}：{exc}") from exc
+        logger.info("%s启动器已创建 pid=%s", label, process.pid)
 
     def launch_portable_update(self, package_path: str | Path) -> None:
         package = Path(package_path).resolve()
@@ -315,38 +507,15 @@ class UpdateService:
         if not powershell:
             raise RuntimeError("未找到 Windows PowerShell，无法启动便携版自动升级")
 
-        script_path = self.updates_dir() / "portable_updater.ps1"
-        script_path.write_text(PORTABLE_UPDATER_SCRIPT, encoding="utf-8-sig")
         executable = Path(sys.executable).resolve()
-        command = [
-            powershell,
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script_path),
-            "-ArchivePath",
-            str(package),
-            "-TargetDir",
-            str(APP_DIR.resolve()),
-            "-RestartExecutable",
-            str(executable),
-            "-ParentPid",
-            str(os.getpid()),
-        ]
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        try:
-            subprocess.Popen(
-                command,
-                close_fds=True,
-                creationflags=creation_flags,
-            )
-        except OSError as exc:
-            logger.exception("failed to launch portable updater package=%s", package)
-            raise RuntimeError(f"无法启动便携版升级程序：{exc}") from exc
+        parameters = {
+            "ArchivePath": str(package),
+            "TargetDir": str(APP_DIR.resolve()),
+            "RestartExecutable": str(executable),
+            "ParentPid": str(os.getpid()),
+        }
+        command = build_launcher_command(powershell, PORTABLE_UPDATER_SCRIPT, parameters)
+        self._spawn_launcher(command, "便携版升级程序")
 
     def build_request(self, url: str) -> urllib.request.Request:
         return urllib.request.Request(
@@ -382,6 +551,103 @@ class UpdateService:
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
         return urllib.request.build_opener(*handlers)
+
+
+def normalize_sha256(value: str) -> str:
+    """接受 "sha256:xxx" / "SHA256 = xxx" / 裸哈希三种写法，返回小写 64 位十六进制。"""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if ":" in text:
+        algorithm, _, remainder = text.partition(":")
+        if algorithm.strip() not in ("sha256", "sha-256"):
+            return ""
+        text = remainder.strip()
+    match = SHA256_PATTERN.search(text)
+    return match.group(1).lower() if match else ""
+
+
+def extract_sha256_for(text: str, filename: str, *, allow_bare: bool = False) -> str:
+    """从校验和清单或 Release 正文里取出指定文件的 SHA256。"""
+    content = str(text or "")
+    target = str(filename or "").strip().lower()
+    if not content:
+        return ""
+    if target:
+        for line in content.splitlines():
+            if target not in line.lower():
+                continue
+            match = SHA256_PATTERN.search(line)
+            if match:
+                return match.group(1).lower()
+    if allow_bare:
+        matches = SHA256_PATTERN.findall(content)
+        if len(matches) == 1:
+            return matches[0].lower()
+    return ""
+
+
+def _is_checksum_asset(candidate_name: str, target_name: str) -> bool:
+    name = str(candidate_name or "").strip().lower()
+    if not name:
+        return False
+    if name in (f"{str(target_name).lower()}.sha256", f"{str(target_name).lower()}.sha256sum"):
+        return True
+    return any(
+        keyword in name
+        for keyword in ("sha256sums", "sha256sum.txt", "checksums", "checksum.txt", "sha256.txt")
+    )
+
+
+def ensure_trusted_download_url(url: str, allowed_hosts: tuple[str, ...] = TRUSTED_DOWNLOAD_HOSTS) -> str:
+    """要求下载地址使用 HTTPS 且主机在白名单内，否则拒绝下载。"""
+    text = str(url or "").strip()
+    if not text:
+        raise RuntimeError("下载地址为空")
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme.lower() != "https":
+        raise RuntimeError(f"下载地址不是 HTTPS，已拒绝：{text}")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise RuntimeError(f"下载地址缺少主机名：{text}")
+    for allowed in allowed_hosts:
+        allowed = allowed.lower()
+        if host == allowed or host.endswith("." + allowed):
+            return text
+    raise RuntimeError(f"下载地址不在受信任的发布域名内，已拒绝：{host}")
+
+
+def sha256_file(path: str | Path, chunk_size: int = HASH_CHUNK_SIZE) -> str:
+    digest = sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(max(4096, chunk_size)):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_downloaded_file(
+    path: str | Path,
+    *,
+    expected_size: int = 0,
+    expected_sha256: str = "",
+) -> None:
+    """校验已下载文件的大小与 SHA256，任一不符即抛出中文错误。"""
+    target = Path(path)
+    if not target.is_file():
+        raise RuntimeError("下载文件不存在，无法校验完整性")
+    actual_size = target.stat().st_size
+    if actual_size <= 0:
+        raise RuntimeError("下载文件为空，已终止")
+    if expected_size > 0 and actual_size != expected_size:
+        raise RuntimeError(f"下载文件大小不符（期望 {expected_size} 字节，实际 {actual_size} 字节）")
+    expected = normalize_sha256(expected_sha256)
+    if not expected:
+        return
+    actual = sha256_file(target)
+    if actual != expected:
+        logger.error("下载文件哈希不符 path=%s expected=%s actual=%s", target, expected, actual)
+        raise RuntimeError("下载文件 SHA256 校验失败，文件可能已损坏或被篡改")
+    logger.info("下载文件 SHA256 校验通过 path=%s", target)
 
 
 def compare_versions(left: str, right: str) -> int:

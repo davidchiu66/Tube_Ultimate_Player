@@ -14,6 +14,11 @@ logger = logging.getLogger("tube_player.ffmpeg")
 
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-essentials_build.7z"
 FFMPEG_ARCHIVE_NAME = "ffmpeg-8.0.1-essentials_build.7z"
+# 与 FFMPEG_DOWNLOAD_URL 一一对应的固定校验值（来源：发行方公布的 .sha256 附属文件）。
+# 更换 FFmpeg 版本时必须同步更新这三个常量，否则安装会被完整性校验拒绝。
+FFMPEG_ARCHIVE_SHA256 = "a0c715acca3839bfd203e600a7775b83cfe3ff928a4eceb9ca54f2982365901c"
+FFMPEG_ARCHIVE_SIZE = 32563789
+FFMPEG_TRUSTED_HOSTS = ("gyan.dev", "www.gyan.dev")
 
 
 @dataclass(slots=True)
@@ -21,6 +26,9 @@ class FfmpegInstallInfo:
     url: str
     archive_path: Path
     extract_dir: Path
+    sha256: str = FFMPEG_ARCHIVE_SHA256
+    size: int = FFMPEG_ARCHIVE_SIZE
+    trusted_hosts: tuple[str, ...] = FFMPEG_TRUSTED_HOSTS
 
 
 class FfmpegInstallService:

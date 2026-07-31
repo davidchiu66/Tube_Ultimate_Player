@@ -14,7 +14,7 @@ class PlaybackReturnTests(unittest.TestCase):
         state = SimpleNamespace(
             _playback_return_widget=home,
             player_page=player,
-            playlist_page=playlist,
+            _lazy_pages={"playlist": playlist},
             stack=SimpleNamespace(currentWidget=lambda: player),
         )
 
@@ -32,7 +32,7 @@ class PlaybackReturnTests(unittest.TestCase):
         state = SimpleNamespace(
             _playback_return_widget=home,
             player_page=player,
-            playlist_page=playlist,
+            _lazy_pages={"playlist": playlist},
             stack=SimpleNamespace(currentWidget=lambda: favorite),
         )
 

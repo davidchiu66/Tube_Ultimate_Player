@@ -12,13 +12,14 @@ from pathlib import Path
 
 from app_paths import UPDATE_DIR
 from services.config_service import ConfigService, detect_js_runtime
-from services.update_service import UpdateService
+from services.update_service import UpdateService, extract_sha256_for
 
 
 logger = logging.getLogger("tube_player.runtime")
 
 NODE_INDEX_URL = "https://nodejs.org/dist/index.json"
 NODE_WEBSITE_URL = "https://nodejs.org/zh-cn/download"
+NODE_TRUSTED_HOSTS = ("nodejs.org",)
 
 
 @dataclass(slots=True)
@@ -89,6 +90,20 @@ class RuntimeInstallService:
     def installer_target_path(self, info: NodeInstallerInfo) -> Path:
         UPDATE_DIR.mkdir(parents=True, exist_ok=True)
         return UPDATE_DIR / info.filename
+
+    def fetch_installer_sha256(self, info: NodeInstallerInfo) -> str:
+        """读取 nodejs.org 官方 SHASUMS256.txt，取出安装包的期望哈希。"""
+        url = f"https://nodejs.org/dist/{info.version}/SHASUMS256.txt"
+        try:
+            with self.update_service.open_url(url) as response:
+                text = response.read(512 * 1024).decode("utf-8", errors="replace")
+        except (OSError, urllib.error.URLError) as exc:
+            logger.warning("读取 Node.js 校验和清单失败 url=%s error=%s", url, exc)
+            return ""
+        digest = extract_sha256_for(text, info.filename)
+        if not digest:
+            logger.warning("Node.js 校验和清单中没有 %s", info.filename)
+        return digest
 
     def launch_installer(self, path: str | Path) -> None:
         if not sys.platform.startswith("win"):

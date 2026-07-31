@@ -23,6 +23,8 @@ from ui.thumbnail_cache import ThumbnailCache
 CARD_SIZE = 220
 THUMBNAIL_SIZE = 126
 GRID_SPACING = 14
+# 每批构建的卡片数：一批做完就让事件循环喘口气，避免首屏长时间无响应。
+CARD_BATCH_SIZE = 12
 
 
 class HomeVideoCard(QFrame):
@@ -37,6 +39,7 @@ class HomeVideoCard(QFrame):
         self.video = video
         self._network = network
         self._thumbnail_cache = thumbnail_cache
+        self._thumbnail_requested = False
 
         self.setObjectName("HomeVideoCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -92,9 +95,20 @@ class HomeVideoCard(QFrame):
         layout.addWidget(self.meta_label)
         layout.addStretch(1)
 
-        layout.activate()
+        # 不在构造函数里 activate() 布局、也不立即请求封面：
+        # 一页有 50+ 张卡片，逐张强制布局并发起网络请求会让首屏卡住数百毫秒。
         self._apply_title()
+
+    def ensure_thumbnail_loaded(self) -> None:
+        """进入视口后才真正请求封面。"""
+        if self._thumbnail_requested:
+            return
+        self._thumbnail_requested = True
         self._load_thumbnail()
+
+    def release_thumbnail_request(self) -> None:
+        """卡片销毁前注销等待登记，避免回调写入已析构的控件。"""
+        self._thumbnail_cache.cancel_for(self.thumbnail_label)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -154,6 +168,15 @@ class HomePage(QWidget):
         self._page = 1
         self._has_next = False
         self._last_columns = 0
+        self._pending_videos: list[HomeVideo] = []
+        self._batch_timer = QTimer(self)
+        self._batch_timer.setSingleShot(True)
+        self._batch_timer.setInterval(0)
+        self._batch_timer.timeout.connect(self._build_next_batch)
+        self._thumbnail_timer = QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.setInterval(60)
+        self._thumbnail_timer.timeout.connect(self._load_visible_thumbnails)
 
         self._relayout_timer = QTimer(self)
         self._relayout_timer.setSingleShot(True)
@@ -193,6 +216,7 @@ class HomePage(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setWidget(self.grid_host)
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumbnail_load)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -210,6 +234,7 @@ class HomePage(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._relayout_timer.start()
+        self._schedule_visible_thumbnail_load()
 
     def mode(self) -> str:
         return self._mode
@@ -260,7 +285,24 @@ class HomePage(QWidget):
             self.set_home_context(page, has_next)
 
         self._clear_cards()
-        for video in videos:
+        # 分批构建：先出首屏，其余卡片交给事件循环逐批补齐；
+        # 观察行为不变——全部批次完成后卡片数量、顺序、选中项与一次性构建一致。
+        self._pending_videos = list(videos)
+        self._build_next_batch()
+
+        if self._mode == "search":
+            self.status_label.setText(f"搜索“{keyword}”第 {page} 页，共加载 {len(videos)} 个视频")
+        else:
+            self.status_label.setText(f"首页第 {page} 页，共加载 {len(videos)} 个视频")
+        self._update_pagination()
+
+    def _build_next_batch(self) -> None:
+        if not self._pending_videos:
+            return
+        batch = self._pending_videos[:CARD_BATCH_SIZE]
+        del self._pending_videos[:CARD_BATCH_SIZE]
+        first_batch = not self._cards
+        for video in batch:
             card = HomeVideoCard(video, self._network, self._thumbnail_cache)
             card.clicked.connect(self._select_card)
             card.double_clicked.connect(self._play_card)
@@ -272,13 +314,25 @@ class HomePage(QWidget):
 
         self._last_columns = 0
         self._relayout_cards()
-        if self._mode == "search":
-            self.status_label.setText(f"搜索“{keyword}”第 {page} 页，共加载 {len(videos)} 个视频")
-        else:
-            self.status_label.setText(f"首页第 {page} 页，共加载 {len(videos)} 个视频")
-        if self._cards:
+        if first_batch and self._cards:
             self._select_card(self._cards[0])
-        self._update_pagination()
+        self._schedule_visible_thumbnail_load()
+        if self._pending_videos:
+            self._batch_timer.start()
+
+    def _schedule_visible_thumbnail_load(self, _value: int | None = None) -> None:
+        self._thumbnail_timer.start()
+
+    def _load_visible_thumbnails(self) -> None:
+        if not self._cards:
+            return
+        viewport = self.scroll_area.viewport()
+        # 上下各多预取一个卡片高度，滚动时封面已经就位。
+        visible = viewport.rect().adjusted(0, -CARD_SIZE, 0, CARD_SIZE)
+        for card in self._cards:
+            top_left = card.mapTo(viewport, card.rect().topLeft())
+            if visible.intersects(card.rect().translated(top_left)):
+                card.ensure_thumbnail_loaded()
 
     def set_error(self, message: str) -> None:
         self._finish_loading()
@@ -324,6 +378,12 @@ class HomePage(QWidget):
     def _clear_cards(self) -> None:
         self._selected_card = None
         self._last_columns = 0
+        self._batch_timer.stop()
+        self._thumbnail_timer.stop()
+        self._pending_videos = []
+        # 先注销缩略图等待登记再销毁控件，避免回调落到已析构的 QLabel 上。
+        for card in self._cards:
+            card.release_thumbnail_request()
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()

@@ -40,3 +40,6 @@ runtime/
 3rdpart/libmpv.so*
 3rdpart/licenses/
 3rdpart/third-party-manifest.sha256
+
+# Claude Code local settings
+.claude/settings.local.json

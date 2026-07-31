@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import threading
+from functools import wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QInputDialog,
     QMainWindow,
     QMessageBox,
@@ -32,7 +36,7 @@ from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, SavedPlaylis
 from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
-from services.runtime_install_service import RuntimeInstallService
+from services.runtime_install_service import NODE_TRUSTED_HOSTS, RuntimeInstallService
 from services.update_service import REPO_URL, UpdateCheckResult, UpdateService
 from ui.about_page import AboutPage
 from ui.cast_dialog import DlnaCastDialog
@@ -58,6 +62,26 @@ from workers.update_download_worker import UpdateDownloadWorker
 
 
 logger = logging.getLogger("tube_player.ui")
+
+# 退出时等待线程池收敛的上限，超时后记录告警并继续走关闭流程。
+SHUTDOWN_WAIT_MS = 3000
+
+
+def _skip_after_shutdown(method):
+    """关闭流程开始后丢弃后台 worker 的回调。
+
+    线程池 worker 的信号可能在 closeEvent 之后才排到事件队列，此时 mpv、DLNA
+    中继等依赖对象已经释放，继续执行槽函数会访问悬空资源。
+    """
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if getattr(self, "_shutting_down", False):
+            logger.debug("忽略关闭期间的回调 %s", method.__name__)
+            return None
+        return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class MainWindow(QMainWindow):
@@ -126,6 +150,7 @@ class MainWindow(QMainWindow):
         self._pending_node_installer_path = ""
         self._pending_ffmpeg_info: FfmpegInstallInfo | None = None
         self._ffmpeg_progress_dialog: QProgressDialog | None = None
+        self._shutting_down = False
 
         self.top_bar_widget = PlayerToolbar(self)
         self.url_edit = self.top_bar_widget.search_edit
@@ -143,23 +168,14 @@ class MainWindow(QMainWindow):
         self._is_topmost = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
 
         self.stack = QStackedWidget()
+        # 首页与播放页启动后立刻可见，必须预先构建；其余页面在首次访问时再建，
+        # 以缩短冷启动时间（每个页面的信号连接与初始状态都在对应工厂里补齐）。
+        self._lazy_pages: dict[str, QWidget] = {}
         self.home_page = HomePage()
         self.player_page = PlayerPage(self.config)
-        self.playlist_page = PlaylistPage()
-        self.download_page = DownloadPage()
-        self.favorite_page = FavoritePage(self.favorites)
-        self.history_page = HistoryPage(self.history)
-        self.settings_page = SettingsPage(self.config)
-        self.about_page = AboutPage()
 
         self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.player_page)
-        self.stack.addWidget(self.playlist_page)
-        self.stack.addWidget(self.download_page)
-        self.stack.addWidget(self.favorite_page)
-        self.stack.addWidget(self.history_page)
-        self.stack.addWidget(self.settings_page)
-        self.stack.addWidget(self.about_page)
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -171,12 +187,9 @@ class MainWindow(QMainWindow):
 
         self.mpv = MpvPlayer(self.player_page.video_widget, self.config)
         self._connect_signals()
-        self._restore_download_tasks()
-        self._refresh_saved_playlists()
         self.player_page.set_volume(int(self.config.get("player.volume", 80)))
         self.player_page.set_speed(float(self.config.get("player.speed", 1.0)))
-        self._sync_about_page()
-        self._refresh_runtime_status()
+        self._refresh_saved_playlists()
         self.stack.setCurrentWidget(self.home_page)
         self._refresh_favorite_views()
         QTimer.singleShot(0, self.load_home)
@@ -185,6 +198,112 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._show_root_session_warning)
         self.top_bar_widget.set_topmost_state(self._is_topmost)
         logger.info("main window initialized")
+
+    # ------------------------------------------------------------------
+    # 懒加载页面
+    # ------------------------------------------------------------------
+
+    @property
+    def playlist_page(self) -> PlaylistPage:
+        return self._page("playlist")
+
+    @property
+    def download_page(self) -> DownloadPage:
+        return self._page("download")
+
+    @property
+    def favorite_page(self) -> FavoritePage:
+        return self._page("favorite")
+
+    @property
+    def history_page(self) -> HistoryPage:
+        return self._page("history")
+
+    @property
+    def settings_page(self) -> SettingsPage:
+        return self._page("settings")
+
+    @property
+    def about_page(self) -> AboutPage:
+        return self._page("about")
+
+    def _page(self, name: str) -> QWidget:
+        """返回指定页面，必要时先构建它。"""
+        page = self._lazy_pages.get(name)
+        if page is None:
+            page = getattr(self, f"_create_{name}_page")()
+            self._lazy_pages[name] = page
+            self.stack.addWidget(page)
+            logger.info("lazy page created name=%s", name)
+        return page
+
+    def _created_page(self, name: str):
+        """只返回已经构建过的页面，避免同步状态时把页面提前建出来。"""
+        return self._lazy_pages.get(name)
+
+    def _create_playlist_page(self) -> PlaylistPage:
+        page = PlaylistPage()
+        page.back_requested.connect(self._show_player_page)
+        page.play_entry_requested.connect(self._play_playlist_from_page)
+        page.download_entries_requested.connect(self._download_playlist_entries)
+        page.save_requested.connect(self._save_active_playlist)
+        page.load_saved_requested.connect(self._load_saved_playlist)
+        page.delete_saved_requested.connect(self._delete_saved_playlist)
+        page.auto_play_changed.connect(self._set_playlist_auto_play)
+        if self.current_playlist is not None:
+            page.set_playlist(
+                self.current_playlist,
+                current_index=self.current_playlist_index,
+                auto_play_next=self.current_playlist_auto_play,
+            )
+        page.set_saved_playlists(self.playlists.all_playlists(), self.current_playlist_key)
+        return page
+
+    def _create_download_page(self) -> DownloadPage:
+        page = DownloadPage()
+        page.pause_requested.connect(self.download_manager.pause_task)
+        page.start_requested.connect(self.download_manager.start_task)
+        page.delete_requested.connect(self.download_manager.delete_task)
+        page.play_file_requested.connect(self.play_local_file)
+        self.download_manager.task_added.connect(page.add_task)
+        self.download_manager.task_changed.connect(page.update_task)
+        self.download_manager.task_removed.connect(page.remove_task)
+        for task in self.download_manager.tasks():
+            page.add_task(task)
+        return page
+
+    def _create_favorite_page(self) -> FavoritePage:
+        page = FavoritePage(self.favorites)
+        page.play_requested.connect(self.play_url)
+        page.remove_requested.connect(self._remove_favorite)
+        return page
+
+    def _create_history_page(self) -> HistoryPage:
+        page = HistoryPage(self.history)
+        page.play_requested.connect(self.play_url)
+        return page
+
+    def _create_settings_page(self) -> SettingsPage:
+        page = SettingsPage(self.config)
+        page.settings_saved.connect(self._settings_saved)
+        page.install_node_requested.connect(self._install_node_runtime)
+        page.open_node_site_requested.connect(self._open_node_official_site)
+        page.set_runtime_status(self.runtime_install_service.detect_runtime_status())
+        return page
+
+    def _create_about_page(self) -> AboutPage:
+        page = AboutPage()
+        page.open_repo_requested.connect(lambda: QDesktopServices.openUrl(QUrl(REPO_URL)))
+        page.open_update_folder_requested.connect(self._open_update_folder)
+        page.check_update_requested.connect(self._check_updates)
+        page.upgrade_requested.connect(self._start_upgrade_download)
+        _mode, mode_label = self.update_service.detect_install_mode()
+        self._apply_about_page_defaults(
+            page,
+            current_version=self.update_service.local_version(),
+            mode_label=mode_label,
+        )
+        return page
 
     def _show_root_session_warning(self) -> None:
         QMessageBox.warning(
@@ -213,24 +332,6 @@ class MainWindow(QMainWindow):
         self.home_page.favorite_requested.connect(self._favorite_home_video)
         self.home_page.download_requested.connect(self._download_home_video)
         self.home_page.page_requested.connect(self._load_page)
-        self.playlist_page.back_requested.connect(self._show_player_page)
-        self.playlist_page.play_entry_requested.connect(self._play_playlist_from_page)
-        self.playlist_page.download_entries_requested.connect(self._download_playlist_entries)
-        self.playlist_page.save_requested.connect(self._save_active_playlist)
-        self.playlist_page.load_saved_requested.connect(self._load_saved_playlist)
-        self.playlist_page.delete_saved_requested.connect(self._delete_saved_playlist)
-        self.playlist_page.auto_play_changed.connect(self._set_playlist_auto_play)
-        self.favorite_page.play_requested.connect(self.play_url)
-        self.favorite_page.remove_requested.connect(self._remove_favorite)
-        self.history_page.play_requested.connect(self.play_url)
-        self.settings_page.settings_saved.connect(self._settings_saved)
-        self.settings_page.install_node_requested.connect(self._install_node_runtime)
-        self.settings_page.open_node_site_requested.connect(self.runtime_install_service.open_official_site)
-
-        self.about_page.open_repo_requested.connect(lambda: QDesktopServices.openUrl(QUrl(REPO_URL)))
-        self.about_page.open_update_folder_requested.connect(self._open_update_folder)
-        self.about_page.check_update_requested.connect(self._check_updates)
-        self.about_page.upgrade_requested.connect(self._start_upgrade_download)
 
         self.player_page.play_pause_requested.connect(self._toggle_play_pause)
         self.player_page.stop_requested.connect(self._stop_playback)
@@ -251,13 +352,6 @@ class MainWindow(QMainWindow):
         self.player_page.playlist_delete_requested.connect(self._delete_saved_playlist)
         self.player_page.playlist_auto_play_changed.connect(self._set_playlist_auto_play)
 
-        self.download_page.pause_requested.connect(self.download_manager.pause_task)
-        self.download_page.start_requested.connect(self.download_manager.start_task)
-        self.download_page.delete_requested.connect(self.download_manager.delete_task)
-        self.download_page.play_file_requested.connect(self.play_local_file)
-        self.download_manager.task_added.connect(self.download_page.add_task)
-        self.download_manager.task_changed.connect(self.download_page.update_task)
-        self.download_manager.task_removed.connect(self.download_page.remove_task)
         self.download_manager.message.connect(self.toast.show_message)
 
         self.mpv.position_changed.connect(self.player_page.update_position)
@@ -285,10 +379,16 @@ class MainWindow(QMainWindow):
         height = self._adaptive_window_length(available.height(), preferred=760, minimum=520)
         self.setMinimumSize(min(640, width), min(420, height))
         self.resize(width, height)
-        self._move_inside_available_geometry()
 
     @staticmethod
     def _adaptive_window_length(available: int, *, preferred: int, minimum: int) -> int:
+        """返回不超过工作区的窗口边长，因此无需在显示后再夹取窗口位置。
+
+        注意：不要再加"把窗口挪回工作区"的逻辑。Windows 的最大化窗口 frame 会向左/右/下
+        各外扩 8px 不可见阴影边框（frameGeometry 起点为负数），按工作区夹取会误判为越界并
+        调用 move()，而 Windows 拒绝移动最大化窗口，只会反复打印
+        QWindowsWindow::setGeometry: Unable to set geometry 警告。
+        """
         if available <= 0:
             return preferred
         margin = max(24, min(80, int(available * 0.06)))
@@ -297,50 +397,34 @@ class MainWindow(QMainWindow):
             return usable
         return min(preferred, usable)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        QTimer.singleShot(0, self._fit_inside_available_screen)
-
-    def _fit_inside_available_screen(self) -> None:
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        target_width = min(self.width(), available.width())
-        target_height = min(self.height(), available.height())
-        if target_width != self.width() or target_height != self.height():
-            self.resize(target_width, target_height)
-        self._move_inside_available_geometry()
-
-    def _move_inside_available_geometry(self) -> None:
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        frame = self.frameGeometry()
-        x = min(max(frame.x(), available.left()), max(available.left(), available.right() - frame.width() + 1))
-        y = min(max(frame.y(), available.top()), max(available.top(), available.bottom() - frame.height() + 1))
-        if x != frame.x() or y != frame.y():
-            self.move(x, y)
-
-    def _restore_download_tasks(self) -> None:
-        for task in self.download_manager.tasks():
-            self.download_page.add_task(task)
+    @staticmethod
+    def _apply_about_page_defaults(page: AboutPage, *, current_version: str = "", mode_label: str = "") -> None:
+        page.set_current_version(current_version)
+        page.set_install_mode(mode_label)
+        page.set_latest_version("-")
+        page.set_release_notes("")
+        page.set_status("可在这里检测新版本并查看发布说明。")
+        page.set_upgrade_available(False)
+        page.set_upgrade_progress(False, "")
 
     def _sync_about_page(self) -> None:
+        # 关于页尚未构建时无需同步，构建时工厂会自行读取最新版本信息。
+        page = self._created_page("about")
+        if page is None:
+            return
         current_version = self.update_service.local_version()
         _mode, mode_label = self.update_service.detect_install_mode()
-        self.about_page.set_current_version(current_version)
-        self.about_page.set_install_mode(mode_label)
-        self.about_page.set_latest_version("-")
-        self.about_page.set_release_notes("")
-        self.about_page.set_status("可在这里检测新版本并查看发布说明。")
-        self.about_page.set_upgrade_available(False)
-        self.about_page.set_upgrade_progress(False, "")
+        self._apply_about_page_defaults(page, current_version=current_version, mode_label=mode_label)
 
     def _refresh_runtime_status(self) -> None:
-        status = self.runtime_install_service.detect_runtime_status()
-        self.settings_page.set_runtime_status(status)
+        page = self._created_page("settings")
+        if page is None:
+            return
+        page.set_runtime_status(self.runtime_install_service.detect_runtime_status())
+
+    def _open_node_official_site(self) -> None:
+        # runtime_install_service 会在设置保存后被重建，因此不能直接连它的绑定方法。
+        self.runtime_install_service.open_official_site()
 
     def _show_play_url_dialog(self) -> None:
         dialog = UrlPlayDialog(self)
@@ -462,6 +546,7 @@ class MainWindow(QMainWindow):
             return
         self._start_home_load(self.home_page.page(), force_refresh=True)
 
+    @_skip_after_shutdown
     def _home_loaded(self, videos: list[HomeVideo], has_next: bool) -> None:
         logger.info("home loaded page=%s count=%s has_next=%s", self._home_page, len(videos), has_next)
         self._home_cache = list(videos)
@@ -470,10 +555,12 @@ class MainWindow(QMainWindow):
         self.home_page.set_home_context(self._home_page, has_next, source_label=self.resolver.home_source_label())
         self.home_page.set_favorite_ids(self.favorites.favorite_ids())
 
+    @_skip_after_shutdown
     def _home_failed(self, message: str) -> None:
         logger.error("home load failed: %s", message)
         self.home_page.set_error(message)
 
+    @_skip_after_shutdown
     def _search_loaded(self, videos: list[HomeVideo], has_next: bool) -> None:
         logger.info(
             "search loaded keyword=%s page=%s count=%s has_next=%s",
@@ -491,10 +578,12 @@ class MainWindow(QMainWindow):
         )
         self.home_page.set_favorite_ids(self.favorites.favorite_ids())
 
+    @_skip_after_shutdown
     def _search_failed(self, message: str) -> None:
         logger.error("search failed keyword=%s page=%s: %s", self._search_keyword, self._search_page, message)
         self.home_page.set_error(message)
 
+    @_skip_after_shutdown
     def _playlist_loaded(self, playlist: PlaylistInfo) -> None:
         logger.info("playlist loaded title=%s count=%s", playlist.title, len(playlist.entries))
         if not playlist.entries:
@@ -508,6 +597,7 @@ class MainWindow(QMainWindow):
         if initial_index >= 0:
             self._play_playlist_entry(playlist, initial_index)
 
+    @_skip_after_shutdown
     def _playlist_failed(self, message: str) -> None:
         self._pending_playlist_video_id = ""
         logger.error("playlist load failed: %s", message)
@@ -528,7 +618,10 @@ class MainWindow(QMainWindow):
         self.current_playlist_index = current_index
         self.current_playlist_key = playlist_key
         self.current_playlist_auto_play = auto_play_next
-        self.playlist_page.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
+        # 播放列表页可能尚未构建，此时状态已记在 current_playlist_*，构建时会自动回放。
+        page = self._created_page("playlist")
+        if page is not None:
+            page.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
         self.player_page.set_playlist_context(playlist, current_index=current_index, auto_play_next=auto_play_next)
         self._refresh_saved_playlists(current_key=playlist_key)
 
@@ -538,7 +631,9 @@ class MainWindow(QMainWindow):
         self.current_playlist_index = -1
         self.current_playlist_key = ""
         self.current_playlist_auto_play = True
-        self.playlist_page.clear_playlist()
+        page = self._created_page("playlist")
+        if page is not None:
+            page.clear_playlist()
         self.player_page.clear_playlist_context()
 
     def _play_playlist_from_page(self, playlist: PlaylistInfo, index: int) -> None:
@@ -565,7 +660,9 @@ class MainWindow(QMainWindow):
         self._remember_playback_return_widget()
         self.current_playlist = playlist
         self.current_playlist_index = index
-        self.playlist_page.set_current_index(index)
+        page = self._created_page("playlist")
+        if page is not None:
+            page.set_current_index(index)
         self.player_page.set_playlist_current_index(index)
         self.stack.setCurrentWidget(self.player_page)
         self.player_page.set_loading(True, f"正在解析播放列表第 {index + 1} 条视频，请稍候...")
@@ -651,11 +748,13 @@ class MainWindow(QMainWindow):
     def _set_playlist_auto_play(self, enabled: bool) -> None:
         self.current_playlist_auto_play = bool(enabled)
         if self.current_playlist:
-            self.playlist_page.set_playlist(
-                self.current_playlist,
-                current_index=self.current_playlist_index,
-                auto_play_next=self.current_playlist_auto_play,
-            )
+            page = self._created_page("playlist")
+            if page is not None:
+                page.set_playlist(
+                    self.current_playlist,
+                    current_index=self.current_playlist_index,
+                    auto_play_next=self.current_playlist_auto_play,
+                )
             self.player_page.set_playlist_context(
                 self.current_playlist,
                 current_index=self.current_playlist_index,
@@ -668,7 +767,9 @@ class MainWindow(QMainWindow):
     def _refresh_saved_playlists(self, current_key: str = "") -> None:
         playlists = self.playlists.all_playlists()
         selected_key = current_key or self.current_playlist_key
-        self.playlist_page.set_saved_playlists(playlists, selected_key)
+        page = self._created_page("playlist")
+        if page is not None:
+            page.set_saved_playlists(playlists, selected_key)
         self.player_page.set_playlist_saved_items(playlists, selected_key)
 
     def _saved_to_playlist(self, saved: SavedPlaylist) -> PlaylistInfo:
@@ -693,10 +794,30 @@ class MainWindow(QMainWindow):
                 return index
         return -1
 
+    @_skip_after_shutdown
     def _resolved(self, video: VideoInfo) -> None:
         self.current_video = video
         self.current_local_media_path = ""
         quality = self._select_default_quality(video)
+        if quality is None:
+            logger.error(
+                "video resolved without playable quality id=%s title=%s",
+                video.video_id,
+                video.title,
+            )
+            self.current_quality_label = ""
+            self.player_page.set_loading(False)
+            self.player_page.set_playback_available(False)
+            self.player_page.set_cast_available(False)
+            QMessageBox.critical(
+                self,
+                "解析失败",
+                "该视频没有可播放的清晰度。\n\n"
+                "可能原因：视频为付费/会员内容、直播尚未开始、地区或年龄限制、"
+                "yt-dlp 版本过旧或 Cookie 已失效。\n"
+                "详细日志已写入运行目录下的 logs/app.log 和 logs/yt-dlp.log。",
+            )
+            return
         self.current_quality_label = quality.label
         logger.info(
             "video resolved id=%s title=%s selected_quality=%s qualities=%s subtitles=%s",
@@ -714,7 +835,9 @@ class MainWindow(QMainWindow):
                 current_index=self.current_playlist_index,
                 auto_play_next=self.current_playlist_auto_play,
             )
-            self.playlist_page.set_current_index(self.current_playlist_index)
+            playlist_page = self._created_page("playlist")
+            if playlist_page is not None:
+                playlist_page.set_current_index(self.current_playlist_index)
 
         try:
             self.mpv.load(quality.video_url, quality.audio_url, headers=video.http_headers)
@@ -724,13 +847,17 @@ class MainWindow(QMainWindow):
             self.player_page.set_cast_available(True)
             self.player_page.set_paused(False)
             self.history.record_play(video)
-            self.history_page.refresh()
+            # 历史页未构建时，其构造函数会读取最新数据，无需在这里刷新。
+            history_page = self._created_page("history")
+            if history_page is not None:
+                history_page.refresh()
             if self.current_playlist is None:
                 self._schedule_creator_playlist(video)
         except Exception as exc:
             logger.exception("playback load failed")
             QMessageBox.critical(self, "播放失败", str(exc))
 
+    @_skip_after_shutdown
     def _resolve_failed(self, message: str) -> None:
         logger.error("resolve failed: %s", message)
         QMessageBox.critical(
@@ -743,11 +870,12 @@ class MainWindow(QMainWindow):
             f"{message}",
         )
 
-    def _select_default_quality(self, video: VideoInfo) -> VideoQuality:
+    def _select_default_quality(self, video: VideoInfo) -> VideoQuality | None:
         preferred = str(self.config.get("player.default_quality", "Auto") or "Auto")
         if preferred != "Auto" and preferred in video.qualities:
             return video.qualities[preferred]
-        return next(iter(video.qualities.values()))
+        # 解析成功但没有任何清晰度时返回 None，由调用方给出提示，避免 StopIteration 逃逸。
+        return next(iter(video.qualities.values()), None)
 
     def _change_quality(self, label: str) -> None:
         if not self.current_video or label == self.current_quality_label:
@@ -873,7 +1001,9 @@ class MainWindow(QMainWindow):
     def _refresh_favorite_views(self) -> None:
         favorite_ids = self.favorites.favorite_ids()
         self.home_page.set_favorite_ids(favorite_ids)
-        self.favorite_page.refresh()
+        page = self._created_page("favorite")
+        if page is not None:
+            page.refresh()
         if self.current_video:
             self.player_page.set_favorite_state(self.current_video.video_id in favorite_ids, available=True)
 
@@ -1125,6 +1255,7 @@ class MainWindow(QMainWindow):
         return request_id
 
     @Slot(int, str, object)
+    @_skip_after_shutdown
     def _dlna_action_succeeded(self, request_id: int, action: str, result) -> None:
         context = self._dlna_action_workers.get(request_id)
         if context is None:
@@ -1179,6 +1310,7 @@ class MainWindow(QMainWindow):
             self.toast.show_message(f"已停止向 {device.friendly_name} 投屏")
 
     @Slot(int, str, str)
+    @_skip_after_shutdown
     def _dlna_action_failed(self, request_id: int, action: str, message: str) -> None:
         context = self._dlna_action_workers.get(request_id)
         if action == "cast" and request_id == self._dlna_pending_cast_request_id:
@@ -1195,6 +1327,7 @@ class MainWindow(QMainWindow):
         self.toast.show_message(f"{device_name} 投屏控制失败：{message}")
 
     @Slot(int)
+    @_skip_after_shutdown
     def _dlna_action_finished(self, request_id: int) -> None:
         self._dlna_action_workers.pop(request_id, None)
         self._dlna_stop_notify_requests.discard(request_id)
@@ -1269,6 +1402,7 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker, -1)
 
     @Slot(int, str, object)
+    @_skip_after_shutdown
     def _creator_playlist_loaded(
         self,
         generation: int,
@@ -1309,6 +1443,7 @@ class MainWindow(QMainWindow):
             self.toast.show_message(f"作者视频列表应用失败：{exc}")
 
     @Slot(int, str, str)
+    @_skip_after_shutdown
     def _creator_playlist_failed(self, generation: int, video_id: str, message: str) -> None:
         if not self._is_creator_playlist_request_current(generation, video_id):
             logger.debug("stale creator playlist failure ignored generation=%s video=%s", generation, video_id)
@@ -1317,6 +1452,7 @@ class MainWindow(QMainWindow):
         self.toast.show_message("作者视频列表加载失败，当前视频继续播放")
 
     @Slot(int, str)
+    @_skip_after_shutdown
     def _creator_playlist_worker_finished(self, generation: int, video_id: str) -> None:
         self._creator_playlist_workers.pop((generation, video_id), None)
         logger.info("creator playlist worker finished generation=%s video=%s", generation, video_id)
@@ -1368,9 +1504,10 @@ class MainWindow(QMainWindow):
 
     def _remember_playback_return_widget(self, widget: QWidget | None = None) -> None:
         candidate = widget or self.stack.currentWidget()
+        # 直接查已构建页面表，避免仅为了比较身份就把懒加载页面建出来。
         if (
             self._playback_return_widget is not None
-            and (candidate is self.player_page or candidate is self.playlist_page)
+            and (candidate is self.player_page or candidate is self._lazy_pages.get("playlist"))
         ):
             return
         self._playback_return_widget = candidate
@@ -1381,22 +1518,16 @@ class MainWindow(QMainWindow):
         if target is None:
             self._show_home()
             return
-        if target is self.home_page:
-            self.stack.setCurrentWidget(self.home_page)
-            return
-        if target is self.download_page:
-            self.stack.setCurrentWidget(self.download_page)
-            return
-        if target is self.favorite_page:
-            self.favorite_page.refresh()
-            self.stack.setCurrentWidget(self.favorite_page)
-            return
-        if target is self.history_page:
-            self.history_page.refresh()
-            self.stack.setCurrentWidget(self.history_page)
-            return
-        if target in {self.player_page, self.playlist_page, self.settings_page, self.about_page}:
+        if target is self.home_page or target is self.player_page:
             self.stack.setCurrentWidget(target)
+            return
+        # 能成为返回目标的页面一定已经构建过，因此只在已建页面里查找。
+        for name, page in self._lazy_pages.items():
+            if page is not target:
+                continue
+            if name in {"favorite", "history"}:
+                page.refresh()
+            self.stack.setCurrentWidget(page)
             return
         self._show_home()
 
@@ -1474,6 +1605,7 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self.about_page.set_checking(False))
         self.thread_pool.start(worker)
 
+    @_skip_after_shutdown
     def _update_check_succeeded(self, result: UpdateCheckResult) -> None:
         logger.info(
             "update check result current=%s latest=%s has_update=%s asset=%s",
@@ -1500,6 +1632,7 @@ class MainWindow(QMainWindow):
                 message = "已获取版本信息，但没有找到匹配当前运行形态的升级包。"
             self.about_page.set_status(message)
 
+    @_skip_after_shutdown
     def _update_check_failed(self, message: str) -> None:
         logger.error("update check failed: %s", message)
         self.about_page.set_status(f"检测版本失败：{message}")
@@ -1517,13 +1650,22 @@ class MainWindow(QMainWindow):
         self.about_page.set_upgrade_progress(True, f"正在下载升级包：{asset.name}")
         self.about_page.set_status("升级包下载中，请稍候...")
 
-        worker = UpdateDownloadWorker(self.update_service, asset.download_url, target_path, asset.name)
+        worker = UpdateDownloadWorker(
+            self.update_service,
+            asset.download_url,
+            target_path,
+            asset.name,
+            expected_size=asset.size,
+            expected_sha256_resolver=lambda: self.update_service.resolve_expected_sha256(result.release, asset),
+            verify_signature=asset.name.lower().endswith(".exe"),
+        )
         worker.signals.progress.connect(self._update_download_progress)
         worker.signals.success.connect(self._update_download_success)
         worker.signals.error.connect(self._update_download_failed)
         worker.signals.finished.connect(self._update_download_finished)
         self.thread_pool.start(worker)
 
+    @_skip_after_shutdown
     def _update_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
         if total > 0:
             size_text = f"{_format_bytes(downloaded)} / {_format_bytes(total)}"
@@ -1532,6 +1674,7 @@ class MainWindow(QMainWindow):
         message = f"正在下载升级包：{size_text}  {speed_text}".strip()
         self.about_page.set_upgrade_progress(True, message, percent)
 
+    @_skip_after_shutdown
     def _update_download_success(self, path: str) -> None:
         result = self._last_update_result
         mode_label = result.install_mode_label if result else "当前版本"
@@ -1586,8 +1729,25 @@ class MainWindow(QMainWindow):
             return
 
         self.about_page.set_status(status)
-        QTimer.singleShot(0, self.close)
+        QTimer.singleShot(0, self._quit_for_upgrade)
 
+    def _quit_for_upgrade(self) -> None:
+        """确保应用进程真正退出：升级脚本要等本进程结束才能替换文件或执行安装包。"""
+        logger.info("quitting for upgrade")
+        # 兜底：即使事件循环退出后仍有卡住的线程拖住进程，也要在超时后结束进程，
+        # 否则升级脚本会一直等待旧进程退出，表现为"安装包没有被执行"。
+        _arm_exit_watchdog()
+        try:
+            self.close()
+        except Exception:
+            logger.exception("close window before upgrade failed")
+        if not self.thread_pool.waitForDone(3000):
+            logger.warning("thread pool still busy before upgrade exit")
+        application = QApplication.instance()
+        if application is not None:
+            application.quit()
+
+    @_skip_after_shutdown
     def _update_download_failed(self, message: str) -> None:
         logger.error("update download failed: %s", message)
         self.about_page.set_upgrade_progress(False, f"升级包下载失败：{message}")
@@ -1595,6 +1755,7 @@ class MainWindow(QMainWindow):
         self.about_page.set_upgrade_available(bool(self._last_update_result and self._last_update_result.has_update))
         QMessageBox.warning(self, "下载升级包失败", message)
 
+    @_skip_after_shutdown
     def _update_download_finished(self) -> None:
         if self._last_update_result and self._last_update_result.has_update:
             self.about_page.set_upgrade_available(True)
@@ -1617,13 +1778,21 @@ class MainWindow(QMainWindow):
         self.settings_page.set_runtime_install_busy(True, f"正在下载 Node.js 安装包：{info.filename}")
         self._pending_node_installer_path = str(target_path)
 
-        worker = UpdateDownloadWorker(self.update_service, info.url, target_path, info.filename)
+        worker = UpdateDownloadWorker(
+            self.update_service,
+            info.url,
+            target_path,
+            info.filename,
+            expected_sha256_resolver=lambda: self.runtime_install_service.fetch_installer_sha256(info),
+            trusted_hosts=NODE_TRUSTED_HOSTS,
+        )
         worker.signals.progress.connect(self._node_download_progress)
         worker.signals.success.connect(self._node_download_success)
         worker.signals.error.connect(self._node_download_failed)
         worker.signals.finished.connect(lambda: self.settings_page.set_runtime_install_busy(False))
         self.thread_pool.start(worker)
 
+    @_skip_after_shutdown
     def _node_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
         if total > 0:
             text = f"Node.js 下载中：{_format_bytes(downloaded)} / {_format_bytes(total)}  {speed_text}"
@@ -1633,6 +1802,7 @@ class MainWindow(QMainWindow):
             text += f"  ({percent:.1f}%)"
         self.settings_page.set_runtime_install_progress(text)
 
+    @_skip_after_shutdown
     def _node_download_success(self, path: str) -> None:
         logger.info("node installer downloaded path=%s", path)
         try:
@@ -1651,6 +1821,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "启动安装程序失败", message)
             self.runtime_install_service.open_official_site()
 
+    @_skip_after_shutdown
     def _node_download_failed(self, message: str) -> None:
         logger.error("node installer download failed: %s", message)
         self.settings_page.set_runtime_install_progress(f"Node.js 下载失败：{message}")
@@ -1688,12 +1859,21 @@ class MainWindow(QMainWindow):
         self._pending_ffmpeg_info = info
         self._show_ffmpeg_progress("正在下载 FFmpeg...", 0.0, indeterminate=True)
 
-        worker = UpdateDownloadWorker(self.update_service, info.url, info.archive_path, info.archive_path.name)
+        worker = UpdateDownloadWorker(
+            self.update_service,
+            info.url,
+            info.archive_path,
+            info.archive_path.name,
+            expected_size=info.size,
+            expected_sha256=info.sha256,
+            trusted_hosts=info.trusted_hosts,
+        )
         worker.signals.progress.connect(self._ffmpeg_download_progress)
         worker.signals.success.connect(self._ffmpeg_download_success)
         worker.signals.error.connect(self._ffmpeg_download_failed)
         self.thread_pool.start(worker)
 
+    @_skip_after_shutdown
     def _ffmpeg_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
         if total > 0:
             message = f"正在下载 FFmpeg：{_format_bytes(downloaded)} / {_format_bytes(total)}  {speed_text}"
@@ -1702,21 +1882,24 @@ class MainWindow(QMainWindow):
             message = f"正在下载 FFmpeg：{_format_bytes(downloaded)}  {speed_text}"
             self._show_ffmpeg_progress(message, 0.0, indeterminate=True)
 
+    @_skip_after_shutdown
     def _ffmpeg_download_success(self, path: str) -> None:
         logger.info("ffmpeg archive downloaded path=%s", path)
         info = self._pending_ffmpeg_info or self.ffmpeg_install_service.install_info()
         self._show_ffmpeg_progress("FFmpeg 下载完成，正在解压...", 0.0, indeterminate=True)
 
-        worker = ArchiveExtractWorker(Path(path), info.extract_dir)
+        worker = ArchiveExtractWorker(Path(path), info.extract_dir, required_files=("ffmpeg.exe",))
         worker.signals.success.connect(self._ffmpeg_extract_success)
         worker.signals.error.connect(self._ffmpeg_extract_failed)
         self.thread_pool.start(worker)
 
+    @_skip_after_shutdown
     def _ffmpeg_download_failed(self, message: str) -> None:
         logger.error("ffmpeg download failed: %s", message)
         self._close_ffmpeg_progress()
         QMessageBox.warning(self, "FFmpeg 下载失败", message)
 
+    @_skip_after_shutdown
     def _ffmpeg_extract_success(self, _extract_dir: str) -> None:
         ffmpeg_dir = self.ffmpeg_install_service.locate_extracted_ffmpeg_dir()
         if not ffmpeg_dir:
@@ -1726,11 +1909,15 @@ class MainWindow(QMainWindow):
 
         self.config.set("download.ffmpeg_dir", ffmpeg_dir)
         self.config.save()
-        self.settings_page.ffmpeg_dir_edit.setText(ffmpeg_dir)
+        # 设置页未构建时，构造函数会从配置里读到新目录，这里只同步已打开的页面。
+        settings_page = self._created_page("settings")
+        if settings_page is not None:
+            settings_page.ffmpeg_dir_edit.setText(ffmpeg_dir)
         self.download_manager.reload_settings()
         self._close_ffmpeg_progress()
         QMessageBox.information(self, "FFmpeg 已安装", f"FFmpeg 已安装并写入设置：\n{ffmpeg_dir}")
 
+    @_skip_after_shutdown
     def _ffmpeg_extract_failed(self, message: str) -> None:
         logger.error("ffmpeg extract failed: %s", message)
         self._close_ffmpeg_progress()
@@ -1763,15 +1950,28 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
             logger.info("main window closing")
+            self._shutting_down = True
             self._invalidate_creator_playlist_request()
             self._dlna_position_timer.stop()
             self._dlna_volume_timer.stop()
+            # 先终止下载子进程，再等待线程池里的解析/搜索/投屏 worker 收敛，
+            # 最后才释放它们依赖的 DLNA 中继与 mpv；否则回调可能访问已销毁的对象而崩溃。
+            self.download_manager.shutdown()
+            if not self.thread_pool.waitForDone(SHUTDOWN_WAIT_MS):
+                logger.warning("后台任务在 %s 毫秒内未全部结束，继续退出流程", SHUTDOWN_WAIT_MS)
             self.dlna_media_server.stop()
             self.config.save()
             self.download_manager.flush()
             self.mpv.shutdown()
         finally:
             super().closeEvent(event)
+
+
+def _arm_exit_watchdog(timeout: float = 10.0) -> None:
+    """在升级前布置退出看门狗，超时仍未退出则强制结束进程。"""
+    watchdog = threading.Timer(timeout, lambda: os._exit(0))
+    watchdog.daemon = True
+    watchdog.start()
 
 
 def _format_bytes(value: int) -> str:

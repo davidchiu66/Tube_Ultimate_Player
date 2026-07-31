@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,7 +21,13 @@ from dlna.discovery import (
     parse_device_description,
     parse_ssdp_headers,
 )
-from dlna.media_server import DlnaMediaServer, DlnaMediaSource, build_ffmpeg_mux_command, mime_type_for_file
+from dlna.media_server import (
+    DlnaMediaServer,
+    DlnaMediaSource,
+    _RegisteredSource,
+    build_ffmpeg_mux_command,
+    mime_type_for_file,
+)
 from dlna.models import DlnaDevice
 from services.config_service import ConfigService
 
@@ -250,9 +257,13 @@ class DlnaHttpRelayTests(unittest.TestCase):
             relay._ensure_started("127.0.0.1", 0)
             token = "test-token"
             with relay._sources_lock:
-                relay._sources[token] = DlnaMediaSource(
-                    title="Video",
-                    video_url=f"http://127.0.0.1:{upstream.server_address[1]}/video",
+                relay._sources[token] = _RegisteredSource(
+                    source=DlnaMediaSource(
+                        title="Video",
+                        video_url=f"http://127.0.0.1:{upstream.server_address[1]}/video",
+                    ),
+                    allowed_host="127.0.0.1",
+                    expires_at=time.monotonic() + 60.0,
                 )
             relay_port = relay._server.server_address[1]
             request = urllib.request.Request(
@@ -278,11 +289,15 @@ class DlnaHttpRelayTests(unittest.TestCase):
                 relay._ensure_started("127.0.0.1", 0)
                 token = "local-token"
                 with relay._sources_lock:
-                    relay._sources[token] = DlnaMediaSource(
-                        title="sample.mp3",
-                        video_url="",
-                        file_path=str(media),
-                        mime_type=mime_type_for_file(media),
+                    relay._sources[token] = _RegisteredSource(
+                        source=DlnaMediaSource(
+                            title="sample.mp3",
+                            video_url="",
+                            file_path=str(media),
+                            mime_type=mime_type_for_file(media),
+                        ),
+                        allowed_host="127.0.0.1",
+                        expires_at=time.monotonic() + 60.0,
                     )
                 relay_port = relay._server.server_address[1]
                 request = urllib.request.Request(

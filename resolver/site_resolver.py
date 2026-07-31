@@ -877,8 +877,22 @@ class BilibiliResolver:
         if final_cookie:
             headers["Cookie"] = final_cookie
         req = urllib.request.Request(full_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        # 必须走 build_opener 而不是全局 urlopen：全局 opener 不带 ProxyHandler，
+        # 用户配置的代理会被静默忽略，B 站接口在需要代理的网络下必然失败。
+        opener = self._build_opener()
+        with opener.open(req, timeout=25) as resp:
             return resp.read().decode("utf-8", errors="replace")
+
+    def _build_opener(self) -> urllib.request.OpenerDirector:
+        """按调用构建 opener：OpenerDirector 非线程安全，不能在多个 worker 间复用。"""
+        handlers: list[urllib.request.BaseHandler] = []
+        _source, proxy = self.config.effective_proxy()
+        if proxy:
+            handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        else:
+            # 显式给出空代理映射，避免 urllib 回退去读环境变量里的 http_proxy。
+            handlers.append(urllib.request.ProxyHandler({}))
+        return urllib.request.build_opener(*handlers)
 
     def _preferred_cookie_header(self, url: str) -> str:
         browser_cookie = self._browser_cookie_header(url)

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
+from ui.text_elision import elide_multiline_text, format_seconds
 from ui.thumbnail_cache import ThumbnailCache
 
 
@@ -41,6 +42,8 @@ class PlaylistItemWidget(QFrame):
         self._network = network
         self._thumbnail_cache = thumbnail_cache
         self._thumbnail_requested = False
+        self._active = False
+        self._selected = False
         self.setObjectName("PlaylistOverlayItem")
         self.setFixedHeight(ITEM_HEIGHT)
 
@@ -86,10 +89,17 @@ class PlaylistItemWidget(QFrame):
         self._apply_title()
 
     def set_active(self, active: bool) -> None:
+        # 重绘（unpolish/polish）代价不低，状态没变时直接跳过。
+        if self._active == active:
+            return
+        self._active = active
         self.setProperty("active", active)
         self._refresh_style()
 
     def set_selected(self, selected: bool) -> None:
+        if self._selected == selected:
+            return
+        self._selected = selected
         self.setProperty("selected", selected)
         self._refresh_style()
 
@@ -113,7 +123,7 @@ class PlaylistItemWidget(QFrame):
 
     def _apply_title(self) -> None:
         width = max(80, self.width() - 180)
-        self.title_label.setText(elide_two_lines(self.title_label, self.entry.title, width))
+        self.title_label.setText(elide_multiline_text(self.title_label, self.entry.title, width, 2))
 
     def _load_thumbnail(self) -> None:
         self._thumbnail_cache.load(
@@ -141,7 +151,10 @@ class PlaylistOverlay(QFrame):
         self.setMouseTracking(True)
 
         self._playlist: PlaylistInfo | None = None
+        self._playlist_signature: tuple | None = None
         self._current_index = -1
+        self._active_row = -1
+        self._selected_rows: set[int] = set()
         self._saved_playlists: list[SavedPlaylist] = []
         self._open = False
         self._network = QNetworkAccessManager(self)
@@ -228,12 +241,17 @@ class PlaylistOverlay(QFrame):
         auto_play_next: bool = True,
     ) -> None:
         self._playlist = playlist
-        self._current_index = current_index
         self.auto_play_checkbox.blockSignals(True)
         self.auto_play_checkbox.setChecked(auto_play_next)
         self.auto_play_checkbox.blockSignals(False)
-        self.list_widget.clear()
-        if playlist is None or not playlist.entries:
+
+        signature = self._signature_for(playlist)
+        if signature is None:
+            self._playlist_signature = None
+            self._current_index = current_index
+            self._active_row = -1
+            self._selected_rows = set()
+            self.list_widget.clear()
             self.title_label.setText("播放列表")
             self._update_empty_state_text()
             self._update_button_state()
@@ -243,17 +261,41 @@ class PlaylistOverlay(QFrame):
 
         self.title_label.setText(playlist.title)
         self.meta_label.setText(f"{playlist.uploader or 'Unknown'} - {len(playlist.entries)} 条")
-        for index, entry in enumerate(playlist.entries):
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, index)
-            item.setSizeHint(self._item_size_hint())
-            self.list_widget.addItem(item)
-            widget = PlaylistItemWidget(entry, index, self._network, self._thumbnail_cache, self.list_widget)
-            self.list_widget.setItemWidget(item, widget)
+
+        if signature == self._playlist_signature:
+            self.set_current_index(current_index)
+            self._update_button_state()
+            return
+
+        self._playlist_signature = signature
+        self._selected_rows = set()
+        # 列表整体重建后旧的行号已失效，活动行必须一并复位。
+        self._active_row = -1
+        self.list_widget.blockSignals(True)
+        try:
+            self.list_widget.clear()
+            for index, entry in enumerate(playlist.entries):
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                item.setSizeHint(self._item_size_hint())
+                self.list_widget.addItem(item)
+                widget = PlaylistItemWidget(entry, index, self._network, self._thumbnail_cache, self.list_widget)
+                self.list_widget.setItemWidget(item, widget)
+        finally:
+            self.list_widget.blockSignals(False)
         self.set_current_index(current_index)
         self._sync_selection_visuals()
         self._update_button_state()
         self._schedule_visible_thumbnail_load()
+
+    @staticmethod
+    def _signature_for(playlist: PlaylistInfo | None) -> tuple | None:
+        if playlist is None or not playlist.entries:
+            return None
+        return tuple(
+            (entry.video_id, entry.title, entry.thumbnail, entry.duration, entry.uploader)
+            for entry in playlist.entries
+        )
 
     def set_saved_playlists(self, playlists: list[SavedPlaylist], current_key: str = "") -> None:
         self._saved_playlists = list(playlists)
@@ -274,15 +316,26 @@ class PlaylistOverlay(QFrame):
 
     def set_current_index(self, index: int) -> None:
         self._current_index = index
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            widget = self.list_widget.itemWidget(item)
-            if isinstance(widget, PlaylistItemWidget):
-                widget.set_active(row == index)
-            if row == index:
-                item.setSelected(True)
-                self.list_widget.scrollToItem(item)
+        # 只动"上一个活动行"和"新活动行"两行，避免整表 unpolish/polish。
+        if self._active_row != index:
+            previous = self._row_widget(self._active_row)
+            if previous is not None:
+                previous.set_active(False)
+            self._active_row = index
+        current = self._row_widget(index)
+        if current is not None:
+            current.set_active(True)
+        if 0 <= index < self.list_widget.count():
+            item = self.list_widget.item(index)
+            item.setSelected(True)
+            self.list_widget.scrollToItem(item)
         self._sync_selection_visuals()
+
+    def _row_widget(self, row: int) -> PlaylistItemWidget | None:
+        if not 0 <= row < self.list_widget.count():
+            return None
+        widget = self.list_widget.itemWidget(self.list_widget.item(row))
+        return widget if isinstance(widget, PlaylistItemWidget) else None
 
     def handle_pointer(self, pos: QPoint) -> None:
         if not self.has_available_content():
@@ -444,47 +497,13 @@ class PlaylistOverlay(QFrame):
             self.meta_label.setText("当前没有可用的播放列表")
 
     def _sync_selection_visuals(self) -> None:
-        for row in range(self.list_widget.count()):
-            item = self.list_widget.item(row)
-            widget = self.list_widget.itemWidget(item)
-            if isinstance(widget, PlaylistItemWidget):
-                widget.set_selected(item.isSelected())
+        # selectedIndexes 只返回选中项，配合上一轮的集合求对称差，
+        # 就只需要刷新真正发生变化的行（最终视觉状态与逐行遍历一致）。
+        current = {index.row() for index in self.list_widget.selectedIndexes()}
+        for row in current ^ self._selected_rows:
+            widget = self._row_widget(row)
+            if widget is not None:
+                widget.set_selected(row in current)
+        self._selected_rows = current
 
 
-def elide_two_lines(label: QLabel, text: str, width: int) -> str:
-    source = str(text or "").strip()
-    if not source:
-        return ""
-    metrics = label.fontMetrics()
-    words = source.split()
-    if not words:
-        return metrics.elidedText(source, Qt.TextElideMode.ElideRight, width * 2)
-
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if metrics.horizontalAdvance(candidate) <= width:
-            current = candidate
-            continue
-        if current:
-            lines.append(current)
-        current = word
-        if len(lines) == 1:
-            break
-    remainder_words = words[len(" ".join(lines + ([current] if current else [])).split()):]
-    if current and len(lines) < 2:
-        lines.append(current)
-    if remainder_words and lines:
-        tail = " ".join(remainder_words)
-        lines[-1] = metrics.elidedText(f"{lines[-1]} {tail}".strip(), Qt.TextElideMode.ElideRight, width)
-    return "\n".join(lines[:2])
-
-
-def format_seconds(seconds: int | float) -> str:
-    seconds = int(seconds or 0)
-    hours, remainder = divmod(seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"

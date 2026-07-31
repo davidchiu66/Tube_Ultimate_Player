@@ -25,7 +25,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services.config_service import ConfigService, detect_browser_cookie_sources
+from services.config_service import (
+    PROXY_MODE_AUTO,
+    PROXY_MODE_LABELS,
+    PROXY_MODES,
+    ConfigService,
+    detect_browser_cookie_sources,
+)
 from services.cookie_service import secure_cookie_file
 from services.runtime_install_service import RuntimeStatus
 from services.shortcut_service import SHORTCUT_DEFINITIONS
@@ -44,8 +50,15 @@ class SettingsPage(QWidget):
         self._loading_settings = True
 
         self.active_proxy_label = QLabel()
-        self.system_hint_label = QLabel("代理读取顺序：优先使用系统代理；未检测到系统代理时再使用此处配置。")
+        self.system_hint_label = QLabel(
+            "代理模式：自动模式下优先使用此处配置的代理，未配置时才跟随系统代理；"
+            "如需忽略系统代理请选择强制直连。"
+        )
         self.system_hint_label.setObjectName("MetaLabel")
+
+        self.proxy_mode_combo = QComboBox()
+        for mode in PROXY_MODES:
+            self.proxy_mode_combo.addItem(PROXY_MODE_LABELS[mode], mode)
 
         self.proxy_edit = QLineEdit()
         self.proxy_edit.setPlaceholderText("http://127.0.0.1:7890 / socks5://127.0.0.1:1080")
@@ -138,6 +151,7 @@ class SettingsPage(QWidget):
         form.setVerticalSpacing(10)
         form.addRow("默认首页", default_home_row)
         form.addRow("当前有效代理", self.active_proxy_label)
+        form.addRow("代理模式", self.proxy_mode_combo)
         form.addRow("配置代理", self.proxy_edit)
         form.addRow("从浏览器读取 Cookie", self.cookie_browser_combo)
         form.addRow("浏览器 Profile", self.cookie_profile_edit)
@@ -236,6 +250,8 @@ class SettingsPage(QWidget):
         self.default_home_bilibili.setChecked(default_home != "youtube")
         self.default_home_youtube.setChecked(default_home == "youtube")
         self.proxy_edit.setText(str(self.config.get("youtube.proxy", "") or ""))
+        proxy_mode_index = self.proxy_mode_combo.findData(self.config.proxy_mode())
+        self.proxy_mode_combo.setCurrentIndex(proxy_mode_index if proxy_mode_index >= 0 else 0)
         self.cookie_edit.setPlainText(self._cookie_texts[default_home])
         self._update_cookie_content_label()
         browser = str(self.config.get("youtube.cookie_browser", "") or "")
@@ -273,6 +289,7 @@ class SettingsPage(QWidget):
             cookie_paths[site] = cookie_path
 
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
+        self.config.set("network.proxy_mode", self.proxy_mode_combo.currentData() or PROXY_MODE_AUTO)
         self.config.set("content.default_home", "youtube" if self.default_home_youtube.isChecked() else "bilibili")
         cookie_browser = self.cookie_browser_combo.currentData() or ""
         self.config.set("youtube.cookie_browser", cookie_browser)

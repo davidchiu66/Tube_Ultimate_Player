@@ -6,7 +6,9 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +18,10 @@ from pathlib import Path
 
 
 logger = logging.getLogger("tube_player.dlna.http")
+
+# 每个 token 的有效期（秒）。DLNA 设备通常在投屏开始后立即发起请求，
+# 30 分钟足以覆盖长视频的完整播放；过期后 token 自动失效，防止长期暴露。
+_TOKEN_TTL = 1800.0
 
 
 @dataclass(slots=True)
@@ -45,12 +51,21 @@ class DlnaMediaSource:
         return "video/mp2t" if self.requires_mux else self.mime_type
 
 
+@dataclass(slots=True)
+class _RegisteredSource:
+    """一条已登记的投屏源，连同它的访问约束。"""
+
+    source: DlnaMediaSource
+    allowed_host: str          # 允许访问的客户端 IP（DLNA 设备地址）
+    expires_at: float          # time.monotonic() 口径的过期时间点
+
+
 class DlnaMediaServer:
     def __init__(self) -> None:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._bind_host = ""
-        self._sources: dict[str, DlnaMediaSource] = {}
+        self._sources: dict[str, _RegisteredSource] = {}
         self._sources_lock = threading.Lock()
         self._processes: set[subprocess.Popen] = set()
         self._processes_lock = threading.Lock()
@@ -66,19 +81,53 @@ class DlnaMediaServer:
         token = secrets.token_urlsafe(18)
         with self._sources_lock:
             self._sources.clear()
-            self._sources[token] = source
+            self._sources[token] = _RegisteredSource(
+                source=source,
+                allowed_host=str(remote_host or "").strip(),
+                expires_at=time.monotonic() + _TOKEN_TTL,
+            )
         port = int(self._server.server_address[1]) if self._server else preferred_port
         url = f"http://{local_ip}:{port}/media/{token}"
         logger.info(
-            "DLNA media registered url=%s mux=%s mime=%s title=%s",
+            "DLNA media registered url=%s mux=%s mime=%s device=%s title=%s",
             url,
             source.requires_mux,
             source.output_mime_type,
+            remote_host,
             source.title,
         )
         return url
 
     def source(self, token: str) -> DlnaMediaSource | None:
+        """兼容旧调用：只按 token 取源，不做访问校验。"""
+        registered = self._registered(token)
+        return None if registered is None else registered.source
+
+    def authorize(self, token: str, client_host: str) -> DlnaMediaSource | None:
+        """校验 token 是否有效、未过期，且请求来自登记的投屏设备。
+
+        中继会把本机 Cookie/请求头转发到上游，甚至可读取本地文件，
+        因此必须限制只有目标设备能取流，局域网内其他主机一律拒绝。
+        """
+        registered = self._registered(token)
+        if registered is None:
+            return None
+        if time.monotonic() > registered.expires_at:
+            logger.warning("DLNA 媒体令牌已过期 client=%s", client_host)
+            with self._sources_lock:
+                self._sources.pop(token, None)
+            return None
+        allowed = registered.allowed_host
+        if allowed and str(client_host or "").strip() != allowed:
+            logger.warning(
+                "拒绝非投屏设备的 DLNA 取流请求 client=%s allowed=%s",
+                client_host,
+                allowed,
+            )
+            return None
+        return registered.source
+
+    def _registered(self, token: str) -> _RegisteredSource | None:
         with self._sources_lock:
             return self._sources.get(token)
 
@@ -148,8 +197,9 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
             return
         token = parsed.path.rsplit("/", 1)[-1]
         owner: DlnaMediaServer = self.server.dlna_owner  # type: ignore[attr-defined]
-        source = owner.source(token)
+        source = owner.authorize(token, self.client_address[0])
         if source is None:
+            # 统一返回 404：不向未授权来源泄露 token 是否存在。
             self.send_error(404)
             return
         try:
@@ -267,26 +317,45 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
             return
         command = build_ffmpeg_mux_command(source)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
-        owner.track_process(process)
-        try:
-            if process.stdout is None:
-                raise RuntimeError("FFmpeg 没有可读输出")
-            while chunk := process.stdout.read(64 * 1024):
-                self.wfile.write(chunk)
-            return_code = process.wait(timeout=5.0)
-            if return_code != 0:
-                detail = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
-                logger.error("FFmpeg 投屏封装失败 title=%s detail=%s", source.title, detail[-1000:])
-        finally:
-            _terminate_process(process)
-            owner.untrack_process(process)
+        # stderr 必须写入临时文件而不是管道：FFmpeg 的 stderr 在整个转封装期间持续输出，
+        # 而这里只读 stdout，管道写满（约 64KB）后 FFmpeg 会阻塞，投屏随即卡死。
+        with tempfile.TemporaryFile() as stderr_file:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            owner.track_process(process)
+            try:
+                if process.stdout is None:
+                    raise RuntimeError("FFmpeg 没有可读输出")
+                while chunk := process.stdout.read(64 * 1024):
+                    self.wfile.write(chunk)
+                return_code = process.wait(timeout=5.0)
+                if return_code != 0:
+                    logger.error(
+                        "FFmpeg 投屏封装失败 title=%s detail=%s",
+                        source.title,
+                        _read_stderr_tail(stderr_file),
+                    )
+            finally:
+                _terminate_process(process)
+                if process.stdout is not None:
+                    try:
+                        process.stdout.close()
+                    except OSError:
+                        pass
+                owner.untrack_process(process)
+
+
+def _read_stderr_tail(stderr_file, limit: int = 1000) -> str:
+    try:
+        stderr_file.seek(0)
+        return stderr_file.read().decode("utf-8", errors="replace")[-limit:]
+    except OSError:
+        return ""
 
 
 def build_ffmpeg_mux_command(source: DlnaMediaSource) -> list[str]:

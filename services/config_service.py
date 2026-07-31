@@ -24,6 +24,16 @@ from services.shortcut_service import DEFAULT_SHORTCUTS
 DEFAULT_CONFIG_PATH = default_config_path("default_config.json")
 USER_CONFIG_PATH = CONFIG_DIR / "user_config.json"
 
+PROXY_MODE_AUTO = "auto"
+PROXY_MODE_MANUAL = "manual"
+PROXY_MODE_OFF = "off"
+PROXY_MODES = (PROXY_MODE_AUTO, PROXY_MODE_MANUAL, PROXY_MODE_OFF)
+PROXY_MODE_LABELS = {
+    PROXY_MODE_AUTO: "自动（优先使用已配置代理，未配置时跟随系统）",
+    PROXY_MODE_MANUAL: "仅使用下方配置的代理",
+    PROXY_MODE_OFF: "强制直连（忽略系统代理）",
+}
+
 
 class ConfigService:
     def __init__(
@@ -66,14 +76,36 @@ class ConfigService:
     def all(self) -> dict[str, Any]:
         return copy.deepcopy(self._config)
 
+    def proxy_mode(self) -> str:
+        """代理模式：auto 自动、manual 仅用配置代理、off 强制直连。"""
+        value = str(self.get("network.proxy_mode", PROXY_MODE_AUTO) or PROXY_MODE_AUTO).strip().lower()
+        if value not in PROXY_MODES:
+            return PROXY_MODE_AUTO
+        return value
+
+    def configured_proxy(self) -> str:
+        return normalize_proxy(str(self.get("youtube.proxy", "") or "").strip())
+
     def effective_proxy(self) -> tuple[str, str]:
+        """返回 (来源描述, 代理地址)。
+
+        用户在设置里填写的代理优先于系统代理：显式配置代表明确意图，
+        若被系统代理静默覆盖，用户会看到"已配置代理"却走了另一条链路。
+        """
+        mode = self.proxy_mode()
+        if mode == PROXY_MODE_OFF:
+            return "强制直连", ""
+
+        configured = self.configured_proxy()
+        if configured:
+            return "配置代理", configured
+
+        if mode == PROXY_MODE_MANUAL:
+            return "未配置代理（手动模式）", ""
+
         system_proxy = detect_system_proxy()
         if system_proxy:
             return "系统代理", system_proxy
-
-        configured = str(self.get("youtube.proxy", "") or "").strip()
-        if configured:
-            return "配置代理", normalize_proxy(configured)
 
         return "未使用代理", ""
 

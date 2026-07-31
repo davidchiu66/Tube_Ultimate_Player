@@ -390,6 +390,21 @@ class DownloadManager(QObject):
         if self._save_timer.isActive():
             self._save_tasks()
 
+    def shutdown(self) -> None:
+        """退出前终止所有下载子进程并落盘任务状态。
+
+        下载 worker 会长时间占用线程池线程，若不先终止，退出时等待线程池收敛必然超时；
+        未完成的任务在下次启动时会由 _load_tasks 统一转为已暂停，可继续下载。
+        """
+        self._save_timer.stop()
+        workers = list(self._workers.values())
+        self._workers.clear()
+        for worker in workers:
+            worker.stop()
+        if workers:
+            logger.info("download workers stopped for shutdown count=%s", len(workers))
+        self._save_tasks()
+
     def _rebuild_indexes(self) -> None:
         self._task_index = {}
         self._url_index = {}
