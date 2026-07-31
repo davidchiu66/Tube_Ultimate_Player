@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import re
 import secrets
 import socket
 import subprocess
@@ -196,6 +197,15 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         token = parsed.path.rsplit("/", 1)[-1]
+        # token 等同于取流凭据，日志里只留前缀用于关联同一次投屏。
+        logger.info(
+            "DLNA 取流请求 client=%s method=%s token=%s… range=%s ua=%s",
+            self.client_address[0],
+            "HEAD" if head_only else "GET",
+            token[:6],
+            self.headers.get("Range") or "-",
+            self.headers.get("User-Agent") or "-",
+        )
         owner: DlnaMediaServer = self.server.dlna_owner  # type: ignore[attr-defined]
         source = owner.authorize(token, self.client_address[0])
         if source is None:
@@ -317,6 +327,10 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
             return
         command = build_ffmpeg_mux_command(source)
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+        started = time.monotonic()
+        forwarded = 0
+        outcome = "ffmpeg_eof"
+        return_code: int | None = None
         # stderr 必须写入临时文件而不是管道：FFmpeg 的 stderr 在整个转封装期间持续输出，
         # 而这里只读 stdout，管道写满（约 64KB）后 FFmpeg 会阻塞，投屏随即卡死。
         with tempfile.TemporaryFile() as stderr_file:
@@ -331,16 +345,34 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
             try:
                 if process.stdout is None:
                     raise RuntimeError("FFmpeg 没有可读输出")
-                while chunk := process.stdout.read(64 * 1024):
-                    self.wfile.write(chunk)
-                return_code = process.wait(timeout=5.0)
-                if return_code != 0:
-                    logger.error(
-                        "FFmpeg 投屏封装失败 title=%s detail=%s",
-                        source.title,
-                        _read_stderr_tail(stderr_file),
-                    )
+                try:
+                    while chunk := process.stdout.read(64 * 1024):
+                        self.wfile.write(chunk)
+                        forwarded += len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    # 电视主动断开与 FFmpeg 自己结束是两回事，必须分开记账，
+                    # 否则排查「播到一半退出」时无法判断是哪一侧先松手。
+                    outcome = "client_disconnected"
+                try:
+                    return_code = process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    return_code = None
+                if outcome != "client_disconnected" and return_code not in (0, None):
+                    outcome = "ffmpeg_error"
             finally:
+                out_time, detail = _summarize_ffmpeg_stderr(stderr_file)
+                log = logger.error if outcome == "ffmpeg_error" else logger.info
+                log(
+                    "DLNA 投屏转封装结束 outcome=%s exit=%s bytes=%s elapsed=%.1fs "
+                    "out_time=%s title=%s detail=%s",
+                    outcome,
+                    return_code,
+                    forwarded,
+                    time.monotonic() - started,
+                    out_time or "-",
+                    source.title,
+                    detail or "-",
+                )
                 _terminate_process(process)
                 if process.stdout is not None:
                     try:
@@ -350,12 +382,36 @@ class _DlnaRequestHandler(BaseHTTPRequestHandler):
                 owner.untrack_process(process)
 
 
-def _read_stderr_tail(stderr_file, limit: int = 1000) -> str:
+# 只回读 stderr 末尾这么多字节：-progress 每秒写一段进度，长视频的完整 stderr 会很大。
+_STDERR_TAIL_BYTES = 64 * 1024
+# -progress 输出的都是 key=value 单行，摘要时要把它们从错误信息里剔掉。
+_PROGRESS_LINE = re.compile(r"^[a-z_]+=\S*$")
+
+
+def _summarize_ffmpeg_stderr(stderr_file, limit: int = 2000) -> tuple[str, str]:
+    """返回 (最后一次 out_time, 去掉进度行后的 stderr 尾部)。
+
+    out_time 直接回答「中断发生在第几分钟」，detail 保留真正的告警/报错文本。
+    """
     try:
-        stderr_file.seek(0)
-        return stderr_file.read().decode("utf-8", errors="replace")[-limit:]
+        size = stderr_file.seek(0, 2)
+        stderr_file.seek(max(0, size - _STDERR_TAIL_BYTES))
+        payload = stderr_file.read().decode("utf-8", errors="replace")
     except OSError:
-        return ""
+        return ("", "")
+    out_time = ""
+    messages: list[str] = []
+    for line in payload.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("out_time="):
+            out_time = text.partition("=")[2]
+            continue
+        if _PROGRESS_LINE.match(text):
+            continue
+        messages.append(text)
+    return (out_time, " | ".join(messages)[-limit:])
 
 
 def build_ffmpeg_mux_command(source: DlnaMediaSource) -> list[str]:
@@ -363,7 +419,11 @@ def build_ffmpeg_mux_command(source: DlnaMediaSource) -> list[str]:
         raise RuntimeError("分离音视频投屏需要可用的 FFmpeg")
     if not source.audio_url:
         raise RuntimeError("缺少投屏音频流")
-    command = [source.ffmpeg_path, "-hide_banner", "-loglevel", "error"]
+    # loglevel 用 warning 而不是 error：重连、时间戳不连续都是 warning 级，
+    # 而它们正是排查「播到一半中断 / 后段无声」最需要的线索。
+    # -progress pipe:2 把进度写进 stderr 临时文件，_summarize_ffmpeg_stderr 会从中
+    # 取出最后一次 out_time，用来判断中断发生在第几分钟。
+    command = [source.ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-progress", "pipe:2"]
     input_options = _ffmpeg_input_options(source)
     command.extend(input_options)
     if source.start_position > 0:
