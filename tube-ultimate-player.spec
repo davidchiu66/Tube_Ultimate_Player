@@ -71,20 +71,11 @@ sed -i \
 install -m 0644 \
     docs/assets/icons/app-icon-256.png \
     %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
-    's|^Exec=.*|Exec=tube-ultimate-player %%U|' \
-    %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
-install -m 0644 \
-    docs/assets/icons/app-icon-256.png \
-    %{buildroot}%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
-
-desktop-file-validate \
-    %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 desktop-file-validate \
     %{buildroot}%{_datadir}/applications/tube-ultimate-player.desktop
 
 %files
-%license LICENSE
 %license LICENSE
 %doc README.md
 %doc docs/linux_build_and_release.md
@@ -92,15 +83,12 @@ desktop-file-validate \
 %{_datadir}/applications/tube-ultimate-player.desktop
 %{_datadir}/icons/hicolor/256x256/apps/%{name}.png
 %{_datadir}/%{name}/
-%doc docs/linux_build_and_release.md
-%{_bindir}/tube-ultimate-player
-%{_datadir}/applications/tube-ultimate-player.desktop
-%{_datadir}/icons/hicolor/256x256/apps/%{name}.png
-%{_datadir}/%{name}/
 
 %changelog
-* Sun Jul 26 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-2
-- Escape the desktop file field code in the RPM spec.
+* Fri Jul 31 2026 davidchiu66 <chinamen@gmail.com> - 0.2.21-1
+- Verify update packages, harden archive extraction and DLNA relay access.
+- Fix the online upgrade launcher and improve home page and startup performance.
+- Repair the %install section damaged by duplicated lines.
 
 * Sun Jul 26 2026 davidchiu66 <chinamen@gmail.com> - 0.2.19-2
 - Escape the desktop file field code in the RPM spec.
