@@ -34,6 +34,10 @@ PROXY_MODE_LABELS = {
     PROXY_MODE_OFF: "强制直连（忽略系统代理）",
 }
 
+# 「播放 URL」面板保留的历史条数上限。
+RECENT_URL_LIMIT = 20
+RECENT_URL_KEY = "player.recent_urls"
+
 
 class ConfigService:
     def __init__(
@@ -75,6 +79,61 @@ class ConfigService:
 
     def all(self) -> dict[str, Any]:
         return copy.deepcopy(self._config)
+
+    def recent_urls(self) -> list[dict[str, str]]:
+        """「播放 URL」面板的历史，最新在前。忽略缺 url 的脏条目。"""
+        raw = self.get(RECENT_URL_KEY, [])
+        if not isinstance(raw, list):
+            return []
+        result: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            result.append(
+                {
+                    "url": url,
+                    "title": str(item.get("title") or "").strip(),
+                    "played_at": str(item.get("played_at") or "").strip(),
+                }
+            )
+        return result
+
+    def add_recent_url(self, url: str, title: str = "", played_at: str = "") -> None:
+        """记录一条播放历史。按归一化 URL 去重，最新提到最前，超限淘汰最旧。"""
+        clean_url = str(url or "").strip()
+        if not clean_url:
+            return
+        key = _normalize_recent_url(clean_url)
+        entries = [item for item in self.recent_urls() if _normalize_recent_url(item["url"]) != key]
+        entries.insert(0, {"url": clean_url, "title": str(title or "").strip(), "played_at": played_at})
+        self.set(RECENT_URL_KEY, entries[:RECENT_URL_LIMIT])
+
+    def update_recent_url_title(self, url: str, title: str) -> None:
+        """解析成功后回填标题；条目已被淘汰或标题为空时静默跳过。"""
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            return
+        key = _normalize_recent_url(url)
+        entries = self.recent_urls()
+        changed = False
+        for item in entries:
+            if _normalize_recent_url(item["url"]) == key:
+                item["title"] = clean_title
+                changed = True
+                break
+        if changed:
+            self.set(RECENT_URL_KEY, entries)
+
+    def remove_recent_url(self, url: str) -> None:
+        key = _normalize_recent_url(url)
+        entries = [item for item in self.recent_urls() if _normalize_recent_url(item["url"]) != key]
+        self.set(RECENT_URL_KEY, entries)
+
+    def clear_recent_urls(self) -> None:
+        self.set(RECENT_URL_KEY, [])
 
     def proxy_mode(self) -> str:
         """代理模式：auto 自动、manual 仅用配置代理、off 强制直连。"""
@@ -248,6 +307,11 @@ class ConfigService:
             else:
                 merged[key] = copy.deepcopy(value)
         return merged
+
+
+def _normalize_recent_url(url: str) -> str:
+    """去重用的归一化键：去掉首尾空白、去掉末尾斜杠、忽略大小写。"""
+    return str(url or "").strip().rstrip("/").casefold()
 
 
 def normalize_proxy(proxy: str) -> str:

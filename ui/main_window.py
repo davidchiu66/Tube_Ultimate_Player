@@ -84,6 +84,12 @@ def _skip_after_shutdown(method):
     return wrapper
 
 
+def _task_created_at(task) -> float:
+    """下载任务的创建时间，缺失时视为最早（排在列表最下方）。"""
+    created_at = getattr(task, "created_at", None)
+    return created_at.timestamp() if created_at is not None else 0.0
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -268,7 +274,9 @@ class MainWindow(QMainWindow):
         self.download_manager.task_added.connect(page.add_task)
         self.download_manager.task_changed.connect(page.update_task)
         self.download_manager.task_removed.connect(page.remove_task)
-        for task in self.download_manager.tasks():
+        # add_task 把新行插在最前，所以这里按 created_at 升序喂进去，
+        # 表格里最终就是「新→旧」，与后续新建任务的落位一致。
+        for task in sorted(self.download_manager.tasks(), key=_task_created_at):
             page.add_task(task)
         return page
 
@@ -427,9 +435,17 @@ class MainWindow(QMainWindow):
         self.runtime_install_service.open_official_site()
 
     def _show_play_url_dialog(self) -> None:
-        dialog = UrlPlayDialog(self)
+        dialog = UrlPlayDialog(self, config=self.config)
         if dialog.exec():
-            self.play_url(dialog.url())
+            url = dialog.url()
+            # 提交即记录：解析失败的地址也留在历史里可再试，标题稍后由 _resolved 回填。
+            if url:
+                self.config.add_recent_url(url)
+                self.config.save()
+                # 记住本次输入，解析出标题后回填到这条历史（yt-dlp 常会归一化 URL，
+                # 直接用 webpage_url 可能匹配不到用户输入的那条）。
+                self._pending_recent_url = url
+            self.play_url(url)
 
     def _toolbar_search_requested(self, text: str) -> None:
         self.url_edit.setText(text)
@@ -798,6 +814,11 @@ class MainWindow(QMainWindow):
     def _resolved(self, video: VideoInfo) -> None:
         self.current_video = video
         self.current_local_media_path = ""
+        pending_url = getattr(self, "_pending_recent_url", "")
+        if pending_url and video.title:
+            self.config.update_recent_url_title(pending_url, video.title)
+            self.config.save()
+        self._pending_recent_url = ""
         quality = self._select_default_quality(video)
         if quality is None:
             logger.error(

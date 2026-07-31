@@ -26,6 +26,12 @@ from ui.playlist_overlay import PlaylistOverlay
 from ui.thumbnail_cache import read_image_reply
 
 
+# 每格滚轮调整的音量，与键盘 volume_up / volume_down 的步长保持一致。
+VOLUME_WHEEL_STEP = 5
+# 标准滚轮一格是 120；高分辨率滚轮/触控板会给出更小的增量，累加后再折算成格数。
+_WHEEL_NOTCH = 120.0
+
+
 class PlayerPage(QWidget):
     play_pause_requested = Signal()
     stop_requested = Signal()
@@ -75,6 +81,7 @@ class PlayerPage(QWidget):
         self._control_interaction_active = False
         self._ignore_next_release = False
         self._auto_hide_enabled = False
+        self._wheel_accumulator = 0.0
 
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
@@ -274,6 +281,13 @@ class PlayerPage(QWidget):
         if event.type() == QEvent.Type.MouseButtonRelease and self._control_interaction_active:
             self._control_interaction_active = False
             QTimer.singleShot(0, self._reevaluate_control_pointer)
+
+        if event.type() == QEvent.Type.Wheel and self._wheel_adjusts_volume(watched):
+            self._show_cursor()
+            if self._auto_hide_enabled:
+                self._idle_timer.start()
+            self._handle_volume_wheel(event)
+            return True
 
         if watched is self.video_widget:
             if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
@@ -538,6 +552,26 @@ class PlayerPage(QWidget):
         else:
             self._controls_animation.stop()
             self.control_panel.move(target)
+
+    def _wheel_adjusts_volume(self, watched) -> bool:
+        """只有视频区、播放器空白处与控制面板背景上的滚轮才用来调音量。
+
+        音量滑块、清晰度/字幕/倍速下拉框、播放列表滚动区域都要保留各自的原生
+        滚轮行为，因此这里用白名单而不是黑名单 —— 控制面板的**子控件**不算。
+        """
+        if not self._shortcut_context_active():
+            return False
+        return watched is self or watched is self.video_widget or watched is self.control_panel
+
+    def _handle_volume_wheel(self, event) -> None:
+        self._wheel_accumulator += float(event.angleDelta().y())
+        notches = int(self._wheel_accumulator / _WHEEL_NOTCH)
+        if not notches:
+            return
+        self._wheel_accumulator -= notches * _WHEEL_NOTCH
+        # 复用键盘那条路径：夹取、投屏时的可用性判断与音量提示都在里面，
+        # 两种操作方式不该有两套行为。
+        self._shortcut_volume(notches * VOLUME_WHEEL_STEP)
 
     def _show_shortcut_hint(self, text: str) -> None:
         self.shortcut_hint.setText(text)

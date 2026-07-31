@@ -100,8 +100,12 @@ class DownloadPage(QWidget):
         if task.task_id in self._rows:
             self.update_task(task)
             return
-        row = self.table.rowCount()
+        # 最新的下载放最前面。insertRow(0) 会把已有行（含 cellWidget）整体下移，
+        # 因此 _rows 里所有行号都要 +1 —— 漏了这一步会表现为「点了 A 的按钮却操作了 B」。
+        row = 0
         self.table.insertRow(row)
+        for existing_id in self._rows:
+            self._rows[existing_id] += 1
         self.table.setRowHeight(row, 40)
         self._rows[task.task_id] = row
         self._tasks[task.task_id] = task
