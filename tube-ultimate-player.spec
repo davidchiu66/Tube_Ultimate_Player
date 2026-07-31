@@ -1,4 +1,4 @@
-Name:           Tube-Utimate-Player
+Name:           tube-ultimate-player
 Version:        0.2.21
 Release:        1%{?dist}
 Summary:        YouTube and Bilibili desktop video player
