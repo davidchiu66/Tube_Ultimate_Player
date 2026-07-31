@@ -29,6 +29,8 @@ class SiteCookieSettingsTests(unittest.TestCase):
             )
             youtube_cookie = root / "youtube.txt"
             bilibili_cookie = root / "bilibili.txt"
+            youtube_cookie.write_text("Cookie: SID=y", encoding="utf-8")
+            bilibili_cookie.write_text("Cookie: SESSDATA=b", encoding="utf-8")
             config.set("cookies.youtube.file", str(youtube_cookie))
             config.set("cookies.bilibili.file", str(bilibili_cookie))
 
@@ -43,6 +45,7 @@ class SiteCookieSettingsTests(unittest.TestCase):
                 user_path=root / "user.json",
             )
             legacy_cookie = root / "legacy.txt"
+            legacy_cookie.write_text("Cookie: SESSDATA=b", encoding="utf-8")
             config.set("content.default_home", "bilibili")
             config.set("youtube.cookie_file", str(legacy_cookie))
 
@@ -91,6 +94,8 @@ class SiteCookieSettingsTests(unittest.TestCase):
             )
             youtube_cookie = root / "youtube.txt"
             bilibili_cookie = root / "bilibili.txt"
+            youtube_cookie.write_text("Cookie: SID=y", encoding="utf-8")
+            bilibili_cookie.write_text("Cookie: SESSDATA=b", encoding="utf-8")
             config.set("cookies.youtube.file", str(youtube_cookie))
             config.set("cookies.bilibili.file", str(bilibili_cookie))
             resolver = YoutubeResolver.__new__(YoutubeResolver)

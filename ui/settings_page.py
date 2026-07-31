@@ -386,10 +386,18 @@ class SettingsPage(QWidget):
             self.cookie_browser_combo.addItem(label, value)
         self.cookie_browser_combo.blockSignals(False)
 
-    def set_cookie_probe_result(self, result: dict[str, str], missing: list[str]) -> None:
+    def set_cookie_probe_result(
+        self,
+        result: dict[str, str],
+        missing: list[str],
+        unreadable: list[str] | None = None,
+    ) -> None:
         """展示启动探测的结果；某站点没找到时给出手动配置引导。"""
         labels = {"bilibili": "Bilibili", "youtube": "YouTube"}
         parts = [f"{labels[site]}：{spec}" for site, spec in result.items() if spec]
+        if unreadable:
+            # 运行中的 Chromium 会独占 Cookies 库，读不到不等于没登录。
+            parts.append(f"以下浏览器正在运行、无法读取：{'、'.join(unreadable)}（关闭后可重新检测）")
         if missing:
             names = "、".join(labels[site] for site in missing)
             parts.append(f"未找到 {names} 的登录 Cookie，请在下方手动粘贴 Cookie")

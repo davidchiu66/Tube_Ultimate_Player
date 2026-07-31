@@ -24,7 +24,18 @@ SITE_LOGIN_COOKIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "bilibili": ((".bilibili.com", "bilibili.com"), ("SESSDATA", "bili_jct", "DedeUserID")),
     "youtube": (
         (".youtube.com", "youtube.com", ".google.com"),
-        ("SID", "SAPISID", "__Secure-3PAPISID", "LOGIN_INFO"),
+        # 不同浏览器/登录方式留下的标志 Cookie 并不一致，命中任意一个即算已登录。
+        (
+            "SID",
+            "SAPISID",
+            "APISID",
+            "HSID",
+            "SSID",
+            "LOGIN_INFO",
+            "__Secure-1PSID",
+            "__Secure-3PSID",
+            "__Secure-3PAPISID",
+        ),
     ),
 }
 
@@ -38,6 +49,14 @@ class CookieDatabase:
     kind: str                  # "chromium" 或 "firefox"
 
 
+@dataclass
+class ProbeReport:
+    """探测结果 + 读不到的浏览器，后者要如实告诉用户原因。"""
+
+    matches: dict[str, str]
+    unreadable: list[str]
+
+
 def probe_site_cookie_browsers(
     sites: tuple[str, ...],
     databases: list[CookieDatabase],
@@ -47,38 +66,77 @@ def probe_site_cookie_browsers(
     返回 {site: browser_spec}；某站点一个浏览器都没登录时，该站点不出现在结果里。
     databases 的顺序即优先级（调用方按「默认浏览器优先」排好）。
     """
-    result: dict[str, str] = {}
+    return probe_site_cookie_browsers_detailed(sites, databases).matches
+
+
+def probe_site_cookie_browsers_detailed(
+    sites: tuple[str, ...],
+    databases: list[CookieDatabase],
+) -> ProbeReport:
+    matches: dict[str, str] = {}
+    unreadable: list[str] = []
     for database in databases:
-        remaining = [site for site in sites if site not in result]
+        remaining = [site for site in sites if site not in matches]
         if not remaining:
             break
         try:
             logged_in = _sites_logged_in(database, remaining)
-        except Exception:  # noqa: BLE001 - 单个库损坏/加锁不应中断整轮探测
+        except CookieDatabaseUnreadable:
+            # 运行中的 Chromium 会独占 Cookies 库，这不是"没登录"，必须区分开
+            # 并告诉用户「关掉浏览器再检测」，否则看起来像检测功能坏了。
+            logger.info("Cookie 库无法读取（浏览器可能正在运行） spec=%s", database.browser_spec)
+            unreadable.append(database.browser_spec)
+            continue
+        except Exception:  # noqa: BLE001 - 单个库损坏不应中断整轮探测
             logger.warning("探测浏览器 Cookie 失败 spec=%s path=%s", database.browser_spec, database.path, exc_info=True)
+            unreadable.append(database.browser_spec)
             continue
         for site in logged_in:
-            result.setdefault(site, database.browser_spec)
-    return result
+            matches.setdefault(site, database.browser_spec)
+    return ProbeReport(matches=matches, unreadable=unreadable)
+
+
+class CookieDatabaseUnreadable(RuntimeError):
+    """Cookie 库存在但打不开（多为浏览器运行时的独占锁）。"""
 
 
 def _sites_logged_in(database: CookieDatabase, sites: list[str]) -> list[str]:
     if not database.path.is_file():
         return []
     with tempfile.TemporaryDirectory() as temp_dir:
-        # 浏览器运行时对库文件加了独占锁，必须先复制副本再打开。
-        copy_path = Path(temp_dir) / "cookies.db"
-        try:
-            shutil.copy2(database.path, copy_path)
-        except OSError:
-            logger.warning("复制 Cookie 库失败 path=%s", database.path)
-            return []
-        uri = f"file:{copy_path}?mode=ro&immutable=1"
-        conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+        conn = _open_readonly(database.path, Path(temp_dir) / "cookies.db")
         try:
             return [site for site in sites if _has_login_cookie(conn, database.kind, site)]
         finally:
             conn.close()
+
+
+def _open_readonly(source: Path, copy_path: Path) -> sqlite3.Connection:
+    """以只读方式打开 Cookie 库。
+
+    先复制副本（浏览器运行时通常对库文件加了锁）；复制失败再试直接以
+    immutable 只读打开。两条路都不通说明库被独占，抛 CookieDatabaseUnreadable。
+    """
+    try:
+        shutil.copy2(source, copy_path)
+        target: Path = copy_path
+    except OSError as exc:
+        logger.debug("复制 Cookie 库失败，改为直接只读打开 path=%s detail=%s", source, exc)
+        target = source
+    try:
+        conn = sqlite3.connect(f"file:{target}?mode=ro&immutable=1", uri=True, timeout=1.0)
+    except sqlite3.Error as exc:
+        raise CookieDatabaseUnreadable(str(exc)) from exc
+    try:
+        # connect 是惰性的，且 immutable 下 "SELECT 1" 连页面都不用读；必须查一次
+        # schema 才能真正暴露"文件被独占"或"根本不是 SQLite 库"。
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except sqlite3.Error as exc:
+        # 必须显式关闭：连接残留会在 Windows 上占住临时副本，让临时目录清理失败，
+        # 那个清理异常还会顶替掉真正的错误原因。
+        conn.close()
+        raise CookieDatabaseUnreadable(str(exc)) from exc
+    return conn
 
 
 def _has_login_cookie(conn: sqlite3.Connection, kind: str, site: str) -> bool:

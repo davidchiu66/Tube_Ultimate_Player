@@ -38,6 +38,10 @@ def prepare_cookie_file(cookie_path: str, target_url: str = "") -> str:
 
     cookies = _parse_raw_cookie_text(text)
     if not cookies:
+        if not text.strip():
+            # 空文件应当在上层就被当作"未配置"（见 ConfigService.cookie_file），
+            # 走到这里说明调用方绕过了那层，给出可定位的提示而不是含糊的格式错误。
+            raise CookieFormatError(f"Cookie 文件是空的: {path}")
         raise CookieFormatError(
             "Cookie 文件格式不正确。yt-dlp 需要 Netscape cookies.txt；"
             "也可以在文件中放入浏览器请求头里的 Cookie: name=value; name2=value2。"

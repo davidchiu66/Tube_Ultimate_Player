@@ -8,14 +8,14 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from services.config_service import detect_browser_cookie_sources
-from services.cookie_probe_service import discover_cookie_databases, probe_site_cookie_browsers
+from services.cookie_probe_service import discover_cookie_databases, probe_site_cookie_browsers_detailed
 
 
 logger = logging.getLogger("tube_player.cookie")
 
 
 class CookieProbeSignals(QObject):
-    # 成功时携带 {site: browser_spec}；某站点没找到登录浏览器时不出现在字典里。
+    # 成功时携带 ProbeReport：matches={site: browser_spec}，unreadable=读不到的浏览器
     success = Signal(object)
     error = Signal(str)
     finished = Signal()
@@ -40,9 +40,13 @@ class CookieProbeWorker(QRunnable):
                 platform_name=sys.platform,
             )
             logger.info("cookie probe started browsers=%s", len(databases))
-            result = probe_site_cookie_browsers(self.sites, databases)
-            logger.info("cookie probe done result=%s", result)
-            self.signals.success.emit(result)
+            report = probe_site_cookie_browsers_detailed(self.sites, databases)
+            logger.info(
+                "cookie probe done matches=%s unreadable=%s",
+                report.matches,
+                report.unreadable,
+            )
+            self.signals.success.emit(report)
         except Exception as exc:  # noqa: BLE001
             logger.exception("cookie probe worker failed")
             self.signals.error.emit(str(exc))

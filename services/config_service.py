@@ -185,6 +185,11 @@ class ConfigService:
         path = Path(value)
         if not path.is_absolute():
             path = RUNTIME_ROOT / path
+        # 空文件（用户清空过 Cookie 输入框、或从未填写但文件已被创建）视为"未配置"。
+        # 否则它会挡在浏览器 Cookie 前面，并让 prepare_cookie_file 抛格式错误，
+        # 把「本来可以退回浏览器 Cookie」变成整个请求失败。
+        if not cookie_file_has_content(path):
+            return ""
         return str(path)
 
     def cookie_file_for_url(self, target_url: str) -> str:
@@ -333,7 +338,31 @@ class ConfigService:
         return merged
 
 
+def cookie_file_has_content(path: Path) -> bool:
+    """Cookie 文件里是否有真正可用的内容（至少一行非注释非空行）。
+
+    只读到第一行数据就返回，不整文件读入。仅有 Netscape 头注释的文件同样算空 ——
+    那种文件交给 yt-dlp 也带不上任何 Cookie。
+    """
+    try:
+        if path.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _normalize_recent_url(url: str) -> str:
+
+
     """去重用的归一化键：去掉首尾空白、去掉末尾斜杠、忽略大小写。"""
     return str(url or "").strip().rstrip("/").casefold()
 

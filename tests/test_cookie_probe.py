@@ -15,6 +15,7 @@ from services.cookie_probe_service import (
     CookieDatabase,
     _has_login_cookie,
     probe_site_cookie_browsers,
+    probe_site_cookie_browsers_detailed,
 )
 
 
@@ -140,6 +141,33 @@ class ProbeTests(unittest.TestCase):
 
         self.assertEqual(set(result), {"bilibili", "youtube"})
         self.assertNotIn("never:Default", result.values())
+
+    def test_youtube_login_names_cover_google_domain_variants(self) -> None:
+        # 不同浏览器留下的标志 Cookie 不一致：只有 HSID/SSID 也应当算已登录。
+        db = self._chromium("chrome:Default", [(".google.com", "HSID"), ("accounts.google.com", "SSID")])
+
+        self.assertEqual(probe_site_cookie_browsers(("youtube",), [db]), {"youtube": "chrome:Default"})
+
+    def test_locked_database_is_reported_as_unreadable(self) -> None:
+        """运行中的 Chromium 会独占 Cookies 库 —— 读不到 ≠ 没登录，必须分开报告。"""
+        locked = self.root / "locked.db"
+        locked.write_bytes(b"not a sqlite file")
+        good = self._chromium("chrome:Default", [(".youtube.com", "SAPISID")])
+
+        report = probe_site_cookie_browsers_detailed(
+            ("youtube",),
+            [CookieDatabase(browser_spec="brave:Default", path=locked, kind="chromium"), good],
+        )
+
+        self.assertEqual(report.matches, {"youtube": "chrome:Default"})
+        self.assertEqual(report.unreadable, ["brave:Default"])
+
+    def test_readable_databases_are_not_listed_as_unreadable(self) -> None:
+        db = self._chromium("chrome:Default", [(".youtube.com", "LOGIN_INFO")])
+
+        report = probe_site_cookie_browsers_detailed(("youtube",), [db])
+
+        self.assertEqual(report.unreadable, [])
 
 
 if __name__ == "__main__":

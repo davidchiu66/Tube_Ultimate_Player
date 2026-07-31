@@ -1902,21 +1902,28 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     @_skip_after_shutdown
-    def _cookie_probe_finished(self, mapping) -> None:
-        result = dict(mapping or {})
+    def _cookie_probe_finished(self, report) -> None:
+        result = dict(getattr(report, "matches", None) or {})
+        unreadable = list(getattr(report, "unreadable", None) or [])
         self.config.set_probed_cookie_browsers(result)
         self.config.save()
         missing = [site for site in ("bilibili", "youtube") if not result.get(site)]
         settings_page = self._created_page("settings")
         if settings_page is not None:
-            settings_page.set_cookie_probe_result(result, missing)
+            settings_page.set_cookie_probe_result(result, missing, unreadable)
         if not missing:
             logger.info("cookie probe matched every site result=%s", result)
             return
         labels = {"bilibili": "Bilibili", "youtube": "YouTube"}
         names = "、".join(labels[site] for site in missing)
         # 提示用 toast 而不是模态框：启动时弹窗打断使用，设置页另有常驻提示。
-        self.toast.show_message(f"未在任何浏览器中找到 {names} 的登录 Cookie，请在设置中手动配置")
+        if unreadable:
+            self.toast.show_message(
+                f"未找到 {names} 的登录 Cookie；{len(unreadable)} 个浏览器正在运行导致无法读取，"
+                "可关闭浏览器后重新检测"
+            )
+        else:
+            self.toast.show_message(f"未在任何浏览器中找到 {names} 的登录 Cookie，请在设置中手动配置")
 
     @Slot(str)
     @_skip_after_shutdown
