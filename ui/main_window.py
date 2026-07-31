@@ -354,8 +354,8 @@ class MainWindow(QMainWindow):
 
         self.download_manager.message.connect(self.toast.show_message)
 
-        self.mpv.position_changed.connect(self.player_page.update_position)
-        self.mpv.duration_changed.connect(self.player_page.update_duration)
+        self.mpv.position_changed.connect(self._handle_mpv_position_changed)
+        self.mpv.duration_changed.connect(self._handle_mpv_duration_changed)
         self.mpv.pause_changed.connect(self._handle_mpv_pause_changed)
         self.mpv.playback_finished.connect(self._handle_playback_finished)
 
@@ -1069,6 +1069,23 @@ class MainWindow(QMainWindow):
             logger.exception("play/pause command failed")
             QMessageBox.warning(self, "播放控制失败", str(exc))
 
+    def _casting_to_dlna(self) -> bool:
+        """投屏中（含正在连接设备的窗口期）。"""
+        return self._dlna_device is not None or self._dlna_cast_pending
+
+    def _handle_mpv_position_changed(self, seconds: float) -> None:
+        # 投屏期间本地 mpv 只是被 pause，属性轮询定时器仍在跑并持续上报被冻结的
+        # 本地位置；面板此时由 _poll_dlna_position 单独驱动，两条链路都写
+        # update_position 会让进度条在「投屏起始点」与「远端真实位置」之间反复跳。
+        if self._casting_to_dlna():
+            return
+        self.player_page.update_position(seconds)
+
+    def _handle_mpv_duration_changed(self, seconds: float) -> None:
+        if self._casting_to_dlna():
+            return
+        self.player_page.update_duration(seconds)
+
     def _handle_mpv_pause_changed(self, paused: bool) -> None:
         if self._dlna_device is not None:
             self.player_page.set_paused(self._dlna_remote_paused)
@@ -1303,6 +1320,8 @@ class MainWindow(QMainWindow):
                 duration += self._dlna_position_offset
             self._dlna_last_position = position
             self.player_page.update_position(position)
+            # 分离音视频实时封装时渲染器常返回 0 或 NOT_IMPLEMENTED，此时保留本地
+            # 解析出的真实时长，不能把总时长刷成 00:00。
             if duration > 0:
                 self.player_page.update_duration(duration)
         elif action == "stop" and request_id in self._dlna_stop_notify_requests:
