@@ -13,10 +13,11 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from download.command_builder import (
     build_download_command,
+    should_retry_with_alternate_browser,
     should_retry_with_cookie_file,
 )
 from download.models import DownloadTask
-from services.config_service import ConfigService
+from services.config_service import ConfigService, detect_browser_cookie_sources
 from services.logging_service import sanitize_command
 
 
@@ -57,6 +58,28 @@ class DownloadWorker(QRunnable):
     def run(self) -> None:
         self.signals.started.emit(self.task.task_id)
         output = self._run_once(force_cookie_file=False)
+
+        # 先换浏览器再退回 Cookie 文件：Chrome/Brave/Edge 的 App-Bound Encryption
+        # （Chrome 127+）会让 yt-dlp 报 "Failed to decrypt with DPAPI"，这跟账号无关，
+        # 换一个浏览器（尤其是 Cookie 值明文存储的 Firefox）通常就能成功。解析链路
+        # 早就有这个重试，下载链路一直没有 —— 于是出现「能播放但下不了」。
+        if (
+            output.returncode != 0
+            and not self._stop_requested.is_set()
+            and should_retry_with_alternate_browser(output.text)
+        ):
+            for index, browser in enumerate(self._alternate_cookie_browsers(), start=1):
+                if self._stop_requested.is_set():
+                    break
+                logger.warning(
+                    "浏览器 Cookie 读取失败，改用其它浏览器重试 task_id=%s source=%s",
+                    self.task.task_id,
+                    browser,
+                )
+                output = self._run_once(force_cookie_file=False, override_cookie_browser=browser)
+                if output.returncode == 0 or not should_retry_with_alternate_browser(output.text):
+                    break
+
         if (
             output.returncode != 0
             and not self._stop_requested.is_set()
@@ -76,12 +99,28 @@ class DownloadWorker(QRunnable):
         else:
             self.signals.failed.emit(self.task.task_id, output.error_message())
 
-    def _run_once(self, force_cookie_file: bool) -> "_DownloadOutput":
-        command = build_download_command(self.task, self.config, force_cookie_file=force_cookie_file)
+    def _alternate_cookie_browsers(self) -> list[str]:
+        """除当前正在用的浏览器之外，其它可用的 Cookie 源。"""
+        site = self.config.cookie_site_for_url(self.task.url)
+        current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site(site)
+        browsers: list[str] = []
+        for _label, value in detect_browser_cookie_sources():
+            if not value or value == current or value in browsers:
+                continue
+            browsers.append(value)
+        return browsers
+
+    def _run_once(self, force_cookie_file: bool, override_cookie_browser: str = "") -> "_DownloadOutput":
+        command = build_download_command(
+            self.task,
+            self.config,
+            force_cookie_file=force_cookie_file,
+            override_cookie_browser=override_cookie_browser,
+        )
         logger.info(
             "download start task_id=%s attempt=%s title=%s",
             self.task.task_id,
-            "cookie-file" if force_cookie_file else "primary",
+            "cookie-file" if force_cookie_file else (f"browser:{override_cookie_browser}" if override_cookie_browser else "primary"),
             self.task.title,
         )
         logger.debug("download command task_id=%s command=%s", self.task.task_id, sanitize_command(command))

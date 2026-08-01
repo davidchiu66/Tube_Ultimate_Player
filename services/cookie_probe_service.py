@@ -75,7 +75,7 @@ def probe_site_cookie_browsers_detailed(
 ) -> ProbeReport:
     matches: dict[str, str] = {}
     unreadable: list[str] = []
-    for database in databases:
+    for database in _ranked(databases):
         remaining = [site for site in sites if site not in matches]
         if not remaining:
             break
@@ -98,6 +98,18 @@ def probe_site_cookie_browsers_detailed(
 
 class CookieDatabaseUnreadable(RuntimeError):
     """Cookie 库存在但打不开（多为浏览器运行时的独占锁）。"""
+
+
+def _ranked(databases: list[CookieDatabase]) -> list[CookieDatabase]:
+    """Firefox 优先。
+
+    探测只能确认「Cookie 名字在不在」（host/name 是明文），确认不了「值能不能被
+    yt-dlp 解出来」。而 Chrome 127+ / Brave / Edge 的 App-Bound Encryption 会让
+    yt-dlp 报 "Failed to decrypt with DPAPI" —— 名字明明在、实际却取不到值。
+    Firefox 的 moz_cookies 里值是明文，yt-dlp 一向能读。所以同样命中登录 Cookie 时
+    先选 Firefox，能显著降低选中一个「看起来行、实际不行」的浏览器的概率。
+    """
+    return sorted(databases, key=lambda item: 0 if item.kind == "firefox" else 1)
 
 
 def _sites_logged_in(database: CookieDatabase, sites: list[str]) -> list[str]:

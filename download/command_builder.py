@@ -59,6 +59,7 @@ def build_download_command(
     task: DownloadTask,
     config: ConfigService,
     force_cookie_file: bool = False,
+    override_cookie_browser: str = "",
 ) -> list[str]:
     output_template = str(Path(task.save_dir) / "%(title).200B [%(id)s].%(ext)s")
     command = [
@@ -101,7 +102,7 @@ def build_download_command(
     if proxy:
         command.extend(["--proxy", proxy])
 
-    cookie_browser = config.explicit_cookie_browser()
+    cookie_browser = override_cookie_browser or config.explicit_cookie_browser()
     cookie_file = config.cookie_file_for_url(task.url)
     if force_cookie_file and cookie_file:
         command.extend(["--cookies", prepare_cookie_file(cookie_file, task.url)])
@@ -118,12 +119,28 @@ def build_download_command(
 
 def should_retry_with_cookie_file(output: str) -> bool:
     detail = output.lower()
-    browser_cookie_failures = (
-        "could not copy chrome cookie database",
-        "failed to decrypt with dpapi",
-        "could not find chrome cookies database",
-    )
-    return any(message in detail for message in browser_cookie_failures)
+    return any(message in detail for message in BROWSER_COOKIE_FAILURES)
+
+
+def should_retry_with_alternate_browser(output: str) -> bool:
+    """浏览器 Cookie 取不出来时该换一个浏览器再试。
+
+    典型是 Chrome/Brave/Edge 的 App-Bound Encryption（Chrome 127+）：
+    Cookie 值只有浏览器自己能解密，yt-dlp 走 DPAPI 必然失败。这类失败与账号
+    无关，换一个浏览器（尤其是 Cookie 值明文存储的 Firefox）通常就能成功。
+    """
+    return should_retry_with_cookie_file(output)
+
+
+# 这些都是「读浏览器 Cookie 库失败」而不是「账号/网络问题」，换浏览器有意义。
+BROWSER_COOKIE_FAILURES = (
+    "could not copy chrome cookie database",
+    "failed to decrypt with dpapi",
+    "could not find chrome cookies database",
+    "could not decrypt cookie",
+    "unable to open browser cookie database",
+    "no such table: cookies",
+)
 
 
 def _find_ytdlp() -> Path:
