@@ -14,33 +14,33 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.19-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.22-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-366-16a34a?style=flat-square">
 </p>
 
 ## 亮点
 
 - 同时支持 YouTube 与 Bilibili，两站点共用统一播放器、下载器、收藏与历史体系
 - 支持首页推荐、关键词搜索、URL 直接播放、播放列表详情页与播放器侧滑播放列表面板
+- 首页 / 搜索 / 播放列表 / 播放器显示视频更新时间（数据源提供时）
+- 完整字幕支持：Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举，下拉框列常用轨，其余可在带搜索的完整列表中挑选
 - 顶部工具栏新增明确的“播放列表”入口，可直接查看当前列表和已保存列表
+- “播放 URL”面板保留最近播放地址，可直接点选重播
 - 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放
 - 使用 `libmpv` 播放，支持暂停、停止、全屏、清晰度切换、倍速、字幕与自动隐藏控制面板
-- 播放与暂停状态使用一致的控制面板滑入滑出逻辑，避免暂停画面长期被遮挡
-- 全屏切换时会自动滑出控制面板，避免面板残留遮挡画面
-- 播放器可一键使用系统默认浏览器打开当前在线视频原始页面
-- 支持 `Esc` 退出全屏、`Z/X` 调整倍速，并在屏幕中央显示音量/倍速快捷提示
+- 支持 `Esc` 退出全屏、`Z/X` 调整倍速、鼠标滚轮调节音量，并在屏幕中央显示音量/倍速提示
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
-- 投屏设备列表支持会话内缓存，后续打开时先快速校验 IP + 端口，缓存失效后再重新扫描
+- 投屏链路针对长视频做了加固：上游断流自动重连、协议头补全、令牌滑动续期
 - 播放快捷键支持在设置页查看、修改、禁用、冲突校验和恢复默认
-- 设置页常规选项区域支持滚动，较小分辨率或高缩放下可完整访问全部设置项
-- 播放列表自动连播会在下一集加载后明确恢复播放，避免停留在暂停状态
 - 内置下载队列，支持并发下载、暂停、继续、删除、完成回放与完成 toast 提示
-- 下载列表、收藏和播放历史显示视频来源，并支持本地筛选搜索
-- YouTube 与 Bilibili Cookie 内容独立保存，并随默认首页站点切换联动显示
-- 高 DPI / 125% 缩放场景下改进初始窗口尺寸与工具栏自适应，尽量保证应用完整显示
+- 下载列表最新任务置顶，并支持暂停/启动/删除的批量操作（选中或当前筛选范围）
+- Cookie 支持“自动检测”按站点分别挑选已登录的浏览器，读取失败会明确提示原因
+- 下载遇到浏览器 Cookie 解密失败时自动改用其它浏览器重试
+- 升级包与 FFmpeg 安装包强制校验来源域名、大小与 SHA256，压缩包拒绝路径穿越条目
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
 - 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
@@ -65,15 +65,16 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 首页 | YouTube / Bilibili 推荐内容、分页浏览、卡片独立播放/收藏/下载、长标题三行省略 |
-| 搜索 | 双站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
-| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 列表类链接 |
-| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、浏览器播放、全屏、快进/后退、静音、音量/倍速中屏提示、自动隐藏控制器 |
-| 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表面板、已保存列表加载/删除、命名保存、自动连播、批量下载 |
-| DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制 |
-| 下载 | 下载队列、并发控制、暂停、继续、删除、来源显示、搜索、完成提示、本地文件播放 |
+| 首页 | YouTube / Bilibili 推荐内容、分页浏览、卡片独立播放/收藏/下载、更新时间、长标题三行省略 |
+| 搜索 | 双站点关键词搜索、分页、卡片独立播放/收藏/下载、更新时间、等待动画与长标题三行省略 |
+| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 列表类链接，保留最近播放历史 |
+| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、浏览器播放、全屏、快进/后退、静音、滚轮与快捷键调音量、音量/倍速中屏提示、自动隐藏控制器 |
+| 字幕 | Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举、常用轨直选、完整列表搜索、下载后本地加载 |
+| 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表面板、已保存列表加载/删除、命名保存、自动连播、批量下载、更新时间列 |
+| DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制、上游断流重连 |
+| 下载 | 下载队列、并发控制、暂停、继续、删除、批量操作、最新置顶、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 常规与快捷键 Tab、代理、双站点独立 Cookie、仅显示已检测浏览器、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义、滚动适配较小窗口 |
+| 设置 | 常规与快捷键 Tab、三态代理模式、双站点独立 Cookie、按站点 Cookie 自动检测与重新检测、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义、滚动适配较小窗口 |
 | 关于 | 当前版本、GitHub 链接、检测新版本、Release Note 展示、Windows 自动升级与 Linux 手动升级包下载 |
 
 ## Bilibili 支持说明
@@ -164,7 +165,7 @@ Tube_Ultimate_Player/
 - `downloads/`
 - `logs/app.log`
 - `logs/yt-dlp.log`
-- `cache/`
+- `cache/`（含 `cache/subtitles/` 下载后的字幕文件）
 - `updates/`
 
 如果当前环境无法写入该目录，程序会回退到当前用户可写目录；在受限调试环境中，通常会回退到项目内的 `runtime/`。
@@ -268,28 +269,25 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 | `M` | 静音 / 恢复音量 |
 | `Home / End` | 跳转到开头 / 结尾 |
 | `PageUp / PageDown` | 播放列表上一项 / 下一项 |
+| 鼠标滚轮 | 在视频区或控制面板背景上滚动调节音量（每格 5） |
 
 输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
+滚轮调音量只在视频区与控制面板背景生效，音量滑块、清晰度/字幕/倍速下拉框与播放列表面板保留各自的原生滚轮行为。
 
-## 0.2.17 更新摘要
+## 0.2.22 更新摘要
 
-- 新增面向 Ubuntu 22.04/24.04 x86_64 的 Linux 支持。
-- Wayland 桌面通过 XWayland/xcb 运行，首版暂不支持原生 Wayland 嵌入。
-- Linux 遵循 XDG 配置、数据、缓存、状态和视频目录规范。
-- 已取消增强 AppImage/DEB 发布构建，Linux 发布改为 Fedora RPM/COPR。
-- 保留 Ubuntu Xvfb/libmpv 播放烟雾测试，持续验证 Linux 播放基础能力。
-- 支持 Linux Chrome/Chromium/Brave/Firefox 原生、Snap 和 Flatpak Cookie Profile 探测。
-- Linux 在线升级只下载匹配资产，不自动提权或安装系统包。
-- 修复 Ubuntu CI 直接运行 libmpv 烟雾测试时的项目模块导入路径。
-- 补齐 PySide6 xcb 平台插件在 Ubuntu 上需要的完整 libxcb 运行库闭包。
-- 将旧版 mpv 可能不支持的 `profile=fast` 改为可选兼容配置，不再阻断启动。
-- Linux 使用兼容性更高的 mpv `vo=gpu`，并在 CI 中启用 Mesa 软件渲染。
-- Linux 播放烟雾测试会先映射原生 X11 窗口，再从 Qt 事件循环加载纯视频样本。
-- 增加按环境变量启用的 libmpv 详细日志，远端失败时自动输出日志尾部。
-- Linux 允许 mpv 在硬件 GPU 不可用时回退到 Mesa 软件渲染器。
-- 稳定 Linux 发布测试中的 Qt 线程池 worker 生命周期，避免运行时准备改变时序后出现偶发段错误。
+投屏与 Cookie 两条链路的问题修复，以及六项功能增强：
 
-完整说明见 [`docs/releases/v0.2.17.md`](docs/releases/v0.2.17.md)。
+- 修复投屏时进度条在起始点与真实位置之间反复跳动
+- 投屏上游断流自动重连、补齐 DLNA 协议头与时长元数据、令牌改滑动续期，并补全转封装的观测日志
+- 修复 Bilibili 字幕全部拿不到的问题（yt-dlp 内联在 `data` 字段，原实现只认 `url`），新增全量字幕枚举与带搜索的完整列表
+- 修复空 Cookie 文件挡住浏览器 Cookie 并导致首页整体失败
+- Cookie「自动检测」改为按站点挑选已登录的浏览器，读不到时明确提示原因
+- 下载遇到浏览器 Cookie 解密失败（DPAPI / App-Bound Encryption）自动换浏览器重试
+- 修复下载进度条每秒回跳；封面请求关闭 HTTP/2 消除 `qt.network.http2` 报错
+- 新增视频更新时间、下载列表倒序与批量操作、鼠标滚轮音量、播放 URL 历史
+
+完整说明见 [`docs/releases/v0.2.22.md`](docs/releases/v0.2.22.md)。
 
 ## DLNA 投屏说明
 
@@ -301,7 +299,8 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 6. Bilibili 和部分 YouTube 清晰度使用分离音视频流，需要在设置中配置 FFmpeg；应用会实时封装为电视可播放的 MPEG-TS，不重新编码视频。
 7. 下载列表中的本地视频、音频也可投屏，设备通过局域网 HTTP 服务读取文件。
 8. 实时封装流不支持字节 Range，因此本期禁用进度拖动；停止投屏时会按电视最近进度恢复本地播放。
-9. 如果搜索不到设备，请检查系统防火墙、路由器组播设置，并确认设备支持 DLNA MediaRenderer/AVTransport。
+9. 上游 CDN 断流会自动重连，转封装的收尾原因、退出码与 FFmpeg 输出都会记入 `logs/app.log`，投屏异常时可据此定位。
+10. 如果搜索不到设备，请检查系统防火墙、路由器组播设置，并确认设备支持 DLNA MediaRenderer/AVTransport。
 
 ## 下载、收藏与历史
 
@@ -312,11 +311,13 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `81` 项）：
+运行完整自动化测试（当前版本共 `366` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+`tests/` 下的用例全部使用临时目录，不会写入真实运行目录里的配置、Cookie 与下载任务。
 
 ## 第三方组件与合规声明
 

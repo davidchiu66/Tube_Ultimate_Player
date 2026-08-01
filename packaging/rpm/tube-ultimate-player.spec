@@ -1,5 +1,5 @@
 Name:           tube-ultimate-player
-Version:        0.2.21
+Version:        0.2.22
 Release:        1%{?dist}
 Summary:        YouTube and Bilibili desktop video player
 
@@ -85,6 +85,11 @@ desktop-file-validate \
 %{_datadir}/%{name}/
 
 %changelog
+* Sat Aug 01 2026 davidchiu66 <chinamen@gmail.com> - 0.2.22-1
+- Fix DLNA casting progress, upstream reconnect and protocol headers.
+- Enumerate all Bilibili and YouTube subtitles with a searchable picker.
+- Harden browser cookie detection and download cookie fallback.
+
 * Fri Jul 31 2026 davidchiu66 <chinamen@gmail.com> - 0.2.21-1
 - Verify update packages, harden archive extraction and DLNA relay access.
 - Fix the online upgrade launcher and improve home page and startup performance.
