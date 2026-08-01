@@ -4,6 +4,35 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+# 常用语言码 → 中文名。yt-dlp 对 YouTube 会直接给出可读的 name，这张表主要用于
+# B 站的 ai-zh / ai-en 之类只有语言码的轨道。
+LANGUAGE_NAMES = {
+    "zh": "中文",
+    "zh-hans": "简体中文",
+    "zh-hant": "繁体中文",
+    "zh-cn": "中文（简体）",
+    "zh-tw": "中文（台湾）",
+    "zh-hk": "中文（香港）",
+    "yue": "粤语",
+    "en": "英语",
+    "ja": "日语",
+    "ko": "韩语",
+    "es": "西班牙语",
+    "fr": "法语",
+    "de": "德语",
+    "ru": "俄语",
+    "pt": "葡萄牙语",
+    "ar": "阿拉伯语",
+    "it": "意大利语",
+    "th": "泰语",
+    "vi": "越南语",
+    "id": "印尼语",
+    "hi": "印地语",
+    "ms": "马来语",
+    "tr": "土耳其语",
+}
+
+
 @dataclass
 class HomeVideo:
     video_id: str
@@ -92,13 +121,38 @@ class VideoQuality:
 class SubtitleInfo:
     language: str
     ext: str
-    url: str
+    url: str = ""
     is_auto: bool = False
+    # yt-dlp 对部分站点（如 B 站 AI 字幕）直接内联字幕正文，不给 url。
+    data: str = ""
+    # yt-dlp 提供的可读语言名，如 "Chinese (Taiwan)"；缺失时回退语言代码。
+    name: str = ""
+
+    @property
+    def is_ai_generated(self) -> bool:
+        """B 站的 AI 字幕语言码形如 ai-zh，yt-dlp 不会另外标注。"""
+        return self.language.lower().startswith("ai-")
+
+    @property
+    def display_language(self) -> str:
+        if self.name.strip():
+            return self.name.strip()
+        code = self.language[3:] if self.is_ai_generated else self.language
+        return LANGUAGE_NAMES.get(code.lower(), code or self.language)
 
     @property
     def label(self) -> str:
-        suffix = "自动" if self.is_auto else "字幕"
-        return f"{self.language} ({suffix}, {self.ext})"
+        if self.is_ai_generated:
+            suffix = "AI 字幕"
+        else:
+            suffix = "自动" if self.is_auto else "字幕"
+        name = self.display_language
+        code = f" [{self.language}]" if name != self.language else ""
+        return f"{name}{code} · {suffix}"
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.url or self.data)
 
 
 @dataclass

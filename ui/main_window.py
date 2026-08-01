@@ -58,6 +58,7 @@ from workers.home_worker import HomeWorker
 from workers.playlist_worker import PlaylistWorker
 from workers.resolver_worker import ResolverWorker
 from workers.search_worker import SearchWorker
+from workers.subtitle_worker import SubtitleLoadWorker
 from workers.update_check_worker import UpdateCheckWorker
 from workers.update_download_worker import UpdateDownloadWorker
 
@@ -153,6 +154,8 @@ class MainWindow(QMainWindow):
         self._home_has_next = False
         self._search_keyword = ""
         self._search_page = 1
+        self._subtitle_request_id = 0
+        self._pending_recent_url = ""
         self._last_update_result: UpdateCheckResult | None = None
         self._pending_node_installer_path = ""
         self._pending_ffmpeg_info: FfmpegInstallInfo | None = None
@@ -931,27 +934,57 @@ class MainWindow(QMainWindow):
     def _change_subtitle(self, key: str) -> None:
         if not self.current_video:
             return
+        # 迟到的旧字幕请求不许改动当前轨道。
+        self._subtitle_request_id += 1
         if not key:
             self.mpv.clear_subtitles()
             return
         subtitle = self.current_video.subtitles.get(key)
-        if subtitle:
-            subtitle_ext = str(subtitle.ext or "").strip().lower()
-            subtitle_url = str(subtitle.url or "").strip()
-            if subtitle_ext == "xml" or urlparse(subtitle_url).path.lower().endswith(".xml"):
-                logger.warning(
-                    "unsupported XML subtitle ignored key=%s url=%s",
-                    key,
-                    subtitle_url,
-                )
-                self.toast.show_message("Bilibili XML 弹幕不是标准字幕，已忽略")
-                return
-            try:
-                logger.info("subtitle load requested key=%s ext=%s", key, subtitle_ext)
-                self.mpv.add_subtitle(subtitle_url)
-            except Exception as exc:
-                logger.exception("subtitle load failed key=%s", key)
-                QMessageBox.warning(self, "字幕加载失败", str(exc))
+        if subtitle is None:
+            logger.warning("subtitle key not found key=%s", key)
+            return
+        if not subtitle.is_usable:
+            self.toast.show_message(f"{subtitle.display_language} 字幕没有可用内容")
+            return
+
+        _source, proxy = self.config.effective_proxy()
+        worker = SubtitleLoadWorker(
+            self._subtitle_request_id,
+            key,
+            subtitle,
+            self.current_video.video_id,
+            proxy=proxy,
+            headers=dict(self.current_video.http_headers),
+        )
+        worker.signals.success.connect(self._subtitle_ready)
+        worker.signals.error.connect(self._subtitle_failed)
+        logger.info(
+            "subtitle load requested key=%s language=%s ext=%s inline=%s",
+            key,
+            subtitle.language,
+            subtitle.ext,
+            bool(subtitle.data),
+        )
+        self.thread_pool.start(worker)
+
+    @Slot(int, str, str)
+    @_skip_after_shutdown
+    def _subtitle_ready(self, request_id: int, key: str, path: str) -> None:
+        if request_id != self._subtitle_request_id:
+            logger.info("stale subtitle result ignored key=%s", key)
+            return
+        try:
+            self.mpv.add_subtitle(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("subtitle apply failed key=%s path=%s", key, path)
+            QMessageBox.warning(self, "字幕加载失败", str(exc))
+
+    @Slot(int, str, str)
+    @_skip_after_shutdown
+    def _subtitle_failed(self, request_id: int, key: str, message: str) -> None:
+        if request_id != self._subtitle_request_id:
+            return
+        self.toast.show_message(f"字幕加载失败：{message}")
 
     def _set_volume(self, volume: int) -> None:
         self.config.set("player.volume", volume)

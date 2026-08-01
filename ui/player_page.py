@@ -31,6 +31,9 @@ from ui.thumbnail_cache import build_image_request, read_image_reply
 VOLUME_WHEEL_STEP = 5
 # 标准滚轮一格是 120；高分辨率滚轮/触控板会给出更小的增量，累加后再折算成格数。
 _WHEEL_NOTCH = 120.0
+# 字幕下拉框里最多直接列出多少条，其余走「更多字幕…」对话框。
+SUBTITLE_SHORTLIST = 12
+SUBTITLE_MORE_SENTINEL = "__subtitle_more__"
 
 
 class PlayerPage(QWidget):
@@ -83,6 +86,8 @@ class PlayerPage(QWidget):
         self._ignore_next_release = False
         self._auto_hide_enabled = False
         self._wheel_accumulator = 0.0
+        self._subtitles: dict = {}
+        self._active_subtitle_key = ""
 
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
@@ -427,16 +432,47 @@ class PlayerPage(QWidget):
         if index >= 0:
             self.quality_combo.setCurrentIndex(index)
 
-        self.subtitle_combo.clear()
-        self.subtitle_combo.addItem("关闭", "")
-        for key, subtitle in video.subtitles.items():
-            self.subtitle_combo.addItem(subtitle.label, key)
+        self._populate_subtitle_combo(video.subtitles)
+        self._active_subtitle_key = ""
 
         self._populating = False
         self.load_thumbnail(video.thumbnail)
         self.set_download_available(True)
         self.set_browser_play_available(bool(str(video.webpage_url or "").strip()))
         self._position_control_panel(animated=False)
+
+    def _populate_subtitle_combo(self, subtitles: dict) -> None:
+        """下拉框只放前 SUBTITLE_SHORTLIST 条，其余走「更多字幕…」对话框。
+
+        YouTube 的自动字幕可以有近五千条（机翻到各种语言），全塞进 QComboBox 既慢
+        又没法找；SubtitleParser 已按「手动优先、中英文优先」排好序，取前面一截
+        正好覆盖绝大多数使用场景。
+        """
+        self._subtitles = dict(subtitles or {})
+        self.subtitle_combo.clear()
+        self.subtitle_combo.addItem("关闭", "")
+        for key, subtitle in list(self._subtitles.items())[:SUBTITLE_SHORTLIST]:
+            self.subtitle_combo.addItem(subtitle.label, key)
+        if len(self._subtitles) > SUBTITLE_SHORTLIST:
+            self.subtitle_combo.addItem(
+                f"更多字幕…（共 {len(self._subtitles)} 条）",
+                SUBTITLE_MORE_SENTINEL,
+            )
+
+    def _ensure_subtitle_item(self, key: str) -> None:
+        """把对话框里选中的字幕补进下拉框并选中它。"""
+        subtitle = self._subtitles.get(key)
+        if subtitle is None:
+            return
+        index = self.subtitle_combo.findData(key)
+        if index < 0:
+            insert_at = max(1, self.subtitle_combo.count() - (1 if self._has_more_entry() else 0))
+            self.subtitle_combo.insertItem(insert_at, subtitle.label, key)
+            index = insert_at
+        self.subtitle_combo.setCurrentIndex(index)
+
+    def _has_more_entry(self) -> bool:
+        return self.subtitle_combo.findData(SUBTITLE_MORE_SENTINEL) >= 0
 
     def update_local_file_info(self, path: str) -> None:
         self._populating = True
@@ -453,6 +489,8 @@ class PlayerPage(QWidget):
         self.quality_combo.addItem("本地")
         self.subtitle_combo.clear()
         self.subtitle_combo.addItem("关闭", "")
+        self._subtitles = {}
+        self._active_subtitle_key = ""
         self._populating = False
         self.set_download_available(False)
         self.set_browser_play_available(False)
@@ -616,8 +654,34 @@ class PlayerPage(QWidget):
             self.quality_changed.emit(label)
 
     def _emit_subtitle(self) -> None:
-        if not self._populating:
-            self.subtitle_changed.emit(str(self.subtitle_combo.currentData() or ""))
+        if self._populating:
+            return
+        key = str(self.subtitle_combo.currentData() or "")
+        if key == SUBTITLE_MORE_SENTINEL:
+            self._open_subtitle_picker()
+            return
+        self._active_subtitle_key = key
+        self.subtitle_changed.emit(key)
+
+    def _open_subtitle_picker(self) -> None:
+        from ui.subtitle_dialog import SubtitlePickerDialog
+
+        previous = self._active_subtitle_key
+        dialog = SubtitlePickerDialog(self._subtitles, self, current_key=previous)
+        chosen = dialog.selected_key() if dialog.exec() else ""
+        self._populating = True
+        try:
+            if chosen:
+                self._ensure_subtitle_item(chosen)
+            else:
+                # 取消时回到原来的选项，而不是把「更多字幕…」当成一个字幕留在框里。
+                index = max(0, self.subtitle_combo.findData(previous))
+                self.subtitle_combo.setCurrentIndex(index)
+        finally:
+            self._populating = False
+        if chosen and chosen != previous:
+            self._active_subtitle_key = chosen
+            self.subtitle_changed.emit(chosen)
 
     def _update_playback_buttons(self) -> None:
         enabled = self._has_media and not self._loading
