@@ -14,7 +14,7 @@ from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app_paths import APP_NAME, asset_path, ensure_runtime_dirs, resource_path
-from services.logging_service import setup_logging
+from services.logging_service import install_qt_message_handler, setup_logging
 from ui.main_window import MainWindow
 
 
@@ -24,6 +24,7 @@ logger = logging.getLogger("tube_player.app")
 def main() -> int:
     ensure_runtime_dirs()
     setup_logging()
+    install_qt_message_handler()
     logger.info(
         "application starting platform=%s session=%s qpa=%s root=%s",
         sys.platform,

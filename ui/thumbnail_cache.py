@@ -12,6 +12,20 @@ from PySide6.QtWidgets import QLabel
 
 logger = logging.getLogger("tube_player.ui.thumbnail")
 
+# 一屏封面会同时发出几十个请求。Qt6 默认对 HTTPS 启用 HTTP/2，这些请求会被复用到
+# 同一条连接的多个 stream 上，图片 CDN 往回打 RST_STREAM(INTERNAL_ERROR) 时，Qt 就在
+# 控制台刷 `qt.network.http2: stream N error: "Internal server error"`。
+# 封面是一堆小文件，HTTP/2 的多路复用收益很小，改用 HTTP/1.1（每主机 6 连接）
+# 既能消掉这些报错，也更稳。
+def build_image_request(url: str) -> QNetworkRequest:
+    request = QNetworkRequest(QUrl(url))
+    request.setAttribute(QNetworkRequest.Attribute.Http2AllowedAttribute, False)
+    request.setAttribute(
+        QNetworkRequest.Attribute.RedirectPolicyAttribute,
+        QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
+    )
+    return request
+
 
 class ThumbnailCache(QObject):
     def __init__(self, parent: QObject | None = None, max_items: int = 300) -> None:
@@ -53,7 +67,7 @@ class ThumbnailCache(QObject):
             return
 
         self._in_flight[key] = [weakref.ref(label)]
-        reply = network.get(QNetworkRequest(QUrl(normalized)))
+        reply = network.get(build_image_request(normalized))
         reply.finished.connect(lambda: self._handle_finished(reply, key, error_text))
 
     def cancel_for(self, label: QLabel) -> None:

@@ -36,6 +36,30 @@ def setup_logging() -> None:
     ytdlp_logger.addHandler(ytdlp_handler)
 
 
+def install_qt_message_handler() -> None:
+    """把 Qt 自己的分类日志（qt.network.http2 等）收进 logs/app.log。
+
+    Qt 的消息不走 Python logging，默认直接打到 stderr，于是控制台会出现一堆
+    看不出上下文、日志里又查不到的报错。转进来之后控制台干净，信息也不丢。
+    """
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    qt_logger = logging.getLogger("tube_player.qt")
+    levels = {
+        QtMsgType.QtDebugMsg: logging.DEBUG,
+        QtMsgType.QtInfoMsg: logging.INFO,
+        QtMsgType.QtWarningMsg: logging.WARNING,
+        QtMsgType.QtCriticalMsg: logging.ERROR,
+        QtMsgType.QtFatalMsg: logging.CRITICAL,
+    }
+
+    def handler(mode, context, message: str) -> None:
+        category = str(getattr(context, "category", "") or "qt")
+        qt_logger.log(levels.get(mode, logging.INFO), "[%s] %s", category, message)
+
+    qInstallMessageHandler(handler)
+
+
 def sanitize_command(command: Iterable[str]) -> list[str]:
     sanitized: list[str] = []
     hide_next_for = {"--cookies", "--proxy"}

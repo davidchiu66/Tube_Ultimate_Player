@@ -8,9 +8,14 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QByteArray  # noqa: E402
+from PySide6.QtNetwork import QNetworkRequest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from ui.thumbnail_cache import ThumbnailCache, _looks_like_complete_image  # noqa: E402
+from ui.thumbnail_cache import (  # noqa: E402
+    ThumbnailCache,
+    _looks_like_complete_image,
+    build_image_request,
+)
 
 
 class _FakeLabel:
@@ -129,6 +134,36 @@ class ThumbnailWaiterIsolationTests(unittest.TestCase):
         self._finish()
 
         self.assertEqual(alive.pixmap_calls, 1)
+
+
+class ImageRequestTests(unittest.TestCase):
+    """封面请求关掉 HTTP/2。
+
+    一屏几十张封面复用到一条 HTTP/2 连接上时，图片 CDN 会回 RST_STREAM，
+    Qt 便在控制台刷 `qt.network.http2: stream N error: "Internal server error"`。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_http2_is_disabled(self) -> None:
+        request = build_image_request("https://i.ytimg.com/vi/abc/hqdefault.jpg")
+
+        self.assertIs(request.attribute(QNetworkRequest.Attribute.Http2AllowedAttribute), False)
+
+    def test_url_is_preserved(self) -> None:
+        url = "https://i0.hdslb.com/bfs/archive/abc.jpg@672w_378h_1c.webp"
+
+        self.assertEqual(build_image_request(url).url().toString(), url)
+
+    def test_redirects_stay_on_a_no_less_safe_policy(self) -> None:
+        request = build_image_request("https://i.ytimg.com/vi/abc/hqdefault.jpg")
+
+        self.assertEqual(
+            request.attribute(QNetworkRequest.Attribute.RedirectPolicyAttribute),
+            QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
+        )
 
 
 if __name__ == "__main__":

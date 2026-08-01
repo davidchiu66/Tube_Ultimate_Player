@@ -43,6 +43,8 @@ class DownloadWorker(QRunnable):
         self.signals = DownloadWorkerSignals()
         self._process: subprocess.Popen[str] | None = None
         self._stop_requested = threading.Event()
+        # 对外只报单调递增的整体进度，见 _publish_progress。
+        self._reported_percent = 0.0
 
     def stop(self) -> None:
         self._stop_requested.set()
@@ -195,6 +197,27 @@ class DownloadWorker(QRunnable):
             if line:
                 output_path = self._handle_output_line(line, lines, output_path)
 
+    def _publish_progress(self, percent: float | None, speed: str, eta: str) -> None:
+        """进度的唯一出口，只许前进。
+
+        yt-dlp 的 --progress-template 给的是**单文件**百分比：`视频+音频` 会跑两轮
+        0→100，第二个文件一开始进度条就掉回起点；而按磁盘字节算的估算器给的是整体
+        百分比。两个数都往界面推，进度条每秒就在「起点」和「真实进度」之间来回跳。
+        """
+        if percent is not None:
+            self._reported_percent = max(self._reported_percent, min(100.0, float(percent)))
+        self.task.progress = self._reported_percent
+        if speed:
+            self.task.speed_text = speed
+        if eta:
+            self.task.eta_text = eta
+        self.signals.progress.emit(
+            self.task.task_id,
+            self.task.progress,
+            self.task.speed_text,
+            self.task.eta_text,
+        )
+
     def _emit_file_progress(self, estimator: "_FileProgressEstimator", now: float) -> None:
         snapshot = estimator.poll(now)
         if not snapshot:
@@ -209,7 +232,7 @@ class DownloadWorker(QRunnable):
             current_bytes,
             self.task.expected_bytes or 0,
         )
-        self.signals.progress.emit(self.task.task_id, percent, speed, eta)
+        self._publish_progress(percent, speed, eta)
 
     def _handle_output_line(self, line: str, lines: list[str], output_path: str) -> str:
         lines.append(line)
@@ -225,10 +248,10 @@ class DownloadWorker(QRunnable):
                 speed,
                 eta,
             )
-            self.task.progress = percent
-            self.task.speed_text = speed
-            self.task.eta_text = eta
-            self.signals.progress.emit(self.task.task_id, percent, speed, eta)
+            # 知道整体字节数时，进度条交给按字节算的估算器，模板里的单文件百分比
+            # 只用来刷新速度与剩余时间；不知道时才拿它当进度（仍然只许前进）。
+            has_total = (self.task.expected_bytes or 0) > 0
+            self._publish_progress(None if has_total else percent, speed, eta)
         elif line.startswith("filepath:"):
             output_path = line.split(":", 1)[1].strip()
         else:

@@ -24,7 +24,7 @@ from services.config_service import ConfigService
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 from ui.playlist_overlay import PlaylistOverlay
 from ui.text_elision import format_upload_date
-from ui.thumbnail_cache import read_image_reply
+from ui.thumbnail_cache import build_image_request, read_image_reply
 
 
 # 每格滚轮调整的音量，与键盘 volume_up / volume_down 的步长保持一致。
@@ -520,7 +520,7 @@ class PlayerPage(QWidget):
         self.thumbnail_label.setPixmap(QPixmap())
         if not url:
             return
-        reply = self._network.get(QNetworkRequest(QUrl(url)))
+        reply = self._network.get(build_image_request(url))
         reply.finished.connect(lambda: self._thumbnail_finished(reply))
 
     @Slot()
