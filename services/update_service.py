@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -245,6 +246,9 @@ class UpdateCheckResult:
     install_mode_label: str
     release: ReleaseInfo
     selected_asset: ReleaseAsset | None
+    platform_info: PlatformInfo | None = None
+    arch_mismatch: bool = False
+    """发布里有升级包，但没有一个面向本机架构——此时宁可不升级也不能装错包。"""
 
 
 class UpdateService:
@@ -329,16 +333,28 @@ class UpdateService:
         current_version = self.local_version()
         latest_version = release.tag_name or release.name or current_version
         install_mode, install_mode_label = self.detect_install_mode()
+        platform_info = detect_platform_info()
         selected_asset = self.select_upgrade_asset(release, install_mode)
-        has_update = compare_versions(latest_version, current_version) > 0 and selected_asset is not None
+        newer = compare_versions(latest_version, current_version) > 0
+        # 发布里明明有包，却一个都不匹配本机架构：不是"已是最新"，要如实告诉用户。
+        arch_mismatch = newer and selected_asset is None and bool(release.assets)
+        if arch_mismatch:
+            logger.warning(
+                "update arch mismatch host=%s process=%s assets=%s",
+                platform_info.host_arch,
+                platform_info.process_arch,
+                [asset.name for asset in release.assets],
+            )
         return UpdateCheckResult(
             current_version=current_version,
             latest_version=latest_version,
-            has_update=has_update,
+            has_update=newer and selected_asset is not None,
             install_mode=install_mode,
             install_mode_label=install_mode_label,
             release=release,
             selected_asset=selected_asset,
+            platform_info=platform_info,
+            arch_mismatch=arch_mismatch,
         )
 
     def select_upgrade_asset(self, release: ReleaseInfo, install_mode: str) -> ReleaseAsset | None:
@@ -346,20 +362,18 @@ class UpdateService:
         if install_mode.startswith("linux"):
             suffix = ".deb" if install_mode == "linux_deb" else ".appimage"
             matching = [asset for asset in assets if asset.name.lower().endswith(suffix)]
-            matching = [
-                asset
-                for asset in matching
-                if any(arch in asset.name.lower() for arch in ("x86_64", "amd64"))
-            ] or matching
+            # Linux 同样按本机架构收紧：宁可不给包，也不给一个跑不起来的异架构包。
+            matching = select_arch_assets(matching, host_cpu_arch())
             for asset in matching:
                 name = asset.name.lower()
                 if "with_deno_ffmpeg" in name or "with-deno-ffmpeg" in name:
                     return asset
             return matching[0] if matching else None
 
-        # Windows 现在同时发布 x86_64 与 arm64 资产，必须只在与本机架构相符的资产里挑，
-        # 否则 arm64 机器可能装上 x86_64 包（或反之）。旧版本发布没有架构后缀，退回全量。
-        arch_assets = [asset for asset in assets if _matches_windows_arch(asset.name)] or assets
+        # Windows 自 v0.2.23 起同时发布 x86_64 与 arm64 资产，必须只在与本机相符的
+        # 资产里挑。找不到相符的只退回无架构标记的旧资产，不退回全量——退回全量会把
+        # arm64 安装包发给 x64 机器，Windows 会直接拒绝加载该 PE。
+        arch_assets = select_arch_assets(assets, current_windows_arch())
 
         if install_mode == "portable":
             for asset in arch_assets:
@@ -418,6 +432,30 @@ class UpdateService:
         logger.warning("未在发布信息中找到 %s 的 SHA256 校验值", asset.name)
         return ""
 
+    def ensure_package_arch_runnable(self, package_path: str | Path) -> None:
+        """启动前读 PE 头，确认安装包的机器类型本机真能跑。
+
+        最后一道闸：万一资产命名或挑选再出岔子，也要在这里拦下，而不是让
+        Windows 弹 "This program does not support the version of Windows your
+        computer is running"——那句提示会把用户引向系统版本，与真正的病因无关。
+        读不出机器类型（非 PE、文件被占用等）时放行，不给正常升级添堵。
+        """
+        machine = read_pe_machine(package_path)
+        if not machine:
+            return
+        host = host_cpu_arch()
+        if machine == host:
+            return
+        # ARM64 机器能模拟跑 x86_64 与 x86 安装包，反向不成立。
+        if host == "arm64" and machine in ("x86_64", "x86"):
+            return
+        if host == "x86_64" and machine == "x86":
+            return
+        logger.error("升级包架构与本机不符 path=%s package=%s host=%s", package_path, machine, host)
+        raise RuntimeError(
+            f"升级包是 {machine} 架构，本机是 {host}，无法运行。已终止升级，请到 GitHub 下载对应架构的安装包。"
+        )
+
     def verify_authenticode(self, package_path: str | Path) -> None:
         """无法取得哈希时的兜底：校验 Windows 数字签名，签名无效则拒绝执行。"""
         package = Path(package_path).resolve()
@@ -461,6 +499,7 @@ class UpdateService:
             raise RuntimeError("当前升级文件不是可执行安装包")
         if not sys.platform.startswith("win"):
             raise RuntimeError("自动启动安装程序目前仅支持 Windows")
+        self.ensure_package_arch_runnable(package)
 
         powershell = shutil.which("powershell.exe")
         if not powershell:
@@ -557,6 +596,35 @@ class UpdateService:
         return urllib.request.build_opener(*handlers)
 
 
+def read_pe_machine(path: str | Path) -> str:
+    """读 PE 头里的 Machine 字段，返回归一化架构标签；不是 PE 或读失败返回空串。
+
+    结构：偏移 0x3C 处是 4 字节 e_lfanew，指向 "PE\0\0" 签名，紧随其后的
+    2 字节就是 IMAGE_FILE_HEADER.Machine。
+    """
+    try:
+        with Path(path).open("rb") as handle:
+            if handle.read(2) != b"MZ":
+                return ""
+            handle.seek(0x3C)
+            offset_bytes = handle.read(4)
+            if len(offset_bytes) != 4:
+                return ""
+            offset = int.from_bytes(offset_bytes, "little")
+            if offset <= 0 or offset > 0x1000_0000:
+                return ""
+            handle.seek(offset)
+            if handle.read(4) != b"PE\0\0":
+                return ""
+            machine_bytes = handle.read(2)
+            if len(machine_bytes) != 2:
+                return ""
+    except OSError:
+        logger.warning("读取升级包 PE 头失败 path=%s", path)
+        return ""
+    return _IMAGE_FILE_MACHINE.get(int.from_bytes(machine_bytes, "little"), "")
+
+
 def normalize_sha256(value: str) -> str:
     """接受 "sha256:xxx" / "SHA256 = xxx" / 裸哈希三种写法，返回小写 64 位十六进制。"""
     text = str(value or "").strip().lower()
@@ -591,36 +659,175 @@ def extract_sha256_for(text: str, filename: str, *, allow_bare: bool = False) ->
     return ""
 
 
+def normalize_arch_label(value: str) -> str:
+    """把各路来源的架构写法归一成 'arm64' / 'x86_64'，认不出来返回空串。"""
+    text = str(value or "").strip().lower()
+    if text in ("arm64", "aarch64", "armv8", "armv8l"):
+        return "arm64"
+    if text in ("amd64", "x86_64", "x64", "em64t", "intel64"):
+        return "x86_64"
+    if text in ("x86", "i386", "i686", "ia32"):
+        return "x86"
+    return ""
+
+
+def host_cpu_arch() -> str:
+    """返回**本机 CPU**的架构标签，与当前进程是否被模拟无关。
+
+    Windows 上优先问 IsWow64Process2：它是唯一能如实报出宿主机架构的接口，
+    在 ARM64 机器上跑 x64 进程时 nativeMachine 会明确返回 ARM64。
+    取不到（旧系统或非 Windows）时退回环境变量与 platform.machine()。
+    """
+    if sys.platform.startswith("win"):
+        native = _native_machine_via_wow64()
+        if native:
+            return native
+        # 32 位进程跑在 64 位系统上时，宿主架构在 PROCESSOR_ARCHITEW6432 里。
+        for name in ("PROCESSOR_ARCHITEW6432", "PROCESSOR_ARCHITECTURE"):
+            arch = normalize_arch_label(os.environ.get(name, ""))
+            if arch:
+                return arch
+    return normalize_arch_label(platform.machine()) or "x86_64"
+
+
+def _native_machine_via_wow64() -> str:
+    """用 kernel32!IsWow64Process2 读宿主机架构，失败返回空串。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        is_wow64_process2 = ctypes.WinDLL("kernel32", use_last_error=True).IsWow64Process2
+    except (ImportError, OSError, AttributeError):
+        # Windows 10 1511 之前没有这个导出，属于预期情况。
+        return ""
+    is_wow64_process2.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.USHORT)]
+    is_wow64_process2.restype = wintypes.BOOL
+    process_machine = wintypes.USHORT()
+    native_machine = wintypes.USHORT()
+    try:
+        ok = is_wow64_process2(ctypes.c_void_p(-1), ctypes.byref(process_machine), ctypes.byref(native_machine))
+    except OSError:
+        return ""
+    if not ok:
+        return ""
+    return _IMAGE_FILE_MACHINE.get(int(native_machine.value), "")
+
+
+# IMAGE_FILE_MACHINE_* 常量，只列本项目会遇到的几种。
+_IMAGE_FILE_MACHINE = {
+    0x014C: "x86",
+    0x8664: "x86_64",
+    0xAA64: "arm64",
+    0x01C4: "arm",
+}
+
+
 def current_windows_arch() -> str:
     """返回本进程运行的 Windows 架构标签：'arm64' 或 'x86_64'。
 
-    用 PROCESSOR_ARCHITECTURE（反映**当前进程**架构）而不是 platform.machine()：
+    用 PROCESSOR_ARCHITECTURE（反映**当前进程**架构）而不是宿主机架构：
     x86_64 版在 arm64 机器上以模拟方式运行时，应继续更新到 x86_64 版而非 arm64 版，
-    platform.machine() 会优先返回宿主机架构（PROCESSOR_ARCHITEW6432），与此相反。
+    否则升级会把用户换到另一套安装体系上。展示给用户的宿主机架构走 host_cpu_arch()。
     """
-    arch = os.environ.get("PROCESSOR_ARCHITECTURE", "").strip().lower()
-    if arch == "arm64":
-        return "arm64"
-    if arch in ("amd64", "x86", "x64"):
-        return "x86_64"
-    machine = __import__("platform").machine().strip().lower()
-    if machine in ("arm64", "aarch64"):
-        return "arm64"
-    return "x86_64"
+    arch = normalize_arch_label(os.environ.get("PROCESSOR_ARCHITECTURE", ""))
+    if arch in ("arm64", "x86_64"):
+        return arch
+    if arch == "x86":
+        # 32 位进程：本项目只发 64 位包，按宿主机架构挑。
+        return host_cpu_arch()
+    return normalize_arch_label(platform.machine()) or "x86_64"
 
 
-def _matches_windows_arch(asset_name: str, arch: str | None = None) -> bool:
-    """资产名是否与目标架构相符。
+@dataclass(slots=True)
+class PlatformInfo:
+    """升级前探测到的运行环境，既用于挑资产也用于在关于页展示。"""
 
-    命名约定：x86_64 资产带 win_x86_64，arm64 资产带 win_arm64。arm64 里也含子串
-    x86_64 是不可能的，但为稳妥起见，arm64 机器只认 win_arm64，x86_64 机器认 win_x86_64
-    且明确排除 win_arm64。没有任何架构后缀的旧资产两边都不匹配，交由调用方退回全量。
+    os_label: str
+    host_arch: str
+    process_arch: str
+
+    @property
+    def emulated(self) -> bool:
+        """当前进程架构与本机 CPU 不同，即处于模拟/兼容层中运行。"""
+        return bool(self.host_arch and self.process_arch and self.host_arch != self.process_arch)
+
+    def describe(self) -> str:
+        parts = [self.os_label or "未知系统", f"CPU {self.host_arch or '未知'}"]
+        if self.emulated:
+            parts.append(f"本程序 {self.process_arch}（模拟运行）")
+        else:
+            parts.append(f"本程序 {self.process_arch or '未知'}")
+        return " · ".join(parts)
+
+
+def detect_platform_info() -> PlatformInfo:
+    return PlatformInfo(
+        os_label=_os_label(),
+        host_arch=host_cpu_arch(),
+        process_arch=current_windows_arch() if sys.platform.startswith("win") else (normalize_arch_label(platform.machine()) or "x86_64"),
+    )
+
+
+def _os_label() -> str:
+    if sys.platform.startswith("win"):
+        version = platform.version().strip()
+        release = platform.release().strip()
+        # Windows 11 的 platform.release() 仍可能报 10，用内部版本号纠正。
+        build = 0
+        try:
+            build = int(version.split(".")[-1])
+        except (ValueError, IndexError):
+            build = 0
+        if build >= 22000 and release == "10":
+            release = "11"
+        return f"Windows {release}".strip() + (f" ({version})" if version else "")
+    if sys.platform.startswith("linux"):
+        pretty = _linux_pretty_name()
+        if pretty:
+            return pretty
+        return f"Linux {platform.release()}".strip()
+    return f"{platform.system()} {platform.release()}".strip() or "未知系统"
+
+
+def _linux_pretty_name() -> str:
+    try:
+        with open("/etc/os-release", "r", encoding="utf-8") as handle:
+            for line in handle:
+                key, _, value = line.partition("=")
+                if key.strip() == "PRETTY_NAME":
+                    return value.strip().strip('"')
+    except OSError:
+        return ""
+    return ""
+
+
+def asset_arch(asset_name: str) -> str:
+    """从资产名读出它面向的架构，没有任何架构标记时返回空串。
+
+    命名约定：x86_64 资产带 win_x86_64，arm64 资产带 win_arm64。先判 arm64——
+    arm64 名字里不会含 x86_64，反之也不会，但顺序固定可以少一层推理。
     """
     name = str(asset_name or "").lower()
-    target = (arch or current_windows_arch()).lower()
-    if target == "arm64":
-        return "win_arm64" in name or "arm64" in name
-    return "win_x86_64" in name and "arm64" not in name
+    for token in ("arm64", "aarch64"):
+        if token in name:
+            return "arm64"
+    for token in ("x86_64", "amd64", "x64"):
+        if token in name:
+            return "x86_64"
+    return ""
+
+
+def select_arch_assets(assets: list[ReleaseAsset], arch: str) -> list[ReleaseAsset]:
+    """挑出与 arch 相符的资产；一个都没有时只退回**无架构标记**的旧资产。
+
+    这里绝不能退回全量资产：v0.2.23 起同一发布里同时有 x86_64 与 arm64 包，
+    退回全量会让本机架构缺包时挑到另一架构的安装程序，Windows 直接报
+    "This program does not support the version of Windows your computer is running"。
+    """
+    matched = [asset for asset in assets if asset_arch(asset.name) == arch]
+    if matched:
+        return matched
+    return [asset for asset in assets if not asset_arch(asset.name)]
 
 
 def _is_checksum_asset(candidate_name: str, target_name: str) -> bool:

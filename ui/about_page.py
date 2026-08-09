@@ -40,6 +40,7 @@ class AboutPage(QWidget):
         self.version_label = QLabel("当前版本：-")
         self.latest_label = QLabel("最新版本：-")
         self.mode_label = QLabel("运行形态：-")
+        self.platform_label = QLabel("系统环境：-")
         self.status_label = QLabel("可在这里检测新版本并查看发布说明。")
         self.status_label.setObjectName("MetaLabel")
 
@@ -86,6 +87,7 @@ class AboutPage(QWidget):
         text_col.addWidget(self.version_label)
         text_col.addWidget(self.latest_label)
         text_col.addWidget(self.mode_label)
+        text_col.addWidget(self.platform_label)
         text_col.addWidget(self.description_label)
         text_col.addWidget(self.status_label)
         text_col.addLayout(actions)
@@ -109,6 +111,10 @@ class AboutPage(QWidget):
 
     def set_install_mode(self, label: str) -> None:
         self.mode_label.setText(f"运行形态：{label}")
+
+    def set_platform(self, label: str) -> None:
+        """展示探测到的系统与 CPU 架构；升级包就按这里显示的架构挑。"""
+        self.platform_label.setText(f"系统环境：{label or '-'}")
 
     def set_latest_version(self, version: str, published_at: str = "") -> None:
         text = f"最新版本：{version or '-'}"

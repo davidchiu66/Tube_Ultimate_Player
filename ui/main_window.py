@@ -38,7 +38,7 @@ from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
 from services.runtime_install_service import NODE_TRUSTED_HOSTS, RuntimeInstallService
-from services.update_service import REPO_URL, UpdateCheckResult, UpdateService
+from services.update_service import REPO_URL, UpdateCheckResult, UpdateService, detect_platform_info
 from ui.about_page import AboutPage
 from ui.cast_dialog import DlnaCastDialog
 from ui.download_page import DownloadPage
@@ -434,6 +434,7 @@ class MainWindow(QMainWindow):
     def _apply_about_page_defaults(page: AboutPage, *, current_version: str = "", mode_label: str = "") -> None:
         page.set_current_version(current_version)
         page.set_install_mode(mode_label)
+        page.set_platform(detect_platform_info().describe())
         page.set_latest_version("-")
         page.set_release_notes("")
         page.set_status("可在这里检测新版本并查看发布说明。")
@@ -1875,6 +1876,8 @@ class MainWindow(QMainWindow):
         self._last_update_result = result
         self.about_page.set_current_version(result.current_version)
         self.about_page.set_install_mode(result.install_mode_label)
+        if result.platform_info is not None:
+            self.about_page.set_platform(result.platform_info.describe())
         self.about_page.set_latest_version(result.latest_version, result.release.published_at)
         self.about_page.set_release_notes(result.release.body)
         self.about_page.set_upgrade_available(result.has_update)
@@ -1884,6 +1887,12 @@ class MainWindow(QMainWindow):
                 self.about_page.set_status(f"检测到新版本，可下载 {asset_name}；下载后请手动替换或通过包管理器安装。")
             else:
                 self.about_page.set_status(f"检测到新版本，可下载 {asset_name} 进行升级。")
+        elif result.arch_mismatch:
+            arch = result.platform_info.host_arch if result.platform_info else "本机"
+            self.about_page.set_status(
+                f"检测到新版本 {result.latest_version}，但该版本没有提供 {arch} 架构的升级包，已停止升级以免装上跑不起来的包。"
+                "可前往 GitHub 手动确认。"
+            )
         else:
             message = "当前已经是最新版本。"
             if result.selected_asset is None:

@@ -19,7 +19,7 @@
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-425-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-438-16a34a?style=flat-square">
 </p>
 
 ## 亮点
@@ -42,6 +42,7 @@
 - 下载遇到浏览器 Cookie 解密失败时自动改用其它浏览器重试
 - 被设为系统默认浏览器的便携版浏览器也能被识别，Cookie 库按绝对路径定位
 - 升级包与 FFmpeg 安装包强制校验来源域名、大小与 SHA256，压缩包拒绝路径穿越条目
+- 升级前探测本机系统与 CPU 架构并在「关于」页展示，只挑与本机相符的安装包，启动前再核对 PE 机器类型
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
 - 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
@@ -76,7 +77,7 @@
 | 下载 | 下载队列、并发控制、暂停、继续、删除、批量操作、最新置顶、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
 | 设置 | 常规与快捷键 Tab、三态代理模式、双站点独立 Cookie、按站点 Cookie 自动检测与重新检测、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义、滚动适配较小窗口 |
-| 关于 | 当前版本、GitHub 链接、检测新版本、Release Note 展示、Windows 自动升级与 Linux 手动升级包下载 |
+| 关于 | 当前版本、系统与 CPU 架构探测展示、GitHub 链接、检测新版本、Release Note 展示、Windows 自动升级与 Linux 手动升级包下载 |
 
 ## Bilibili 支持说明
 
@@ -286,7 +287,9 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 - 支持 Chrome 127+ / 新版 Edge 的 App-Bound Cookie 加密：在隔离子进程里解密并导出 `cookies.txt`，失败则回退原有链路
 - 识别被设为系统默认浏览器的便携版：此前候选只来自标准安装路径，「默认浏览器」标签会错贴到同内核的安装版上
 - 下载改用专用线程池，容量跟随「同时下载数」，不再与解析、搜索、投屏抢线程
-- 新增 Windows ARM64 安装版与便携版，产物名带 `win_x86_64` / `win_arm64` 后缀，自动更新按本机架构挑选
+- 新增 Windows ARM64 安装版与便携版，产物名带 `win_x86_64` / `win_arm64` 后缀
+- 「关于」页新增「系统环境」一行，显示系统、CPU 架构与本程序架构（模拟运行会标注），升级包按此挑选
+- 修复本机架构没有对应包时会装上另一架构的安装包：此前按架构过滤后若为空会退回全量资产，而 GitHub 返回的资产按文件名排序，x64 机器会稳定拿到 ARM64 包，Windows 报 `This program does not support the version of Windows your computer is running`
 - 播放列表的自动连播改为默认不勾选
 - 修复设置页「安装 FFmpeg」失效：钉住的 8.0.1 归档已被上游清掉，改为 9.0
 
@@ -314,7 +317,7 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `425` 项）：
+运行完整自动化测试（当前版本共 `438` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
