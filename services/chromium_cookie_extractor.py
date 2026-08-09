@@ -175,12 +175,10 @@ def extract_cookie_rows(browser_spec: str, target_url: str) -> list[CookieRow]:
     spec = str(browser_spec or "").strip()
     browser = spec.split(":", 1)[0].strip().lower()
     profile = spec.split(":", 1)[1].strip() if ":" in spec else ""
-    user_data = _user_data_dir(browser)
-    if user_data is None:
+    resolved = _resolve_profile(browser, profile)
+    if resolved is None:
         return []
-    profile_dir = user_data / profile if profile else user_data / "Default"
-    if not profile_dir.exists():
-        profile_dir = user_data / "Default"
+    user_data, profile_dir = resolved
 
     v10_key = _load_v10_key(user_data)
     v20_key = _load_v20_key(user_data, browser)
@@ -201,6 +199,40 @@ def extract_cookie_rows(browser_spec: str, target_url: str) -> list[CookieRow]:
             continue
         rows.append(CookieRow(host_key, name, value, path, bool(is_secure), int(expires or 0)))
     return rows
+
+
+def _resolve_profile(browser: str, profile: str) -> tuple[Path, Path] | None:
+    """定位 (User Data 目录, profile 目录)。
+
+    profile 可以是名字（``Default``、``Profile 1``），也可以是**绝对路径** ——
+    便携版浏览器（含被设为系统默认的那种）的库不在 %LOCALAPPDATA% 下，只能靠
+    绝对路径找到。密钥必须从该 profile 所属的 ``Local State`` 读，不能混用安装版的，
+    否则解出来的 AES 密钥对不上，Cookie 会整批解不开。
+    """
+    if profile and _looks_absolute(profile):
+        given = Path(profile)
+        if not given.is_dir():
+            return None
+        if (given / "Local State").is_file():
+            # 传进来的是 User Data 目录本身。
+            return given, given / "Default"
+        return given.parent, given
+
+    user_data = _user_data_dir(browser)
+    if user_data is None:
+        return None
+    profile_dir = user_data / profile if profile else user_data / "Default"
+    if not profile_dir.exists():
+        profile_dir = user_data / "Default"
+    return user_data, profile_dir
+
+
+def _looks_absolute(value: str) -> bool:
+    """带盘符或 UNC 前缀就按绝对路径处理（``Profile 1`` 这类名字不会命中）。"""
+    text = str(value or "").strip()
+    if text.startswith("\\\\") or text.startswith("//"):
+        return True
+    return len(text) >= 3 and text[1] == ":" and text[2] in ("\\", "/")
 
 
 def _user_data_dir(browser: str) -> Path | None:

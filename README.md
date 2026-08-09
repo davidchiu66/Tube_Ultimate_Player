@@ -19,7 +19,7 @@
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-404-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-425-16a34a?style=flat-square">
 </p>
 
 ## 亮点
@@ -40,6 +40,7 @@
 - 下载列表最新任务置顶，并支持暂停/启动/删除的批量操作（选中或当前筛选范围）
 - Cookie 支持“自动检测”按站点分别挑选已登录的浏览器，读取失败会明确提示原因
 - 下载遇到浏览器 Cookie 解密失败时自动改用其它浏览器重试
+- 被设为系统默认浏览器的便携版浏览器也能被识别，Cookie 库按绝对路径定位
 - 升级包与 FFmpeg 安装包强制校验来源域名、大小与 SHA256，压缩包拒绝路径穿越条目
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
 - 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
@@ -283,9 +284,11 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 - 修复启动与切站闪退：线程池任务在跨线程信号送达前被回收，轻则界面不刷新，重则进程直接退出
 - 修复 YouTube 首页与搜索卡片没有日期；修复解析层缓存在两个站点间串站
 - 支持 Chrome 127+ / 新版 Edge 的 App-Bound Cookie 加密：在隔离子进程里解密并导出 `cookies.txt`，失败则回退原有链路
+- 识别被设为系统默认浏览器的便携版：此前候选只来自标准安装路径，「默认浏览器」标签会错贴到同内核的安装版上
 - 下载改用专用线程池，容量跟随「同时下载数」，不再与解析、搜索、投屏抢线程
 - 新增 Windows ARM64 安装版与便携版，产物名带 `win_x86_64` / `win_arm64` 后缀，自动更新按本机架构挑选
 - 播放列表的自动连播改为默认不勾选
+- 修复设置页「安装 FFmpeg」失效：钉住的 8.0.1 归档已被上游清掉，改为 9.0
 
 完整说明见 [`docs/releases/v0.2.23.md`](docs/releases/v0.2.23.md)。
 
@@ -311,7 +314,7 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `404` 项）：
+运行完整自动化测试（当前版本共 `425` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"

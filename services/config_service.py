@@ -426,7 +426,10 @@ def detect_browser_cookie_sources(
         local_app_data = Path(env.get("LOCALAPPDATA", ""))
         app_data = Path(env.get("APPDATA", ""))
         default_browser = _detect_default_windows_browser()
-        sources: list[tuple[str, str, str]] = []
+        # 便携版默认浏览器排在最前：它的库不在标准位置，若不显式列出，用户选到的
+        # 会是同内核那个几乎没用过的安装版（yt-dlp 也会去读那个空 profile）。
+        sources: list[tuple[str, str, str]] = list(detect_portable_default_browser_sources())
+        portable_count = len(sources)
         chromium_candidates = (
             ("edge", "Microsoft Edge", local_app_data / "Microsoft" / "Edge" / "User Data"),
             ("chrome", "Google Chrome", local_app_data / "Google" / "Chrome" / "User Data"),
@@ -448,14 +451,22 @@ def detect_browser_cookie_sources(
                 if (profile_dir / "cookies.sqlite").exists():
                     sources.append(("firefox", f"Firefox ({profile_dir.name})", f"firefox:{profile_dir.name}"))
 
+        portable_values = {value for _browser, _label, value in sources[:portable_count]}
         deduped: list[tuple[str, str]] = []
         seen: set[str] = set()
         for browser, label, value in sources:
             if value in seen:
                 continue
             seen.add(value)
-            prefix = "默认浏览器 - " if browser == default_browser else ""
-            deduped.append((f"{prefix}{label}", value))
+            # 已经定位到便携版默认浏览器时，同内核的安装版就不该再挂「默认浏览器」——
+            # 那台机器上真正在用的是便携版。
+            if value in portable_values:
+                is_default = True
+            elif portable_values:
+                is_default = False
+            else:
+                is_default = browser == default_browser
+            deduped.append((f"默认浏览器 - {label}" if is_default else label, value))
 
         deduped.sort(key=lambda item: (0 if item[0].startswith("默认浏览器") else 1, item[0].lower()))
         return deduped
@@ -567,7 +578,8 @@ def _chromium_cookie_profiles(user_data: Path) -> list[str]:
     return profiles
 
 
-def _detect_default_windows_browser() -> str:
+def _default_windows_browser_prog_id() -> str:
+    """https 关联的 ProgId，取不到返回空串。"""
     try:
         import winreg
 
@@ -575,8 +587,151 @@ def _detect_default_windows_browser() -> str:
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
         ) as key:
-            prog_id = str(winreg.QueryValueEx(key, "ProgId")[0]).lower()
+            return str(winreg.QueryValueEx(key, "ProgId")[0]).lower()
+    except (OSError, ImportError):
+        # 非 Windows 上 winreg 根本不存在，按「取不到」处理。
+        return ""
+
+
+def default_windows_browser_command() -> str:
+    """默认浏览器的启动命令行（HKCR\\<ProgId>\\shell\\open\\command），取不到返回空串。
+
+    便携版浏览器可以注册成系统默认浏览器，但不会把 Cookie 库放在
+    %LOCALAPPDATA% 的标准位置。要找到它只能顺着这条注册项拿到真实 exe 路径。
+    """
+    prog_id = _default_windows_browser_prog_id()
+    if not prog_id:
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command") as key:
+            return str(winreg.QueryValueEx(key, "")[0]).strip()
+    except (OSError, ImportError):
+        return ""
+
+
+def _executable_from_command(command: str) -> Path | None:
+    """从注册表命令行里剥出 exe 路径。带引号的整段取引号内，否则取第一个 .exe 结尾处。"""
+    text = str(command or "").strip()
+    if not text:
+        return None
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        candidate = text[1:end] if end > 1 else text[1:]
+    else:
+        lowered = text.lower()
+        marker = lowered.find(".exe")
+        candidate = text[: marker + 4] if marker >= 0 else text.split()[0]
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+    path = Path(candidate)
+    return path if path.is_file() else None
+
+
+def _browser_kind_from_executable(executable: Path | None) -> str:
+    """由 exe 文件名判定浏览器内核标识，认不出返回空串。"""
+    if executable is None:
+        return ""
+    name = executable.name.lower()
+    # msedge 要排在 edge 前面；brave/vivaldi 的 exe 名就是自身。
+    mappings = (
+        ("msedge", "edge"),
+        ("edge", "edge"),
+        ("brave", "brave"),
+        ("vivaldi", "vivaldi"),
+        ("opera", "opera"),
+        ("firefox", "firefox"),
+        ("librewolf", "firefox"),
+        ("chromium", "chromium"),
+        ("chrome", "chrome"),
+    )
+    for needle, browser in mappings:
+        if needle in name:
+            return browser
+    return ""
+
+
+# 便携版浏览器常见的 profile 目录布局（相对 exe 所在目录）。PortableApps 打包的
+# 结构是 <App>\App\Chrome-bin\chrome.exe 配 <App>\Data\profile，所以要往上找两级。
+_PORTABLE_CHROMIUM_LAYOUTS = (
+    ("User Data",),
+    ("..", "User Data"),
+    ("Data", "profile"),
+    ("..", "Data", "profile"),
+    ("..", "..", "Data", "profile"),
+)
+_PORTABLE_FIREFOX_LAYOUTS = (
+    ("Data", "profile"),
+    ("..", "Data", "profile"),
+    ("..", "..", "Data", "profile"),
+)
+
+
+def detect_portable_default_browser_sources() -> list[tuple[str, str, str]]:
+    """默认浏览器是便携版时，顺着注册表里的 exe 路径找出它的 Cookie 库。
+
+    返回 [(browser, label, value)]，value 用**绝对路径**而不是 profile 名——
+    便携版的库不在 %LOCALAPPDATA% 下，只有绝对路径能让 yt-dlp 和自带的解密
+    子进程找对地方。找不到就返回空列表，调用方继续用标准位置的候选。
+    """
+    executable = _executable_from_command(default_windows_browser_command())
+    browser = _browser_kind_from_executable(executable)
+    if executable is None or not browser:
+        return []
+
+    exe_dir = executable.parent
+    found: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    if browser == "firefox":
+        for parts in _PORTABLE_FIREFOX_LAYOUTS:
+            root = _resolve_relative(exe_dir, parts)
+            if root is None:
+                continue
+            # Data\profile 本身就是 profile 目录；也兼容它下面再套一层 profiles 的情况。
+            for candidate in (root, *_iter_subdirs(root)):
+                if not (candidate / "cookies.sqlite").is_file():
+                    continue
+                value = f"firefox:{candidate}"
+                if value in seen:
+                    continue
+                seen.add(value)
+                found.append(("firefox", f"Firefox 便携版 ({candidate.name})", value))
+        return found
+
+    for parts in _PORTABLE_CHROMIUM_LAYOUTS:
+        user_data = _resolve_relative(exe_dir, parts)
+        if user_data is None:
+            continue
+        for profile in _chromium_cookie_profiles(user_data):
+            value = f"{browser}:{user_data / profile}"
+            if value in seen:
+                continue
+            seen.add(value)
+            found.append((browser, f"{browser.capitalize()} 便携版 ({profile})", value))
+    return found
+
+
+def _resolve_relative(base: Path, parts: tuple[str, ...]) -> Path | None:
+    try:
+        resolved = base.joinpath(*parts).resolve()
     except OSError:
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def _iter_subdirs(root: Path) -> list[Path]:
+    try:
+        return [child for child in root.iterdir() if child.is_dir()]
+    except OSError:
+        return []
+
+
+def _detect_default_windows_browser() -> str:
+    prog_id = _default_windows_browser_prog_id()
+    if not prog_id:
         return ""
 
     mappings = (

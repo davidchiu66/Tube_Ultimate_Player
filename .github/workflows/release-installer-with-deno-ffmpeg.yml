@@ -80,11 +80,16 @@ jobs:
       - name: Download FFmpeg
         shell: powershell
         run: |
-          $url = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-essentials_build.7z"
+          # 用版本无关的 release 别名：gyan.dev 只保留当前版本，packages/ 下带版本号的
+          # 归档一旦上游发新版就会 404（v0.2.23 发布时 ffmpeg-8.0.1 已被清掉）。
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.7z"
           $archive = Join-Path $env:RUNNER_TEMP "ffmpeg.7z"
           $extractDir = Join-Path $env:RUNNER_TEMP "ffmpeg"
           & curl.exe -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --output $archive $url
           if ($LASTEXITCODE -ne 0) { throw "Failed to download FFmpeg archive" }
+          $archiveSize = (Get-Item $archive).Length
+          Write-Host "FFmpeg archive size: $archiveSize bytes"
+          if ($archiveSize -lt 10485760) { throw "Downloaded FFmpeg archive is unexpectedly small: $archiveSize bytes" }
           New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
           & 7z.exe x $archive "-o$extractDir" -y
           if ($LASTEXITCODE -ne 0) { throw "Failed to extract FFmpeg archive" }

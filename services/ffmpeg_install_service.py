@@ -12,12 +12,14 @@ from services.config_service import ConfigService
 
 logger = logging.getLogger("tube_player.ffmpeg")
 
-FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-essentials_build.7z"
-FFMPEG_ARCHIVE_NAME = "ffmpeg-8.0.1-essentials_build.7z"
-# 与 FFMPEG_DOWNLOAD_URL 一一对应的固定校验值（来源：发行方公布的 .sha256 附属文件）。
+FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0-essentials_build.7z"
+FFMPEG_ARCHIVE_NAME = "ffmpeg-9.0-essentials_build.7z"
+# 与 FFMPEG_DOWNLOAD_URL 一一对应的固定校验值（来源：发行方公布的 .sha256 附属文件，
+# 并本机下载复算确认一致）。这里必须钉住版本号：gyan.dev 只保留当前版本，
+# 8.0.1 已被上游清掉，旧地址会直接 404。
 # 更换 FFmpeg 版本时必须同步更新这三个常量，否则安装会被完整性校验拒绝。
-FFMPEG_ARCHIVE_SHA256 = "a0c715acca3839bfd203e600a7775b83cfe3ff928a4eceb9ca54f2982365901c"
-FFMPEG_ARCHIVE_SIZE = 32563789
+FFMPEG_ARCHIVE_SHA256 = "ffb866303866995734849995027533b9756971215e8c55ef408073628cdc27a2"
+FFMPEG_ARCHIVE_SIZE = 34349617
 FFMPEG_TRUSTED_HOSTS = ("gyan.dev", "www.gyan.dev")
 
 
