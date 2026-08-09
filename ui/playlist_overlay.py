@@ -241,7 +241,7 @@ class PlaylistOverlay(QFrame):
         playlist: PlaylistInfo | None,
         *,
         current_index: int = -1,
-        auto_play_next: bool = True,
+        auto_play_next: bool = False,
     ) -> None:
         self._playlist = playlist
         self.auto_play_checkbox.blockSignals(True)

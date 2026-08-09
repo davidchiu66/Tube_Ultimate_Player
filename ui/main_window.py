@@ -4,7 +4,8 @@ import logging
 import os
 import sys
 import threading
-from functools import wraps
+import time
+from functools import partial, wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -67,6 +68,8 @@ logger = logging.getLogger("tube_player.ui")
 
 # 退出时等待线程池收敛的上限，超时后记录告警并继续走关闭流程。
 SHUTDOWN_WAIT_MS = 3000
+# 首页结果在界面层的复用时长，与 SiteResolver 的首页缓存 TTL 保持一致。
+HOME_CACHE_TTL_SECONDS = 300.0
 
 
 def _skip_after_shutdown(method):
@@ -112,7 +115,8 @@ class MainWindow(QMainWindow):
         self.dlna_controller = DlnaController()
         self.dlna_media_server = DlnaMediaServer()
         self.thread_pool = QThreadPool.globalInstance()
-        self.download_manager = DownloadManager(self.config, self.thread_pool)
+        # 下载改用 DownloadManager 自带的专用线程池，避免与解析/搜索/投屏抢占全局线程池。
+        self.download_manager = DownloadManager(self.config)
 
         self.current_video: VideoInfo | None = None
         self.current_local_media_path = ""
@@ -120,13 +124,17 @@ class MainWindow(QMainWindow):
         self.current_playlist: PlaylistInfo | None = None
         self.current_playlist_index = -1
         self.current_playlist_key = ""
-        self.current_playlist_auto_play = True
+        # 自动连播默认关闭：新建/新载入的列表播完当前一条就停，用户勾选后才继续。
+        self.current_playlist_auto_play = False
         self._pending_playlist_video_id = ""
         self._playback_return_widget: QWidget | None = None
         self._playback_finished = False
         self._was_maximized_before_fullscreen: bool | None = None
         self._creator_playlist_generation = 0
         self._creator_playlist_workers: dict[tuple[int, str], CreatorVideosWorker] = {}
+        # 线程池 worker 在结束前必须留有 Python 引用，详见 _start_worker 的说明。
+        self._active_workers: dict[int, object] = {}
+        self._worker_sequence = 0
         self._dlna_device: DlnaDevice | None = None
         self._dlna_device_cache: dict[str, DlnaDevice] = {}
         self._dlna_remote_paused = False
@@ -152,8 +160,14 @@ class MainWindow(QMainWindow):
         self._home_cache: list[HomeVideo] = []
         self._home_page = 1
         self._home_has_next = False
+        # 站点 -> (缓存时间, 视频, 页码, 还有下一页)，切换站点时直接复用，避免每次都重新拉取。
+        self._home_state: dict[str, tuple[float, list[HomeVideo], int, bool]] = {}
         self._search_keyword = ""
         self._search_page = 1
+        # 首页/搜索使用的站点由工具栏单选框决定，默认 BiliBili，与「默认首页」配置项无关。
+        self._browse_source = "bilibili"
+        # 每发起一轮首页/搜索加载就自增，用来丢弃切换站点后才回来的旧结果。
+        self._browse_generation = 0
         self._subtitle_request_id = 0
         self._pending_recent_url = ""
         self._last_update_result: UpdateCheckResult | None = None
@@ -163,6 +177,7 @@ class MainWindow(QMainWindow):
         self._shutting_down = False
 
         self.top_bar_widget = PlayerToolbar(self)
+        self.top_bar_widget.set_source(self._browse_source)
         self.url_edit = self.top_bar_widget.search_edit
         self.search_button = self.top_bar_widget.search_button
         self.play_url_button = self.top_bar_widget.url_button
@@ -333,6 +348,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.top_bar_widget.search_requested.connect(self._toolbar_search_requested)
+        self.top_bar_widget.source_changed.connect(self._set_browse_source)
         self.play_url_button.clicked.connect(self._show_play_url_dialog)
         self.home_nav.clicked.connect(self._show_home)
         self.playlist_nav.clicked.connect(self._show_playlist_page)
@@ -460,6 +476,26 @@ class MainWindow(QMainWindow):
         self.url_edit.setText(text)
         self.search_videos()
 
+    def _start_worker(self, worker, priority: int = 0) -> None:
+        """提交线程池任务，并在任务结束前一直持有 worker 的 Python 引用。
+
+        QThreadPool.start() 之后 C++ 侧接管 worker 的销毁，但 Python 包装对象和它
+        持有的 signals（QObject）没有别的引用，随时可能被 GC 回收。一旦在排队中的
+        跨线程信号投递出去之前回收，轻则回调静默丢失（首页/搜索加载完却不刷新界面），
+        重则访问已释放的发送者直接崩溃退出。这里统一登记引用，等 finished 到达主线程
+        后再释放。
+        """
+        self._worker_sequence += 1
+        token = self._worker_sequence
+        self._active_workers[token] = worker
+        # 用 partial 绑定 worker 本身：即使 _release_worker 因关闭流程被跳过，
+        # 连接本身仍持有引用，直到 signals 随 worker 一起销毁。
+        worker.signals.finished.connect(partial(self._release_worker, token, worker))
+        self.thread_pool.start(worker, priority)
+
+    def _release_worker(self, token: int, _worker, *_args) -> None:
+        self._active_workers.pop(token, None)
+
     def play_url(self, url: str | None = None) -> None:
         target = (url or "").strip()
         if not target:
@@ -487,8 +523,12 @@ class MainWindow(QMainWindow):
         worker = ResolverWorker(target, self.resolver)
         worker.signals.success.connect(self._resolved)
         worker.signals.error.connect(self._resolve_failed)
-        worker.signals.finished.connect(lambda: self.player_page.set_loading(False))
-        self.thread_pool.start(worker)
+        worker.signals.finished.connect(self._url_resolve_finished)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _url_resolve_finished(self) -> None:
+        self.player_page.set_loading(False)
 
     def _load_playlist(self, url: str, auto_play_current: bool = False) -> None:
         self._invalidate_creator_playlist_request()
@@ -505,24 +545,91 @@ class MainWindow(QMainWindow):
         worker = PlaylistWorker(self.resolver, url)
         worker.signals.success.connect(self._playlist_loaded)
         worker.signals.error.connect(self._playlist_failed)
-        worker.signals.finished.connect(lambda: self.playlist_page.set_loading(False))
-        self.thread_pool.start(worker)
+        worker.signals.finished.connect(self._playlist_load_finished)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _playlist_load_finished(self) -> None:
+        self.playlist_page.set_loading(False)
 
     def load_home(self) -> None:
         self._start_home_load(1)
 
-    def _start_home_load(self, page: int, *, force_refresh: bool = False) -> None:
-        logger.info("home load requested page=%s", page)
-        self._home_page = max(1, page)
+    def _store_home_state(self, source: str) -> None:
+        """把当前站点的首页结果留档，切回来时可以直接复用。"""
+        if not source or not self._home_cache:
+            return
+        self._home_state[source] = (time.time(), list(self._home_cache), self._home_page, self._home_has_next)
+
+    def _take_home_state(self, source: str, page: int = 0) -> tuple[list[HomeVideo], int, bool] | None:
+        """取指定站点的首页缓存；过期或页码对不上就返回 None。page<=0 表示不限页码。"""
+        cached = self._home_state.get(source)
+        if cached is None:
+            return None
+        cached_at, videos, cached_page, has_next = cached
+        if not videos or time.time() - cached_at > HOME_CACHE_TTL_SECONDS:
+            self._home_state.pop(source, None)
+            return None
+        if page > 0 and cached_page != page:
+            return None
+        return list(videos), cached_page, has_next
+
+    def _render_home(self, videos: list[HomeVideo], page: int, has_next: bool) -> None:
+        self.home_page.set_videos(videos, mode="home", page=page, has_next=has_next)
+        self.home_page.set_home_context(
+            page,
+            has_next,
+            source_label=self.resolver.home_source_label(self._browse_source),
+        )
+        self.home_page.set_favorite_ids(self.favorites.favorite_ids())
+
+    def _apply_home_cache(self, videos: list[HomeVideo], page: int, has_next: bool, *, reason: str) -> None:
+        logger.info(
+            "home cache hit reason=%s source=%s page=%s count=%s",
+            reason,
+            self._browse_source,
+            page,
+            len(videos),
+        )
+        # 命中缓存同样要推进代次：在途的旧请求回来后不能再覆盖当前画面。
+        self._browse_generation += 1
+        self._home_cache = list(videos)
+        self._home_page = page
+        self._home_has_next = has_next
         self.stack.setCurrentWidget(self.home_page)
-        source_label = self.resolver.home_source_label()
+        self._render_home(self._home_cache, page, has_next)
+        self.home_page.set_loading(False)
+
+    def _start_home_load(self, page: int, *, force_refresh: bool = False) -> None:
+        source = self._browse_source
+        target_page = max(1, page)
+        if force_refresh:
+            self._home_state.pop(source, None)
+        else:
+            cached = self._take_home_state(source, target_page)
+            if cached is not None:
+                videos, cached_page, has_next = cached
+                self._apply_home_cache(videos, cached_page, has_next, reason="page")
+                return
+        logger.info("home load requested page=%s source=%s", target_page, source)
+        self._home_page = target_page
+        self._browse_generation += 1
+        generation = self._browse_generation
+        self.stack.setCurrentWidget(self.home_page)
+        source_label = self.resolver.home_source_label(source)
         self.home_page.set_home_context(self._home_page, False, source_label=source_label)
         self.home_page.set_loading(True, f"正在获取 {source_label} 首页内容（第 {self._home_page} 页），请稍候...")
-        worker = HomeWorker(self.resolver, page=self._home_page, page_size=56, force_refresh=force_refresh)
-        worker.signals.success.connect(self._home_loaded)
-        worker.signals.error.connect(self._home_failed)
-        worker.signals.finished.connect(lambda: self.home_page.set_loading(False))
-        self.thread_pool.start(worker)
+        worker = HomeWorker(
+            self.resolver,
+            page=self._home_page,
+            page_size=56,
+            force_refresh=force_refresh,
+            source=source,
+        )
+        worker.signals.success.connect(partial(self._home_loaded, generation))
+        worker.signals.error.connect(partial(self._home_failed, generation))
+        worker.signals.finished.connect(partial(self._browse_load_finished, generation))
+        self._start_worker(worker)
 
     def search_videos(self) -> None:
         keyword = self.url_edit.text().strip()
@@ -543,19 +650,61 @@ class MainWindow(QMainWindow):
         self._start_search(self._search_keyword, self._search_page)
 
     def _start_search(self, keyword: str, page: int, *, force_refresh: bool = False) -> None:
-        logger.info("search requested keyword=%s page=%s", keyword, page)
+        source = self._browse_source
+        logger.info("search requested keyword=%s page=%s source=%s", keyword, page, source)
+        self._browse_generation += 1
+        generation = self._browse_generation
         self.stack.setCurrentWidget(self.home_page)
         self.home_page.set_search_context(keyword, page, has_next=False)
-        source_label = self.resolver.home_source_label()
+        source_label = self.resolver.home_source_label(source)
         self.home_page.set_loading(
             True,
             f"正在搜索 {source_label}：{keyword}（第 {page} 页），请稍候，这一步通常会比首页加载稍慢一些...",
         )
-        worker = SearchWorker(self.resolver, keyword, page=page, page_size=56, force_refresh=force_refresh)
-        worker.signals.success.connect(self._search_loaded)
-        worker.signals.error.connect(self._search_failed)
-        worker.signals.finished.connect(lambda: self.home_page.set_loading(False))
-        self.thread_pool.start(worker)
+        worker = SearchWorker(
+            self.resolver,
+            keyword,
+            page=page,
+            page_size=56,
+            force_refresh=force_refresh,
+            source=source,
+        )
+        worker.signals.success.connect(partial(self._search_loaded, generation))
+        worker.signals.error.connect(partial(self._search_failed, generation))
+        worker.signals.finished.connect(partial(self._browse_load_finished, generation))
+        self._start_worker(worker)
+
+    def _set_browse_source(self, source: str) -> None:
+        """工具栏切换站点：首页/搜索立刻按新站点重新拉取。
+
+        只影响本次会话的浏览行为，不写回「默认首页」配置项。搜索框里还留着关键词时
+        直接重搜，否则回到该站点首页；首页结果按站点留档，切回来能直接复用。
+        """
+        normalized = SiteResolver.normalize_source(source)
+        if not normalized or normalized == self._browse_source:
+            return
+        # 先把旧站点的首页结果留档，再切换。
+        self._store_home_state(self._browse_source)
+        self._browse_source = normalized
+        logger.info("browse source switched to %s", normalized)
+        self._home_cache = []
+        self._home_page = 1
+        self._home_has_next = False
+
+        keyword = self.url_edit.text().strip()
+        if keyword:
+            self._search_keyword = keyword
+            self._search_page = 1
+            self._start_search(keyword, 1)
+            return
+        self._search_keyword = ""
+        self._search_page = 1
+        self.load_home()
+
+    def _browse_load_finished(self, generation: int) -> None:
+        # 站点切换后旧 worker 仍会跑完，它的 finished 不该把新一轮的加载态关掉。
+        if generation == self._browse_generation:
+            self.home_page.set_loading(False)
 
     @staticmethod
     def _site_label_for_url(url: str) -> str:
@@ -571,22 +720,34 @@ class MainWindow(QMainWindow):
             return
         self._start_home_load(self.home_page.page(), force_refresh=True)
 
+    def _is_stale_browse_result(self, generation: int) -> bool:
+        """切换站点后，先前那一轮的结果要丢掉，别把已经换掉的页面又覆盖回去。"""
+        if generation == self._browse_generation:
+            return False
+        logger.info("discard stale browse result generation=%s current=%s", generation, self._browse_generation)
+        return True
+
     @_skip_after_shutdown
-    def _home_loaded(self, videos: list[HomeVideo], has_next: bool) -> None:
+    def _home_loaded(self, generation: int, videos: list[HomeVideo], has_next: bool) -> None:
+        if self._is_stale_browse_result(generation):
+            return
         logger.info("home loaded page=%s count=%s has_next=%s", self._home_page, len(videos), has_next)
         self._home_cache = list(videos)
         self._home_has_next = has_next
-        self.home_page.set_videos(videos, mode="home", page=self._home_page, has_next=has_next)
-        self.home_page.set_home_context(self._home_page, has_next, source_label=self.resolver.home_source_label())
-        self.home_page.set_favorite_ids(self.favorites.favorite_ids())
+        self._store_home_state(self._browse_source)
+        self._render_home(self._home_cache, self._home_page, has_next)
 
     @_skip_after_shutdown
-    def _home_failed(self, message: str) -> None:
+    def _home_failed(self, generation: int, message: str) -> None:
+        if self._is_stale_browse_result(generation):
+            return
         logger.error("home load failed: %s", message)
         self.home_page.set_error(message)
 
     @_skip_after_shutdown
-    def _search_loaded(self, videos: list[HomeVideo], has_next: bool) -> None:
+    def _search_loaded(self, generation: int, videos: list[HomeVideo], has_next: bool) -> None:
+        if self._is_stale_browse_result(generation):
+            return
         logger.info(
             "search loaded keyword=%s page=%s count=%s has_next=%s",
             self._search_keyword,
@@ -604,7 +765,9 @@ class MainWindow(QMainWindow):
         self.home_page.set_favorite_ids(self.favorites.favorite_ids())
 
     @_skip_after_shutdown
-    def _search_failed(self, message: str) -> None:
+    def _search_failed(self, generation: int, message: str) -> None:
+        if self._is_stale_browse_result(generation):
+            return
         logger.error("search failed keyword=%s page=%s: %s", self._search_keyword, self._search_page, message)
         self.home_page.set_error(message)
 
@@ -634,7 +797,7 @@ class MainWindow(QMainWindow):
         *,
         current_index: int = -1,
         playlist_key: str = "",
-        auto_play_next: bool = True,
+        auto_play_next: bool = False,
         invalidate_creator_request: bool = True,
     ) -> None:
         if invalidate_creator_request:
@@ -655,7 +818,7 @@ class MainWindow(QMainWindow):
         self.current_playlist = None
         self.current_playlist_index = -1
         self.current_playlist_key = ""
-        self.current_playlist_auto_play = True
+        self.current_playlist_auto_play = False
         page = self._created_page("playlist")
         if page is not None:
             page.clear_playlist()
@@ -695,8 +858,8 @@ class MainWindow(QMainWindow):
         worker = ResolverWorker(entry.webpage_url, self.resolver)
         worker.signals.success.connect(self._resolved)
         worker.signals.error.connect(self._resolve_failed)
-        worker.signals.finished.connect(lambda: self.player_page.set_loading(False))
-        self.thread_pool.start(worker)
+        worker.signals.finished.connect(self._url_resolve_finished)
+        self._start_worker(worker)
 
     def _download_playlist_entries(self, entries: list[PlaylistEntry]) -> None:
         if not entries:
@@ -965,7 +1128,7 @@ class MainWindow(QMainWindow):
             subtitle.ext,
             bool(subtitle.data),
         )
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     @Slot(int, str, str)
     @_skip_after_shutdown
@@ -1340,7 +1503,7 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self._dlna_action_failed)
         worker.signals.finished.connect(self._dlna_action_finished)
         self._dlna_action_workers[request_id] = (worker, device, video_id)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
         return request_id
 
     @Slot(int, str, object)
@@ -1490,7 +1653,7 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(self._creator_playlist_failed)
         worker.signals.finished.connect(self._creator_playlist_worker_finished)
         self._creator_playlist_workers[(generation, video_id)] = worker
-        self.thread_pool.start(worker, -1)
+        self._start_worker(worker, -1)
 
     @Slot(int, str, object)
     @_skip_after_shutdown
@@ -1572,6 +1735,8 @@ class MainWindow(QMainWindow):
         self._home_cache = []
         self._home_page = 1
         self._home_has_next = False
+        # Cookie/代理等设置可能已经变了，旧首页结果一律作废。
+        self._home_state.clear()
         self._search_keyword = ""
         self._search_page = 1
         self._refresh_runtime_status()
@@ -1582,16 +1747,14 @@ class MainWindow(QMainWindow):
     def _show_home(self) -> None:
         self.stack.setCurrentWidget(self.home_page)
         if self._home_cache:
-            self.home_page.set_videos(
-                self._home_cache,
-                mode="home",
-                page=self._home_page,
-                has_next=self._home_has_next,
-            )
-            self.home_page.set_home_context(self._home_page, self._home_has_next, source_label=self.resolver.home_source_label())
-            self.home_page.set_favorite_ids(self.favorites.favorite_ids())
-        else:
-            self.load_home()
+            self._render_home(self._home_cache, self._home_page, self._home_has_next)
+            return
+        cached = self._take_home_state(self._browse_source)
+        if cached is not None:
+            videos, page, has_next = cached
+            self._apply_home_cache(videos, page, has_next, reason="show")
+            return
+        self.load_home()
 
     def _remember_playback_return_widget(self, widget: QWidget | None = None) -> None:
         candidate = widget or self.stack.currentWidget()
@@ -1693,8 +1856,12 @@ class MainWindow(QMainWindow):
         worker = UpdateCheckWorker(self.update_service)
         worker.signals.success.connect(self._update_check_succeeded)
         worker.signals.error.connect(self._update_check_failed)
-        worker.signals.finished.connect(lambda: self.about_page.set_checking(False))
-        self.thread_pool.start(worker)
+        worker.signals.finished.connect(self._update_check_finished)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _update_check_finished(self) -> None:
+        self.about_page.set_checking(False)
 
     @_skip_after_shutdown
     def _update_check_succeeded(self, result: UpdateCheckResult) -> None:
@@ -1754,7 +1921,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self._update_download_success)
         worker.signals.error.connect(self._update_download_failed)
         worker.signals.finished.connect(self._update_download_finished)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     @_skip_after_shutdown
     def _update_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
@@ -1880,8 +2047,12 @@ class MainWindow(QMainWindow):
         worker.signals.progress.connect(self._node_download_progress)
         worker.signals.success.connect(self._node_download_success)
         worker.signals.error.connect(self._node_download_failed)
-        worker.signals.finished.connect(lambda: self.settings_page.set_runtime_install_busy(False))
-        self.thread_pool.start(worker)
+        worker.signals.finished.connect(self._node_download_finished)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _node_download_finished(self) -> None:
+        self.settings_page.set_runtime_install_busy(False)
 
     @_skip_after_shutdown
     def _node_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
@@ -1931,7 +2102,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self._cookie_probe_finished)
         worker.signals.error.connect(self._cookie_probe_failed)
         # 优先级设低：探测只影响后续请求的 Cookie 选择，不该和首页加载抢线程。
-        self.thread_pool.start(worker, -1)
+        self._start_worker(worker, -1)
 
     @Slot(object)
     @_skip_after_shutdown
@@ -2026,7 +2197,7 @@ class MainWindow(QMainWindow):
         worker.signals.progress.connect(self._ffmpeg_download_progress)
         worker.signals.success.connect(self._ffmpeg_download_success)
         worker.signals.error.connect(self._ffmpeg_download_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     @_skip_after_shutdown
     def _ffmpeg_download_progress(self, downloaded: int, total: int, percent: float, speed_text: str) -> None:
@@ -2046,7 +2217,7 @@ class MainWindow(QMainWindow):
         worker = ArchiveExtractWorker(Path(path), info.extract_dir, required_files=("ffmpeg.exe",))
         worker.signals.success.connect(self._ffmpeg_extract_success)
         worker.signals.error.connect(self._ffmpeg_extract_failed)
-        self.thread_pool.start(worker)
+        self._start_worker(worker)
 
     @_skip_after_shutdown
     def _ffmpeg_download_failed(self, message: str) -> None:
@@ -2114,6 +2285,8 @@ class MainWindow(QMainWindow):
             self.download_manager.shutdown()
             if not self.thread_pool.waitForDone(SHUTDOWN_WAIT_MS):
                 logger.warning("后台任务在 %s 毫秒内未全部结束，继续退出流程", SHUTDOWN_WAIT_MS)
+            # worker 都已跑完，剩下的 finished 回调不会再被派发，这里统一收掉登记的引用。
+            self._active_workers.clear()
             self.dlna_media_server.stop()
             self.config.save()
             self.download_manager.flush()

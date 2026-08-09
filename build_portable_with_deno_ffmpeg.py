@@ -4,4 +4,4 @@ from build_portable import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(["--with-deno-ffmpeg"]))
+    raise SystemExit(main(["--with-deno-ffmpeg", *__import__("sys").argv[1:]]))

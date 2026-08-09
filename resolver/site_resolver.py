@@ -45,13 +45,22 @@ class SiteResolver:
         self.bilibili = BilibiliResolver(config, self.youtube)
         self._page_cache: OrderedDict[str, tuple[float, list[HomeVideo], bool]] = OrderedDict()
         self._creator_cache: OrderedDict[str, tuple[float, PlaylistInfo | None]] = OrderedDict()
+        # 首页/搜索与作者列表都可能被多个 worker 线程同时读写，各自加锁保护。
+        self._page_cache_lock = threading.Lock()
         self._creator_cache_lock = threading.Lock()
 
     def home_source(self) -> str:
         return self.config.default_home_source()
 
-    def home_source_label(self) -> str:
-        return "Bilibili" if self.home_source() == "bilibili" else "YouTube"
+    @staticmethod
+    def normalize_source(source: str) -> str:
+        """把任意站点标识收敛成 'youtube' / 'bilibili'，无法识别时返回空串。"""
+        normalized = str(source or "").strip().lower()
+        return normalized if normalized in {"youtube", "bilibili"} else ""
+
+    def home_source_label(self, source: str = "") -> str:
+        effective = self.normalize_source(source) or self.home_source()
+        return "Bilibili" if effective == "bilibili" else "YouTube"
 
     def resolve(self, url: str) -> VideoInfo:
         return self.youtube.resolve(url)
@@ -74,7 +83,7 @@ class SiteResolver:
             return None
 
         limit = max(1, min(50, int(limit)))
-        cache_key = f"creator|{video.source_site}|{creator_key}|{limit}|{self._config_fingerprint()}"
+        cache_key = f"creator|{video.source_site}|{creator_key}|{limit}|{self._config_fingerprint(video.source_site)}"
         cached = self._creator_cache_lookup(cache_key)
         if cached is not None:
             logger.info("creator playlist cache hit site=%s creator=%s", video.source_site, creator_key)
@@ -143,8 +152,9 @@ class SiteResolver:
         page_size: int = 56,
         *,
         force_refresh: bool = False,
+        source: str = "",
     ) -> tuple[list[HomeVideo], bool]:
-        source = self.home_source()
+        source = self.normalize_source(source) or self.home_source()
         key = self._cache_key("home", source, "", page, page_size)
         if not force_refresh and (cached := self._cache_lookup(key, _HOME_CACHE_TTL_SECONDS)):
             return cached
@@ -162,8 +172,9 @@ class SiteResolver:
         page_size: int = 56,
         *,
         force_refresh: bool = False,
+        source: str = "",
     ) -> tuple[list[HomeVideo], bool]:
-        source = self.home_source()
+        source = self.normalize_source(source) or self.home_source()
         query = str(keyword or "").strip()
         key = self._cache_key("search", source, query, page, page_size)
         if not force_refresh and (cached := self._cache_lookup(key, _SEARCH_CACHE_TTL_SECONDS)):
@@ -176,12 +187,14 @@ class SiteResolver:
         return result
 
     def _cache_key(self, mode: str, source: str, keyword: str, page: int, page_size: int) -> str:
-        fingerprint = self._config_fingerprint()
+        fingerprint = self._config_fingerprint(source)
         normalized = keyword.strip().lower()
         return f"{mode}|{source}|{normalized}|{int(page)}|{int(page_size)}|{fingerprint}"
 
-    def _config_fingerprint(self) -> str:
-        source = self.config.default_home_source()
+    def _config_fingerprint(self, source: str = "") -> str:
+        # 指纹要跟着实际请求的站点走：同一次会话里首页/搜索可以在两个站点间来回切，
+        # 各自的 Cookie 文件不同，混用一个指纹会让缓存串站。
+        source = self.normalize_source(source) or self.config.default_home_source()
         cookie_file = self.config.cookie_file(source)
         cookie_stamp = ""
         if cookie_file:
@@ -193,7 +206,7 @@ class SiteResolver:
                 cookie_stamp = str(path)
         proxy_label, proxy_value = self.config.effective_proxy()
         payload = {
-            "default_home": source,
+            "source": source,
             "cookie_browser": self.config.cookie_browser(),
             "cookie_file": cookie_stamp,
             "proxy_label": proxy_label,
@@ -202,22 +215,24 @@ class SiteResolver:
         return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
     def _cache_lookup(self, key: str, ttl_seconds: float) -> tuple[list[HomeVideo], bool] | None:
-        cached = self._page_cache.get(key)
-        if cached is None:
-            return None
-        cached_at, videos, has_next = cached
-        if time.time() - cached_at > ttl_seconds:
-            self._page_cache.pop(key, None)
-            return None
-        self._page_cache.move_to_end(key)
-        return list(videos), has_next
+        with self._page_cache_lock:
+            cached = self._page_cache.get(key)
+            if cached is None:
+                return None
+            cached_at, videos, has_next = cached
+            if time.time() - cached_at > ttl_seconds:
+                self._page_cache.pop(key, None)
+                return None
+            self._page_cache.move_to_end(key)
+            return list(videos), has_next
 
     def _cache_store(self, key: str, result: tuple[list[HomeVideo], bool]) -> None:
         videos, has_next = result
-        self._page_cache[key] = (time.time(), list(videos), has_next)
-        self._page_cache.move_to_end(key)
-        while len(self._page_cache) > _MAX_PAGE_CACHE_ITEMS:
-            self._page_cache.popitem(last=False)
+        with self._page_cache_lock:
+            self._page_cache[key] = (time.time(), list(videos), has_next)
+            self._page_cache.move_to_end(key)
+            while len(self._page_cache) > _MAX_PAGE_CACHE_ITEMS:
+                self._page_cache.popitem(last=False)
 
     def _creator_cache_lookup(self, key: str) -> PlaylistInfo | None:
         with self._creator_cache_lock:

@@ -150,7 +150,7 @@ class PlaylistPage(QWidget):
             self._update_empty_state_text()
         self._update_button_state()
 
-    def set_playlist(self, playlist: PlaylistInfo, current_index: int = -1, auto_play_next: bool = True) -> None:
+    def set_playlist(self, playlist: PlaylistInfo, current_index: int = -1, auto_play_next: bool = False) -> None:
         self._playlist = playlist
         self._current_index = current_index
         self.title_label.setText(playlist.title or "播放列表")

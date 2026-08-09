@@ -357,20 +357,24 @@ class UpdateService:
                     return asset
             return matching[0] if matching else None
 
+        # Windows 现在同时发布 x86_64 与 arm64 资产，必须只在与本机架构相符的资产里挑，
+        # 否则 arm64 机器可能装上 x86_64 包（或反之）。旧版本发布没有架构后缀，退回全量。
+        arch_assets = [asset for asset in assets if _matches_windows_arch(asset.name)] or assets
+
         if install_mode == "portable":
-            for asset in assets:
+            for asset in arch_assets:
                 name = asset.name.lower()
                 if "portable" in name and name.endswith(".zip"):
                     return asset
-            for asset in assets:
+            for asset in arch_assets:
                 if asset.name.lower().endswith(".zip"):
                     return asset
 
-        for asset in assets:
+        for asset in arch_assets:
             name = asset.name.lower()
             if name.endswith(".exe") and ("setup" in name or "installer" in name):
                 return asset
-        for asset in assets:
+        for asset in arch_assets:
             if asset.name.lower().endswith(".exe"):
                 return asset
         return None
@@ -585,6 +589,38 @@ def extract_sha256_for(text: str, filename: str, *, allow_bare: bool = False) ->
         if len(matches) == 1:
             return matches[0].lower()
     return ""
+
+
+def current_windows_arch() -> str:
+    """返回本进程运行的 Windows 架构标签：'arm64' 或 'x86_64'。
+
+    用 PROCESSOR_ARCHITECTURE（反映**当前进程**架构）而不是 platform.machine()：
+    x86_64 版在 arm64 机器上以模拟方式运行时，应继续更新到 x86_64 版而非 arm64 版，
+    platform.machine() 会优先返回宿主机架构（PROCESSOR_ARCHITEW6432），与此相反。
+    """
+    arch = os.environ.get("PROCESSOR_ARCHITECTURE", "").strip().lower()
+    if arch == "arm64":
+        return "arm64"
+    if arch in ("amd64", "x86", "x64"):
+        return "x86_64"
+    machine = __import__("platform").machine().strip().lower()
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    return "x86_64"
+
+
+def _matches_windows_arch(asset_name: str, arch: str | None = None) -> bool:
+    """资产名是否与目标架构相符。
+
+    命名约定：x86_64 资产带 win_x86_64，arm64 资产带 win_arm64。arm64 里也含子串
+    x86_64 是不可能的，但为稳妥起见，arm64 机器只认 win_arm64，x86_64 机器认 win_x86_64
+    且明确排除 win_arm64。没有任何架构后缀的旧资产两边都不匹配，交由调用方退回全量。
+    """
+    name = str(asset_name or "").lower()
+    target = (arch or current_windows_arch()).lower()
+    if target == "arm64":
+        return "win_arm64" in name or "arm64" in name
+    return "win_x86_64" in name and "arm64" not in name
 
 
 def _is_checksum_asset(candidate_name: str, target_name: str) -> bool:

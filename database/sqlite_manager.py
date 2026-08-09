@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS playlist_library (
     name TEXT NOT NULL,
     source_url TEXT,
     source_type TEXT NOT NULL DEFAULT 'manual',
-    auto_play_next INTEGER NOT NULL DEFAULT 1,
+    auto_play_next INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

@@ -83,11 +83,11 @@ jobs:
             }
           }
 
-      - name: Build portable package
-        run: python build_portable.py
+      - name: Build portable package (win_x86_64)
+        run: python build_portable.py --arch win_x86_64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Tube_Ultimate_Player_portable
+          name: Tube_Ultimate_Player_portable_win_x86_64
           path: dist/*.zip

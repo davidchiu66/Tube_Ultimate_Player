@@ -19,6 +19,7 @@ RELEASE_NAME = "Tube_Ultimate_Player"
 MIN_DLL_SIZE = 10 * 1024 * 1024
 ICON_FILE = ROOT / "docs" / "assets" / "icons" / "app-icon.ico"
 ENHANCED_RUNTIME_FILES = ("deno.exe", "ffmpeg.exe", "ffprobe.exe")
+ARCH_TAGS = ("win_x86_64", "win_arm64")
 
 
 def read_version() -> str:
@@ -84,7 +85,7 @@ def _copy_tree_contents(source_dir: Path, target_dir: Path) -> None:
             shutil.copy2(child, destination)
 
 
-def assemble_portable(version: str, *, with_deno_ffmpeg: bool = False) -> Path:
+def assemble_portable(version: str, *, with_deno_ffmpeg: bool = False, arch: str = "win_x86_64") -> Path:
     bundle_dir = DIST_DIR / RELEASE_NAME
     portable_dir = ENHANCED_PORTABLE_DIR if with_deno_ffmpeg else PORTABLE_DIR
     if portable_dir.exists():
@@ -98,7 +99,7 @@ def assemble_portable(version: str, *, with_deno_ffmpeg: bool = False) -> Path:
     shutil.copy2(ROOT / "app_version.txt", portable_dir / "app_version.txt")
 
     suffix = "_with_deno_ffmpeg" if with_deno_ffmpeg else ""
-    zip_path = DIST_DIR / f"Tube_Ultimate_Player_portable_v{version}{suffix}.zip"
+    zip_path = DIST_DIR / f"Tube_Ultimate_Player_portable_v{version}_{arch}{suffix}.zip"
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -114,12 +115,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Build a portable ZIP containing bundled Deno, FFmpeg and FFprobe.",
     )
+    parser.add_argument(
+        "--arch",
+        default="win_x86_64",
+        choices=ARCH_TAGS,
+        help="Target architecture tag embedded in the portable ZIP filename.",
+    )
     args = parser.parse_args(argv)
     version = read_version()
     if args.with_deno_ffmpeg:
         validate_enhanced_runtime()
     run_pyinstaller()
-    zip_path = assemble_portable(version, with_deno_ffmpeg=args.with_deno_ffmpeg)
+    zip_path = assemble_portable(version, with_deno_ffmpeg=args.with_deno_ffmpeg, arch=args.arch)
     print(zip_path)
     return 0
 

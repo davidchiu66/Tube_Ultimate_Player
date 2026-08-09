@@ -5,6 +5,12 @@
 #ifndef OutputSuffix
   #define OutputSuffix ""
 #endif
+#ifndef ArchTag
+  #define ArchTag "win_x86_64"
+#endif
+#ifndef InstallArch
+  #define InstallArch "x64compatible"
+#endif
 
 [Setup]
 AppName={#MyAppName}
@@ -12,11 +18,12 @@ AppVersion={#AppVersion}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir={#OutputDir}
-OutputBaseFilename=Tube_Ultimate_Player_setup_v{#AppVersion}{#OutputSuffix}
+OutputBaseFilename=Tube_Ultimate_Player_setup_v{#AppVersion}_{#ArchTag}{#OutputSuffix}
 SetupIconFile={#ProjectRoot}\docs\assets\icons\app-icon.ico
 Compression=lzma
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed={#InstallArch}
+ArchitecturesInstallIn64BitMode={#InstallArch}
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\Tube_Ultimate_Player.exe
 

@@ -520,7 +520,7 @@ class PlayerPage(QWidget):
         else:
             self._position_control_panel(animated=False)
 
-    def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = True) -> None:
+    def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = False) -> None:
         self._playlist_count = len(playlist.entries) if playlist is not None else 0
         self._playlist_index = current_index
         self.playlist_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)

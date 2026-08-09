@@ -110,13 +110,13 @@ jobs:
             }
           }
 
-      - name: Build portable package
-        run: python build_portable.py
+      - name: Build portable package (win_x86_64)
+        run: python build_portable.py --arch win_x86_64
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Tube_Ultimate_Player_portable
+          name: Tube_Ultimate_Player_portable_win_x86_64
           path: dist/*.zip
 
   build-installer:
@@ -197,22 +197,122 @@ jobs:
             }
           }
 
-      - name: Build installer
-        run: python build_installer.py
+      - name: Build installer (win_x86_64)
+        run: python build_installer.py --arch win_x86_64
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Tube_Ultimate_Player_installer
+          name: Tube_Ultimate_Player_installer_win_x86_64
           path: dist/installer/*.exe
 
   build-installer-with-deno-ffmpeg:
     needs: prepare
     uses: ./.github/workflows/release-installer-with-deno-ffmpeg.yml
 
+  build-windows-arm64:
+    runs-on: windows-11-arm
+    needs: prepare
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      # windows-11-arm 预装的是 x86_64 Python（模拟运行）。这里显式指定 architecture: x64，
+      # 让 PyInstaller 冻结出 x86_64 二进制，交付给 ARM Windows 时由系统模拟层运行——
+      # 这是当前可行的路径（aarch64 mpv 无 OpenGL/ANGLE，本应用 gpu-next 渲染暂无法原生跑在 ARM64）。
+      - name: Setup Python (x64 under emulation)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller requests
+
+      - name: Download latest yt-dlp
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -eq "yt-dlp.exe" } | Select-Object -First 1
+          if (-not $asset) { throw "yt-dlp.exe asset not found" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "3rdpart/yt-dlp.exe"
+
+      # ARM Windows 上以 x64 模拟方式运行，因此库仍用 x86_64 版 libmpv，无需 arm64 库。
+      - name: Download libmpv from SourceForge
+        shell: powershell
+        run: |
+          $url = "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/mpv-dev-x86_64-v3-20260607-git-71ebd08.7z"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev-x86_64-v3-20260607-git-71ebd08.7z"
+          $extractDir = Join-Path $env:RUNNER_TEMP "mpv-dev"
+          & curl.exe -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --output $archive $url
+          if ($LASTEXITCODE -ne 0) { throw "Failed to download libmpv archive" }
+          $archiveSize = (Get-Item $archive).Length
+          Write-Host "libmpv archive size: $archiveSize bytes"
+          if ($archiveSize -lt 10485760) { throw "Downloaded libmpv archive is unexpectedly small: $archiveSize bytes" }
+
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe" }
+          if (-not (Test-Path $sevenZip)) {
+            choco install 7zip -y --no-progress
+            $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $sevenZip -or -not (Test-Path $sevenZip)) { throw "7-Zip was not found" }
+
+          if (Test-Path $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          & $sevenZip x $archive "-o$extractDir" -y
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract libmpv archive" }
+
+          $dll = Get-ChildItem -Path $extractDir -Recurse -Filter "libmpv-2.dll" |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll was not found in the SourceForge archive" }
+          New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
+          Copy-Item -LiteralPath $dll.FullName -Destination "3rdpart/libmpv-2.dll" -Force
+
+      - name: Verify libmpv payload
+        shell: powershell
+        run: |
+          foreach ($name in @("libmpv-2.dll", "libEGL.dll", "libGLESv2.dll")) {
+            $path = Join-Path "3rdpart" $name
+            if (-not (Test-Path $path)) { throw "Missing $path" }
+            $size = (Get-Item $path).Length
+            Write-Host "$name size: $size bytes"
+            if ($name -eq "libmpv-2.dll" -and $size -lt 10485760) {
+              throw "libmpv-2.dll is unexpectedly small ($size bytes)."
+            }
+          }
+
+      - name: Build portable package (win_arm64)
+        run: python build_portable.py --arch win_arm64
+
+      - name: Build installer (win_arm64)
+        shell: powershell
+        run: |
+          choco install innosetup -y --no-progress
+          python build_installer.py --arch win_arm64
+
+      - name: Upload ARM portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_portable_win_arm64
+          path: dist/*win_arm64*.zip
+
+      - name: Upload ARM installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_installer_win_arm64
+          path: dist/installer/*win_arm64*.exe
+
   publish-release:
     runs-on: windows-latest
-    needs: [prepare, build-portable, build-installer, build-installer-with-deno-ffmpeg]
+    needs: [prepare, build-portable, build-installer, build-installer-with-deno-ffmpeg, build-windows-arm64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -222,25 +322,37 @@ jobs:
       - name: Download portable artifact
         uses: actions/download-artifact@v4
         with:
-          name: Tube_Ultimate_Player_portable
+          name: Tube_Ultimate_Player_portable_win_x86_64
           path: release_assets
 
       - name: Download installer artifact
         uses: actions/download-artifact@v4
         with:
-          name: Tube_Ultimate_Player_installer
+          name: Tube_Ultimate_Player_installer_win_x86_64
           path: release_assets
 
       - name: Download enhanced installer artifact
         uses: actions/download-artifact@v4
         with:
-          name: Tube_Ultimate_Player_installer_with_deno_ffmpeg
+          name: Tube_Ultimate_Player_installer_with_deno_ffmpeg_win_x86_64
           path: release_assets
 
       - name: Download enhanced portable artifact
         uses: actions/download-artifact@v4
         with:
-          name: Tube_Ultimate_Player_portable_with_deno_ffmpeg
+          name: Tube_Ultimate_Player_portable_with_deno_ffmpeg_win_x86_64
+          path: release_assets
+
+      - name: Download ARM portable artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_portable_win_arm64
+          path: release_assets
+
+      - name: Download ARM installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_installer_win_arm64
           path: release_assets
 
       - name: Publish GitHub Release

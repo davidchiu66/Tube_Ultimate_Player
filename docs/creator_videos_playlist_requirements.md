@@ -231,7 +231,7 @@ def resolve_creator_playlist(self, video: VideoInfo, limit: int = 50) -> Playlis
 2. 确认当前不是显式播放列表上下文。
 3. 生成新令牌，使用 `QTimer.singleShot(1500, ...)` 延迟启动低优先级 Worker。
 4. 成功回调再次校验令牌、当前视频 ID、非本地状态和播放列表优先级。
-5. 校验通过后调用 `_activate_playlist(..., current_index=0, auto_play_next=True)`。
+5. 校验通过后调用 `_activate_playlist(..., current_index=0, auto_play_next=self.current_playlist_auto_play)`（自动连播默认关闭，沿用用户当前的勾选状态）。
 
 停止、本地播放、显式播放列表加载和新的独立 URL 播放均使旧令牌失效。
 

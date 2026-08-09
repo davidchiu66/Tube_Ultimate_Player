@@ -15,6 +15,11 @@ THIRDPART_DIR = ROOT / "3rdpart"
 MIN_DLL_SIZE = 10 * 1024 * 1024
 ICON_FILE = ROOT / "docs" / "assets" / "icons" / "app-icon.ico"
 ENHANCED_RUNTIME_FILES = ("deno.exe", "ffmpeg.exe", "ffprobe.exe")
+# 架构标签 -> Inno Setup ArchitecturesAllowed/InstallIn64BitMode 标识。
+ARCH_INSTALL_IDENTIFIERS = {
+    "win_x86_64": "x64compatible",
+    "win_arm64": "arm64",
+}
 
 
 def read_version() -> str:
@@ -72,18 +77,21 @@ def validate_enhanced_runtime() -> None:
         raise RuntimeError(f"Missing enhanced runtime files: {', '.join(missing)}")
 
 
-def build_installer(version: str, *, with_deno_ffmpeg: bool = False) -> Path:
+def build_installer(version: str, *, with_deno_ffmpeg: bool = False, arch: str = "win_x86_64") -> Path:
     iss_path = ROOT / "packaging" / "installer.iss"
     output_dir = DIST_DIR / ("installer-with-deno-ffmpeg" if with_deno_ffmpeg else "installer")
     output_dir.mkdir(parents=True, exist_ok=True)
     iscc = shutil.which("ISCC.exe")
     if not iscc:
         raise RuntimeError("Inno Setup compiler ISCC.exe was not found")
+    install_arch = ARCH_INSTALL_IDENTIFIERS.get(arch, "x64compatible")
     command = [
         iscc,
         f"/DAppVersion={version}",
         f"/DProjectRoot={ROOT}",
         f"/DOutputDir={output_dir}",
+        f"/DArchTag={arch}",
+        f"/DInstallArch={install_arch}",
     ]
     if with_deno_ffmpeg:
         command.append("/DOutputSuffix=_with_deno_ffmpeg")
@@ -106,12 +114,18 @@ def main() -> int:
         action="store_true",
         help="Build an installer containing bundled Deno, FFmpeg and FFprobe.",
     )
+    parser.add_argument(
+        "--arch",
+        default="win_x86_64",
+        choices=sorted(ARCH_INSTALL_IDENTIFIERS),
+        help="Target architecture tag embedded in the installer filename.",
+    )
     args = parser.parse_args()
     version = read_version()
     if args.with_deno_ffmpeg:
         validate_enhanced_runtime()
     run_pyinstaller()
-    installer_path = build_installer(version, with_deno_ffmpeg=args.with_deno_ffmpeg)
+    installer_path = build_installer(version, with_deno_ffmpeg=args.with_deno_ffmpeg, arch=args.arch)
     print(installer_path)
     return 0
 

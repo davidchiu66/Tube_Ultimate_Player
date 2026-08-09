@@ -25,6 +25,7 @@ class SearchWorker(QRunnable):
         page: int = 1,
         page_size: int = 45,
         force_refresh: bool = False,
+        source: str = "",
     ) -> None:
         super().__init__()
         self.resolver = resolver
@@ -32,22 +33,26 @@ class SearchWorker(QRunnable):
         self.page = page
         self.page_size = page_size
         self.force_refresh = force_refresh
+        # 与 HomeWorker 同理：站点在提交任务时固定，避免与工具栏的后续切换错配。
+        self.source = source
         self.signals = SearchWorkerSignals()
 
     @Slot()
     def run(self) -> None:
         try:
             logger.info(
-                "search worker started keyword=%s page=%s page_size=%s",
+                "search worker started keyword=%s page=%s page_size=%s source=%s",
                 self.keyword,
                 self.page,
                 self.page_size,
+                self.source or "default",
             )
             videos, has_next = self.resolver.search_videos(
                 self.keyword,
                 self.page,
                 self.page_size,
                 force_refresh=self.force_refresh,
+                source=self.source,
             )
             logger.info(
                 "search worker success keyword=%s page=%s count=%s has_next=%s",

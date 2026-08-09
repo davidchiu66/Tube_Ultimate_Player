@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from download.command_builder import (
     build_download_command,
+    chromium_cookie_fallback_file,
     should_retry_with_alternate_browser,
     should_retry_with_cookie_file,
 )
@@ -82,6 +83,26 @@ class DownloadWorker(QRunnable):
                 if output.returncode == 0 or not should_retry_with_alternate_browser(output.text):
                     break
 
+        # 换浏览器也救不了 v20 App-Bound Cookie 时，自己用 IElevator 现解一份
+        # Netscape cookies.txt 交给 yt-dlp（子进程隔离，失败不影响主程序）。
+        if (
+            output.returncode != 0
+            and not self._stop_requested.is_set()
+            and should_retry_with_cookie_file(output.text)
+        ):
+            fallback_file = chromium_cookie_fallback_file(self.config, self.task.url)
+            if fallback_file:
+                logger.warning(
+                    "浏览器 Cookie 提取失败，改用现解的 Chromium Cookie 文件重试 task_id=%s file=%s",
+                    self.task.task_id,
+                    fallback_file,
+                )
+                output = self._run_once(
+                    force_cookie_file=False,
+                    override_cookie_browser="",
+                    explicit_cookie_file=fallback_file,
+                )
+
         if (
             output.returncode != 0
             and not self._stop_requested.is_set()
@@ -112,17 +133,29 @@ class DownloadWorker(QRunnable):
             browsers.append(value)
         return browsers
 
-    def _run_once(self, force_cookie_file: bool, override_cookie_browser: str = "") -> "_DownloadOutput":
+    def _run_once(
+        self,
+        force_cookie_file: bool,
+        override_cookie_browser: str = "",
+        explicit_cookie_file: str = "",
+    ) -> "_DownloadOutput":
         command = build_download_command(
             self.task,
             self.config,
             force_cookie_file=force_cookie_file,
             override_cookie_browser=override_cookie_browser,
+            explicit_cookie_file=explicit_cookie_file,
         )
         logger.info(
             "download start task_id=%s attempt=%s title=%s",
             self.task.task_id,
-            "cookie-file" if force_cookie_file else (f"browser:{override_cookie_browser}" if override_cookie_browser else "primary"),
+            "cookie-file"
+            if force_cookie_file
+            else (
+                "chromium-cookie-file"
+                if explicit_cookie_file
+                else (f"browser:{override_cookie_browser}" if override_cookie_browser else "primary")
+            ),
             self.task.title,
         )
         logger.debug("download command task_id=%s command=%s", self.task.task_id, sanitize_command(command))

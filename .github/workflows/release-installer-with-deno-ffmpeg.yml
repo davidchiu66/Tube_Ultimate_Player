@@ -105,20 +105,20 @@ jobs:
             Write-Host "$name size: $((Get-Item $path).Length) bytes"
           }
 
-      - name: Build enhanced installer
-        run: python build_installer.py --with-deno-ffmpeg
+      - name: Build enhanced installer (win_x86_64)
+        run: python build_installer.py --with-deno-ffmpeg --arch win_x86_64
 
-      - name: Build enhanced portable package
-        run: python build_portable_with_deno_ffmpeg.py
+      - name: Build enhanced portable package (win_x86_64)
+        run: python build_portable_with_deno_ffmpeg.py --arch win_x86_64
 
       - name: Upload enhanced installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Tube_Ultimate_Player_installer_with_deno_ffmpeg
+          name: Tube_Ultimate_Player_installer_with_deno_ffmpeg_win_x86_64
           path: dist/installer-with-deno-ffmpeg/*_with_deno_ffmpeg.exe
 
       - name: Upload enhanced portable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Tube_Ultimate_Player_portable_with_deno_ffmpeg
+          name: Tube_Ultimate_Player_portable_with_deno_ffmpeg_win_x86_64
           path: dist/*_with_deno_ffmpeg.zip

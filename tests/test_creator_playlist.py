@@ -54,7 +54,7 @@ def _site_resolver(source) -> SiteResolver:
     resolver.bilibili = source
     resolver._creator_cache = OrderedDict()
     resolver._creator_cache_lock = threading.Lock()
-    resolver._config_fingerprint = lambda: "test"
+    resolver._config_fingerprint = lambda source="": "test"
     return resolver
 
 

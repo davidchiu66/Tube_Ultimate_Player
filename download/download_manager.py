@@ -26,6 +26,8 @@ from services.config_service import ConfigService
 
 logger = logging.getLogger("tube_player.download")
 TASKS_FILE = DATA_DIR / "download_tasks.json"
+# 退出时等待下载线程池收敛的上限；worker.stop() 已终止子进程，run() 会很快返回。
+SHUTDOWN_POOL_WAIT_MS = 3000
 VIDEO_ID_IN_FILENAME_RE = re.compile(r"\[(?P<video_id>[0-9A-Za-z:_-]{6,128})\]")
 
 
@@ -36,15 +38,24 @@ class DownloadManager(QObject):
     task_completed = Signal(object)
     message = Signal(str)
 
-    def __init__(self, config: ConfigService, thread_pool: QThreadPool) -> None:
+    def __init__(self, config: ConfigService, thread_pool: QThreadPool | None = None) -> None:
         super().__init__()
         self.config = config
-        self.thread_pool = thread_pool
+        self._max_concurrent = self.config.download_max_concurrent()
+        # 下载 worker 会长时间占用线程，若与解析/搜索/投屏共用全局线程池（其容量等于 CPU 核数），
+        # 就会互相抢线程，导致「同时下载数」设得比核数大时后续任务永远排不到线程。
+        # 因此这里默认独占一个专用线程池，容量按「同时下载数」设置，reload_settings 时同步调整。
+        if thread_pool is None:
+            self.thread_pool = QThreadPool(self)
+            self._owns_pool = True
+            self._apply_pool_size()
+        else:
+            self.thread_pool = thread_pool
+            self._owns_pool = False
         self._tasks: list[DownloadTask] = []
         self._workers: dict[str, DownloadWorker] = {}
         self._task_index: dict[str, DownloadTask] = {}
         self._url_index: dict[str, DownloadTask] = {}
-        self._max_concurrent = self.config.download_max_concurrent()
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(1200)
@@ -190,9 +201,19 @@ class DownloadManager(QObject):
         self._schedule()
         return len(targets)
 
+    def _apply_pool_size(self) -> None:
+        """把专用线程池容量调整为当前同时下载数。
+
+        QThreadPool 的容量可以在运行时修改，已启动的 worker 会立即看到新上限，
+        因此调整时无需先回收已运行的下载线程。
+        """
+        self.thread_pool.setMaxThreadCount(self._max_concurrent)
+
     def reload_settings(self) -> None:
         self.config.load()
         self._max_concurrent = self.config.download_max_concurrent()
+        if self._owns_pool:
+            self._apply_pool_size()
         self._schedule()
 
     def _schedule(self) -> None:
@@ -464,6 +485,10 @@ class DownloadManager(QObject):
             worker.stop()
         if workers:
             logger.info("download workers stopped for shutdown count=%s", len(workers))
+        # 下载已改用专用线程池，主窗口对全局线程池的 waitForDone 不再覆盖下载 worker，
+        # 这里自行等待专用池收敛，避免子进程终止前就往下走。
+        if self._owns_pool and not self.thread_pool.waitForDone(SHUTDOWN_POOL_WAIT_MS):
+            logger.warning("下载线程池在 %s 毫秒内未全部结束，继续退出流程", SHUTDOWN_POOL_WAIT_MS)
         self._save_tasks()
 
     def _rebuild_indexes(self) -> None:

@@ -92,7 +92,7 @@ class SavedPlaylist:
     name: str
     source_url: str = ""
     source_type: str = "manual"
-    auto_play_next: bool = True
+    auto_play_next: bool = False
     created_at: str = ""
     updated_at: str = ""
     entries: list[PlaylistEntry] = field(default_factory=list)

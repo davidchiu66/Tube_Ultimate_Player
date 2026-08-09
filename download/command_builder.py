@@ -6,8 +6,9 @@ import shutil
 from app_paths import thirdpart_path
 from download.models import DownloadTask
 from resolver.models import VideoInfo
-from services.config_service import ConfigService
+from services.config_service import ConfigService, detect_browser_cookie_sources
 from services.cookie_service import prepare_cookie_file
+from services.chromium_cookie_extractor import extract_cookies_to_netscape
 
 
 def build_download_task(
@@ -60,6 +61,7 @@ def build_download_command(
     config: ConfigService,
     force_cookie_file: bool = False,
     override_cookie_browser: str = "",
+    explicit_cookie_file: str = "",
 ) -> list[str]:
     output_template = str(Path(task.save_dir) / "%(title).200B [%(id)s].%(ext)s")
     command = [
@@ -104,7 +106,11 @@ def build_download_command(
 
     cookie_browser = override_cookie_browser or config.explicit_cookie_browser()
     cookie_file = config.cookie_file_for_url(task.url)
-    if force_cookie_file and cookie_file:
+    # explicit_cookie_file 是我们从 Chromium App-Bound Cookie 现解出来的 Netscape 文件，
+    # 优先级最高：它就是为「浏览器 DPAPI 解不了」这条重试路径准备的。
+    if explicit_cookie_file:
+        command.extend(["--cookies", explicit_cookie_file])
+    elif force_cookie_file and cookie_file:
         command.extend(["--cookies", prepare_cookie_file(cookie_file, task.url)])
     elif cookie_browser:
         command.extend(["--cookies-from-browser", cookie_browser])
@@ -130,6 +136,30 @@ def should_retry_with_alternate_browser(output: str) -> bool:
     无关，换一个浏览器（尤其是 Cookie 值明文存储的 Firefox）通常就能成功。
     """
     return should_retry_with_cookie_file(output)
+
+
+def chromium_cookie_fallback_file(config: ConfigService, url: str) -> str:
+    """浏览器 DPAPI 解不了时，直接从 Chromium 系浏览器现解出一份 Netscape cookies.txt。
+
+    针对 App-Bound Encryption（v20）：换浏览器、退回配置文件都救不了纯 v20 的
+    Chrome/Edge，只能自己走 IElevator 解密（在子进程里，崩了不影响主程序）。
+    优先尝试当前配置/探测到的浏览器，再退到其它已登录的 Chromium 浏览器。
+    任何一个能解出 Cookie 就返回其文件路径，全失败返回 ""。
+    """
+    tried: set[str] = set()
+    site = config.cookie_site_for_url(url)
+    preferred = config.explicit_cookie_browser() or config.auto_cookie_browser_for_site(site)
+    candidates: list[str] = [preferred] if preferred else []
+    candidates.extend(value for _label, value in detect_browser_cookie_sources())
+    for spec in candidates:
+        browser = str(spec or "").split(":", 1)[0].strip().lower()
+        if not browser or browser in ("firefox", "opera") or spec in tried:
+            continue
+        tried.add(spec)
+        path = extract_cookies_to_netscape(spec, url)
+        if path:
+            return path
+    return ""
 
 
 # 这些都是「读浏览器 Cookie 库失败」而不是「账号/网络问题」，换浏览器有意义。

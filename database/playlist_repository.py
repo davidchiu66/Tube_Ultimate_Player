@@ -77,7 +77,7 @@ class PlaylistRepository:
         entries: Iterable[PlaylistEntry],
         source_url: str = "",
         source_type: str = "manual",
-        auto_play_next: bool = True,
+        auto_play_next: bool = False,
         playlist_key: str | None = None,
     ) -> str:
         playlist_name = str(name or "").strip()

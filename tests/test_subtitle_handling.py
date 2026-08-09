@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 from resolver.models import SubtitleInfo, VideoInfo
 from resolver.subtitle_parser import SubtitleParser
@@ -51,6 +51,8 @@ class SubtitleHandlingTests(unittest.TestCase):
             current_video=video,
             _subtitle_request_id=0,
             _shutting_down=False,
+            _active_workers={},
+            _worker_sequence=0,
             config=SimpleNamespace(effective_proxy=lambda: ("未使用代理", "")),
             thread_pool=SimpleNamespace(start=lambda worker, *_a: self.started.append(worker)),
             mpv=SimpleNamespace(
@@ -59,6 +61,9 @@ class SubtitleHandlingTests(unittest.TestCase):
             ),
             toast=SimpleNamespace(show_message=self.messages.append),
         )
+        # 走真实的 _start_worker，顺带覆盖「worker 引用保留到 finished」这条链路。
+        state._start_worker = MethodType(MainWindow._start_worker, state)
+        state._release_worker = MethodType(MainWindow._release_worker, state)
         # worker 的信号要连到真实槽上，用未绑定方法补出绑定版本。
         state._subtitle_ready = lambda *args: MainWindow._subtitle_ready(state, *args)
         state._subtitle_failed = lambda *args: MainWindow._subtitle_failed(state, *args)

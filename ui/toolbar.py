@@ -5,7 +5,17 @@ from typing import Callable
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QRadioButton,
+    QSizePolicy,
+    QWidget,
+)
 
 try:
     import qtawesome as qta
@@ -229,8 +239,78 @@ class SearchBox(QFrame):
         self.style().polish(self)
 
 
+class SourceSelector(QFrame):
+    """工具栏里的站点单选组：切换首页/搜索所用的视频网站。
+
+    这里选的站点只作用于本次会话的浏览行为，不写回「默认首页」配置项。
+    """
+
+    source_changed = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ToolbarSourceSelector")
+        self.setFixedHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.bilibili_radio = QRadioButton("BiliBili")
+        self.bilibili_radio.setObjectName("ToolbarSourceRadio")
+        self.bilibili_radio.setToolTip("首页与搜索使用 Bilibili")
+        self.bilibili_radio.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.youtube_radio = QRadioButton("YouTube")
+        self.youtube_radio.setObjectName("ToolbarSourceRadio")
+        self.youtube_radio.setToolTip("首页与搜索使用 YouTube")
+        self.youtube_radio.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.button_group = QButtonGroup(self)
+        self.button_group.setExclusive(True)
+        self.button_group.addButton(self.bilibili_radio)
+        self.button_group.addButton(self.youtube_radio)
+        self.bilibili_radio.setChecked(True)
+
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(10, 2, 10, 2)
+        self._layout.setSpacing(10)
+        self._layout.addWidget(self.bilibili_radio)
+        self._layout.addWidget(self.youtube_radio)
+
+        # 只在真正被选中时发一次信号，避免同一次切换发出「取消选中 + 选中」两条。
+        self.bilibili_radio.toggled.connect(lambda checked: self._emit_if_checked(checked, "bilibili"))
+        self.youtube_radio.toggled.connect(lambda checked: self._emit_if_checked(checked, "youtube"))
+
+    def set_compact_mode(self, compact: bool) -> None:
+        """窄窗口下换用短标签并收紧边距，把空间让给搜索框与导航按钮。
+
+        与 ToolbarButton 的做法一致；全称仍留在 tooltip 里。
+        """
+        self.bilibili_radio.setText("B站" if compact else "BiliBili")
+        self.youtube_radio.setText("YT" if compact else "YouTube")
+        margin = 6 if compact else 10
+        self._layout.setContentsMargins(margin, 2, margin, 2)
+        self._layout.setSpacing(6 if compact else 10)
+
+    def source(self) -> str:
+        return "youtube" if self.youtube_radio.isChecked() else "bilibili"
+
+    def set_source(self, source: str) -> None:
+        """静默同步选中态，不触发 source_changed（用于外部状态回填）。"""
+        target = self.youtube_radio if str(source or "").strip().lower() == "youtube" else self.bilibili_radio
+        if target.isChecked():
+            return
+        for radio in (self.bilibili_radio, self.youtube_radio):
+            radio.blockSignals(True)
+        target.setChecked(True)
+        for radio in (self.bilibili_radio, self.youtube_radio):
+            radio.blockSignals(False)
+
+    def _emit_if_checked(self, checked: bool, source: str) -> None:
+        if checked:
+            self.source_changed.emit(source)
+
+
 class PlayerToolbar(QWidget):
     search_requested = Signal(str)
+    source_changed = Signal(str)
     url_requested = Signal()
     home_clicked = Signal()
     playlist_clicked = Signal()
@@ -251,6 +331,7 @@ class PlayerToolbar(QWidget):
 
         self.search_box = SearchBox(self)
         self.search_edit = self.search_box.search_edit
+        self.source_selector = SourceSelector(self)
         self.search_button = ToolbarButton("搜索", "fa5s.search", "搜索在线视频", self)
         self.url_button = ToolbarButton("播放URL", "fa5s.link", "打开网络视频地址", self)
         self.home_button = ToolbarButton("首页", "fa5s.home", "查看首页视频列表", self)
@@ -265,6 +346,7 @@ class PlayerToolbar(QWidget):
         self.topmost_button.setCheckable(True)
 
         self.search_box.trailing_icon.clicked.connect(self._emit_search)
+        self.source_selector.source_changed.connect(self.source_changed)
         self.search_button.clicked.connect(self._emit_search)
         self.url_button.clicked.connect(self.url_requested.emit)
         self.home_button.clicked.connect(self.home_clicked.emit)
@@ -281,6 +363,7 @@ class PlayerToolbar(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
+        layout.addWidget(self.source_selector)
         layout.addWidget(self.search_box, 1)
         layout.addWidget(self.search_button)
         layout.addWidget(self.url_button)
@@ -303,6 +386,12 @@ class PlayerToolbar(QWidget):
 
     def set_search_text(self, text: str) -> None:
         self.search_edit.setText(text)
+
+    def source(self) -> str:
+        return self.source_selector.source()
+
+    def set_source(self, source: str) -> None:
+        self.source_selector.set_source(source)
 
     def set_topmost_state(self, enabled: bool) -> None:
         self.topmost_button.setChecked(enabled)
@@ -336,6 +425,7 @@ class PlayerToolbar(QWidget):
     def _set_responsive_mode(self, mode: str) -> None:
         self._compact_mode = mode
         icon_only = mode == "icon"
+        self.source_selector.set_compact_mode(icon_only)
         self.search_box.set_compact_mode(icon_only)
         for button in (
             self.search_button,

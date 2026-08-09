@@ -24,22 +24,32 @@ class HomeWorker(QRunnable):
         page: int = 1,
         page_size: int = 56,
         force_refresh: bool = False,
+        source: str = "",
     ) -> None:
         super().__init__()
         self.resolver = resolver
         self.page = page
         self.page_size = page_size
         self.force_refresh = force_refresh
+        # 站点在提交任务时就固定下来：用户随时可能在工具栏切换，
+        # 让 worker 自己去读当前选择会拿到切换后的值，结果就对不上发起时的意图。
+        self.source = source
         self.signals = HomeWorkerSignals()
 
     @Slot()
     def run(self) -> None:
         try:
-            logger.info("home worker started page=%s page_size=%s", self.page, self.page_size)
+            logger.info(
+                "home worker started page=%s page_size=%s source=%s",
+                self.page,
+                self.page_size,
+                self.source or "default",
+            )
             videos, has_next = self.resolver.fetch_home_videos(
                 self.page,
                 self.page_size,
                 force_refresh=self.force_refresh,
+                source=self.source,
             )
             logger.info(
                 "home worker success page=%s count=%s has_next=%s",

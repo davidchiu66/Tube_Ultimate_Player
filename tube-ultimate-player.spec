@@ -1,5 +1,5 @@
 Name:           tube-ultimate-player
-Version:        0.2.22
+Version:        0.2.23
 Release:        1%{?dist}
 Summary:        YouTube and Bilibili desktop video player
 
@@ -85,6 +85,12 @@ desktop-file-validate \
 %{_datadir}/%{name}/
 
 %changelog
+* Sun Aug 09 2026 davidchiu66 <chinamen@gmail.com> - 0.2.23-1
+- Add a toolbar site switch with a per-site home page cache.
+- Fix crashes caused by thread pool workers collected before signal delivery.
+- Decrypt Chromium App-Bound cookies in an isolated subprocess.
+- Run downloads on a dedicated thread pool sized by the concurrency setting.
+
 * Sat Aug 01 2026 davidchiu66 <chinamen@gmail.com> - 0.2.22-1
 - Fix DLNA casting progress, upstream reconnect and protocol headers.
 - Enumerate all Bilibili and YouTube subtitles with a searchable picker.

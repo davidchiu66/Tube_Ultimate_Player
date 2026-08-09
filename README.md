@@ -14,12 +14,12 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.22-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.23-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-366-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-404-16a34a?style=flat-square">
 </p>
 
 ## 亮点
@@ -225,7 +225,7 @@ python build_portable_with_deno_ffmpeg.py
 python build_portable.py --with-deno-ffmpeg
 ```
 
-输出文件名为 `Tube_Ultimate_Player_portable_v<version>_with_deno_ffmpeg.zip`，解压后即可运行。
+输出文件名为 `Tube_Ultimate_Player_portable_v<version>_<arch>_with_deno_ffmpeg.zip`（`<arch>` 为 `win_x86_64` 或 `win_arm64`，由 `--arch` 指定，默认前者），解压后即可运行。
 
 ### Fedora RPM 与 COPR
 
@@ -274,20 +274,20 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
 滚轮调音量只在视频区与控制面板背景生效，音量滑块、清晰度/字幕/倍速下拉框与播放列表面板保留各自的原生滚轮行为。
 
-## 0.2.22 更新摘要
+## 0.2.23 更新摘要
 
-投屏与 Cookie 两条链路的问题修复，以及六项功能增强：
+浏览体验与稳定性为主，并新增 Windows ARM64 产物：
 
-- 修复投屏时进度条在起始点与真实位置之间反复跳动
-- 投屏上游断流自动重连、补齐 DLNA 协议头与时长元数据、令牌改滑动续期，并补全转封装的观测日志
-- 修复 Bilibili 字幕全部拿不到的问题（yt-dlp 内联在 `data` 字段，原实现只认 `url`），新增全量字幕枚举与带搜索的完整列表
-- 修复空 Cookie 文件挡住浏览器 Cookie 并导致首页整体失败
-- Cookie「自动检测」改为按站点挑选已登录的浏览器，读不到时明确提示原因
-- 下载遇到浏览器 Cookie 解密失败（DPAPI / App-Bound Encryption）自动换浏览器重试
-- 修复下载进度条每秒回跳；封面请求关闭 HTTP/2 消除 `qt.network.http2` 报错
-- 新增视频更新时间、下载列表倒序与批量操作、鼠标滚轮音量、播放 URL 历史
+- 工具栏搜索框前新增 BiliBili / YouTube 单选（默认 BiliBili），首页与搜索随之切换，不再受「默认首页」配置影响
+- 首页结果按站点留档（5 分钟），来回切站直接从内存重绘，不再每次重新加载
+- 修复启动与切站闪退：线程池任务在跨线程信号送达前被回收，轻则界面不刷新，重则进程直接退出
+- 修复 YouTube 首页与搜索卡片没有日期；修复解析层缓存在两个站点间串站
+- 支持 Chrome 127+ / 新版 Edge 的 App-Bound Cookie 加密：在隔离子进程里解密并导出 `cookies.txt`，失败则回退原有链路
+- 下载改用专用线程池，容量跟随「同时下载数」，不再与解析、搜索、投屏抢线程
+- 新增 Windows ARM64 安装版与便携版，产物名带 `win_x86_64` / `win_arm64` 后缀，自动更新按本机架构挑选
+- 播放列表的自动连播改为默认不勾选
 
-完整说明见 [`docs/releases/v0.2.22.md`](docs/releases/v0.2.22.md)。
+完整说明见 [`docs/releases/v0.2.23.md`](docs/releases/v0.2.23.md)。
 
 ## DLNA 投屏说明
 
@@ -311,7 +311,7 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `366` 项）：
+运行完整自动化测试（当前版本共 `404` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"

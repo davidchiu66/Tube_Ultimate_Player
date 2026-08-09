@@ -7,6 +7,13 @@ import sys
 from platform_support import configure_qt_platform_environment, is_root_user, linux_session_type
 
 
+# 冻结后的 exe 没有独立 python 解释器，Cookie 解密子进程靠这个哨兵参数复用自身。
+# 必须在导入 PySide6 / 起 Qt 之前拦截，子进程只做解密、不拉起界面。
+if len(sys.argv) >= 2 and sys.argv[1] == "--extract-chromium-cookies":
+    from services.chromium_cookie_extractor import run_cli
+
+    raise SystemExit(run_cli(sys.argv[2:]))
+
 configure_qt_platform_environment()
 
 from PySide6.QtCore import Qt

@@ -180,6 +180,84 @@ class UpdateLaunchServiceTests(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected.download_url, "deb")
 
+    def test_windows_installer_picks_the_matching_arch(self) -> None:
+        # 同一版本同时发布 x86_64 与 arm64 资产时，x86_64 机器不能选到 arm64 包。
+        release = ReleaseInfo(
+            tag_name="v1.0.0",
+            name="1.0.0",
+            published_at="",
+            body="",
+            html_url="https://example.invalid",
+            prerelease=False,
+            assets=[
+                ReleaseAsset(
+                    "Tube_Ultimate_Player_setup_v1.0.0_win_arm64_with_deno_ffmpeg.exe",
+                    "arm64",
+                    1,
+                ),
+                ReleaseAsset(
+                    "Tube_Ultimate_Player_setup_v1.0.0_win_x86_64_with_deno_ffmpeg.exe",
+                    "x64",
+                    2,
+                ),
+            ],
+        )
+
+        with patch("services.update_service.current_windows_arch", return_value="x86_64"):
+            selected = self.service.select_upgrade_asset(release, "installer")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.download_url, "x64")
+
+    def test_arm64_machine_skips_x86_64_assets(self) -> None:
+        release = ReleaseInfo(
+            tag_name="v1.0.0",
+            name="1.0.0",
+            published_at="",
+            body="",
+            html_url="https://example.invalid",
+            prerelease=False,
+            assets=[
+                ReleaseAsset(
+                    "Tube_Ultimate_Player_setup_v1.0.0_win_x86_64.exe",
+                    "x64",
+                    1,
+                ),
+                ReleaseAsset(
+                    "Tube_Ultimate_Player_portable_v1.0.0_win_arm64.zip",
+                    "arm64",
+                    2,
+                ),
+            ],
+        )
+
+        with patch("services.update_service.current_windows_arch", return_value="arm64"):
+            selected = self.service.select_upgrade_asset(release, "portable")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.download_url, "arm64")
+
+    def test_untagged_legacy_assets_still_selected_on_windows(self) -> None:
+        # 旧版本发布没有架构后缀，仍按原有的 portable/installer 规则挑选，保证兼容。
+        release = ReleaseInfo(
+            tag_name="v1.0.0",
+            name="1.0.0",
+            published_at="",
+            body="",
+            html_url="https://example.invalid",
+            prerelease=False,
+            assets=[
+                ReleaseAsset("Tube_Ultimate_Player_setup_v1.0.0.exe", "legacy", 1),
+                ReleaseAsset("Tube_Ultimate_Player_portable_v1.0.0.zip", "legacy", 2),
+            ],
+        )
+
+        with patch("services.update_service.current_windows_arch", return_value="x86_64"):
+            selected = self.service.select_upgrade_asset(release, "portable")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.download_url, "legacy")
+
 
 class UpdateLaunchUiTests(unittest.TestCase):
     def _state(self, install_mode: str = "portable") -> SimpleNamespace:

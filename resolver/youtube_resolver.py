@@ -16,12 +16,17 @@ from resolver.quality_selector import QualitySelector
 from resolver.subtitle_parser import SubtitleParser
 from services.config_service import ConfigService, detect_browser_cookie_sources
 from services.cookie_service import prepare_cookie_file
+from services.chromium_cookie_extractor import extract_cookies_to_netscape
 from services.logging_service import sanitize_command
 
 
 logger = logging.getLogger("tube_player.resolver")
 ytdlp_logger = logging.getLogger("tube_player.ytdlp")
 VIDEO_ID_PATTERN = re.compile(r"^[0-9A-Za-z_-]{11}$")
+# --flat-playlist 的条目默认不带日期，首页/搜索卡片因此一片空白。加上这个开关，
+# youtube:tab 与 youtube:search 会把页面上的「N 天前」折算成 timestamp 一并返回；
+# 代价是日期只精确到天级，够卡片展示用。
+_APPROXIMATE_DATE_ARGS = ("--extractor-args", "youtubetab:approximate_date")
 
 
 class YoutubeResolver:
@@ -47,6 +52,12 @@ class YoutubeResolver:
                 lambda browser: self._build_command(url, override_cookie_browser=browser),
                 result,
             )
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            fallback_file = self._chromium_cookie_fallback_file(url)
+            if fallback_file:
+                ytdlp_logger.warning("浏览器 Cookie 解密失败，改用现解的 Chromium Cookie 文件重试")
+                command = self._build_command(url, explicit_cookie_file=fallback_file)
+                result = self._run_ytdlp(command, url, "fallback-chromium-cookie")
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
             cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
@@ -100,6 +111,12 @@ class YoutubeResolver:
                 result,
             )
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            fallback_file = self._chromium_cookie_fallback_file(url)
+            if fallback_file:
+                ytdlp_logger.warning("播放列表浏览器 Cookie 解密失败，改用现解的 Chromium Cookie 文件重试")
+                command = self._build_playlist_command(url, explicit_cookie_file=fallback_file)
+                result = self._run_ytdlp(command, url, "playlist-fallback-chromium-cookie")
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
             cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
                 ytdlp_logger.warning("playlist browser cookie extraction failed; retrying with configured cookie file")
@@ -147,6 +164,12 @@ class YoutubeResolver:
                 lambda browser: self._build_home_command(url, total_needed, override_cookie_browser=browser),
                 result,
             )
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            fallback_file = self._chromium_cookie_fallback_file(url)
+            if fallback_file:
+                ytdlp_logger.warning("首页浏览器 Cookie 解密失败，改用现解的 Chromium Cookie 文件重试")
+                command = self._build_home_command(url, total_needed, explicit_cookie_file=fallback_file)
+                result = self._run_ytdlp(command, url, f"home-page-{page}-fallback-chromium-cookie")
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
             cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
@@ -216,6 +239,12 @@ class YoutubeResolver:
                 lambda browser: self._build_home_command(url, total_needed, override_cookie_browser=browser),
                 result,
             )
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            fallback_file = self._chromium_cookie_fallback_file(url)
+            if fallback_file:
+                ytdlp_logger.warning("搜索浏览器 Cookie 解密失败，改用现解的 Chromium Cookie 文件重试")
+                command = self._build_home_command(url, total_needed, explicit_cookie_file=fallback_file)
+                result = self._run_ytdlp(command, url, f"search-page-{page}-fallback-chromium-cookie")
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
             cookie_file = self.config.cookie_file_for_url(url)
             if cookie_file:
@@ -287,6 +316,11 @@ class YoutubeResolver:
                 ),
                 result,
             )
+        if result.returncode != 0 and self._should_retry_with_cookie_file(result):
+            fallback_file = self._chromium_cookie_fallback_file(creator_url)
+            if fallback_file:
+                command = self._build_home_command(creator_url, limit, explicit_cookie_file=fallback_file)
+                result = self._run_ytdlp(command, creator_url, "creator-videos-fallback-chromium-cookie")
         if result.returncode != 0 and self._should_retry_with_cookie_file(result):
             cookie_file = self.config.cookie_file_for_url(creator_url)
             if cookie_file:
@@ -384,6 +418,28 @@ class YoutubeResolver:
             browsers.append(value)
         return browsers
 
+    def _chromium_cookie_fallback_file(self, url: str) -> str:
+        """浏览器 DPAPI 解不了时，自己从 Chromium 系浏览器现解一份 Netscape cookies.txt。
+
+        针对 App-Bound Encryption（v20）：换浏览器、退回配置文件都救不了纯 v20 的
+        Chrome/Edge，只能自己走 IElevator 解密（在子进程里，崩了不影响主程序）。
+        优先当前配置/探测到的浏览器，再退到其它已登录的 Chromium 浏览器；任何一个
+        解出 Cookie 就返回其路径，全失败返回 ""。
+        """
+        tried: set[str] = set()
+        preferred = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site("youtube")
+        candidates: list[str] = [preferred] if preferred else []
+        candidates.extend(self._alternate_cookie_browsers(include_current=True))
+        for spec in candidates:
+            browser = str(spec or "").split(":", 1)[0].strip().lower()
+            if not browser or browser in ("firefox", "opera") or spec in tried:
+                continue
+            tried.add(spec)
+            path = extract_cookies_to_netscape(spec, url)
+            if path:
+                return path
+        return ""
+
     def _cookie_source(self, url: str) -> tuple[str, str]:
         """当前请求会用哪种 Cookie 源，与 _build_*_command 的分支顺序保持一致。
 
@@ -438,6 +494,7 @@ class YoutubeResolver:
         url: str,
         force_cookie_file: bool = False,
         override_cookie_browser: str = "",
+        explicit_cookie_file: str = "",
     ) -> list[str]:
         languages = self.config.get("youtube.subtitle_languages", ["zh-Hans", "zh-Hant", "zh", "en"])
         command = [
@@ -468,16 +525,13 @@ class YoutubeResolver:
         if proxy:
             command.extend(["--proxy", proxy])
 
-        cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
-        cookie_file = self.config.cookie_file_for_url(url)
-        if force_cookie_file and cookie_file:
-            command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif cookie_browser:
-            command.extend(["--cookies-from-browser", cookie_browser])
-        elif cookie_file:
-            command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
-            command.extend(["--cookies-from-browser", auto_cookie_browser])
+        self._add_cookie_args(
+            command,
+            url,
+            force_cookie_file=force_cookie_file,
+            override_cookie_browser=override_cookie_browser,
+            explicit_cookie_file=explicit_cookie_file,
+        )
 
         command.append(url)
         return command
@@ -488,6 +542,7 @@ class YoutubeResolver:
         limit: int,
         force_cookie_file: bool = False,
         override_cookie_browser: str = "",
+        explicit_cookie_file: str = "",
     ) -> list[str]:
         command = [
             str(self.ytdlp_path),
@@ -497,6 +552,7 @@ class YoutubeResolver:
             str(max(1, min(500, limit))),
             "--skip-download",
             "--geo-bypass",
+            *_APPROXIMATE_DATE_ARGS,
             "--socket-timeout",
             "30",
             "--retries",
@@ -511,16 +567,13 @@ class YoutubeResolver:
         if proxy:
             command.extend(["--proxy", proxy])
 
-        cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
-        cookie_file = self.config.cookie_file_for_url(url)
-        if force_cookie_file and cookie_file:
-            command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif cookie_browser:
-            command.extend(["--cookies-from-browser", cookie_browser])
-        elif cookie_file:
-            command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
-            command.extend(["--cookies-from-browser", auto_cookie_browser])
+        self._add_cookie_args(
+            command,
+            url,
+            force_cookie_file=force_cookie_file,
+            override_cookie_browser=override_cookie_browser,
+            explicit_cookie_file=explicit_cookie_file,
+        )
 
         command.append(url)
         return command
@@ -530,6 +583,7 @@ class YoutubeResolver:
         url: str,
         force_cookie_file: bool = False,
         override_cookie_browser: str = "",
+        explicit_cookie_file: str = "",
     ) -> list[str]:
         command = [
             str(self.ytdlp_path),
@@ -554,9 +608,36 @@ class YoutubeResolver:
         if proxy:
             command.extend(["--proxy", proxy])
 
+        self._add_cookie_args(
+            command,
+            url,
+            force_cookie_file=force_cookie_file,
+            override_cookie_browser=override_cookie_browser,
+            explicit_cookie_file=explicit_cookie_file,
+        )
+
+        command.append(url)
+        return command
+
+    def _add_cookie_args(
+        self,
+        command: list[str],
+        url: str,
+        *,
+        force_cookie_file: bool = False,
+        override_cookie_browser: str = "",
+        explicit_cookie_file: str = "",
+    ) -> None:
+        """给 yt-dlp 命令追加 Cookie 参数，分支顺序与 _cookie_source 保持一致。
+
+        explicit_cookie_file 是「浏览器 DPAPI 解不了」时由本程序现解的 Chromium
+        Netscape 文件，优先级最高（见 chromium_cookie_fallback_file）。
+        """
         cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
         cookie_file = self.config.cookie_file_for_url(url)
-        if force_cookie_file and cookie_file:
+        if explicit_cookie_file:
+            command.extend(["--cookies", explicit_cookie_file])
+        elif force_cookie_file and cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
         elif cookie_browser:
             command.extend(["--cookies-from-browser", cookie_browser])
@@ -564,9 +645,6 @@ class YoutubeResolver:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
         elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
             command.extend(["--cookies-from-browser", auto_cookie_browser])
-
-        command.append(url)
-        return command
 
     def _parse_info(self, info: dict, warnings: str = "") -> VideoInfo:
         formats = info.get("formats") or []
