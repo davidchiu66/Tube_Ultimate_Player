@@ -403,6 +403,43 @@ class PlatformDetectionTests(unittest.TestCase):
         with patch("services.update_service.read_pe_machine", return_value=""):
             service.ensure_package_arch_runnable("whatever.exe")
 
+    def test_arm64_installer_is_rejected_on_x64_despite_a_32bit_stub(self) -> None:
+        """本项目的 Inno 安装程序外层恒为 32 位 x86 壳，只能靠文件名判架构。
+
+        真正拦人的是 .iss 里的 ArchitecturesAllowed=arm64，PE 头看不出来。
+        只看机器类型会放行（x86 在 x86_64 上能跑），于是把 arm64 包交给 x64 机器，
+        安装程序照旧弹 "This program does not support the version of Windows..."。
+        """
+        service = UpdateService.__new__(UpdateService)
+        with patch("services.update_service.read_pe_machine", return_value="x86"), patch(
+            "services.update_service.host_cpu_arch", return_value="x86_64"
+        ), patch("services.update_service.current_windows_arch", return_value="x86_64"):
+            with self.assertRaises(RuntimeError) as ctx:
+                service.ensure_package_arch_runnable("Tube_Ultimate_Player_setup_v0.2.23_win_arm64.exe")
+        self.assertIn("arm64", str(ctx.exception))
+
+    def test_matching_named_installer_passes_with_a_32bit_stub(self) -> None:
+        service = UpdateService.__new__(UpdateService)
+        with patch("services.update_service.read_pe_machine", return_value="x86"), patch(
+            "services.update_service.host_cpu_arch", return_value="x86_64"
+        ), patch("services.update_service.current_windows_arch", return_value="x86_64"):
+            service.ensure_package_arch_runnable("Tube_Ultimate_Player_setup_v0.2.23_win_x86_64.exe")
+
+    def test_emulated_x86_64_build_keeps_installing_x86_64_packages_on_arm64(self) -> None:
+        """ARM 机器上跑 x86_64 版：该继续装 x86_64 包，不能被当成架构不符拦掉。"""
+        service = UpdateService.__new__(UpdateService)
+        with patch("services.update_service.read_pe_machine", return_value="x86"), patch(
+            "services.update_service.host_cpu_arch", return_value="arm64"
+        ), patch("services.update_service.current_windows_arch", return_value="x86_64"):
+            service.ensure_package_arch_runnable("Tube_Ultimate_Player_setup_v0.2.23_win_x86_64.exe")
+
+    def test_untagged_legacy_package_is_not_blocked_by_name(self) -> None:
+        service = UpdateService.__new__(UpdateService)
+        with patch("services.update_service.read_pe_machine", return_value="x86"), patch(
+            "services.update_service.host_cpu_arch", return_value="x86_64"
+        ), patch("services.update_service.current_windows_arch", return_value="x86_64"):
+            service.ensure_package_arch_runnable("Tube_Ultimate_Player_setup_v0.2.21.exe")
+
 
 class UpdateLaunchUiTests(unittest.TestCase):
     def _state(self, install_mode: str = "portable") -> SimpleNamespace:

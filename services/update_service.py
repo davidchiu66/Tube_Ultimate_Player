@@ -433,27 +433,49 @@ class UpdateService:
         return ""
 
     def ensure_package_arch_runnable(self, package_path: str | Path) -> None:
-        """启动前读 PE 头，确认安装包的机器类型本机真能跑。
+        """启动前确认这个包本机真能跑，不能跑就中止并说明真实原因。
 
-        最后一道闸：万一资产命名或挑选再出岔子，也要在这里拦下，而不是让
-        Windows 弹 "This program does not support the version of Windows your
-        computer is running"——那句提示会把用户引向系统版本，与真正的病因无关。
-        读不出机器类型（非 PE、文件被占用等）时放行，不给正常升级添堵。
+        最后一道闸：万一资产命名或挑选再出岔子，也要在这里拦下，而不是让安装程序
+        弹 "This program does not support the version of Windows your computer is
+        running"——那句提示会把用户引向系统版本，与真正的病因（架构不符）无关。
+
+        两道判断，缺一不可：
+
+        1. **文件名里的架构标记**。本项目的 Inno Setup 安装程序外层是 32 位 x86
+           引导壳（两种架构的包都一样），真正拦人的是 .iss 里的
+           ArchitecturesAllowed；这一层从 PE 头看不出来，只能靠命名约定。
+        2. **PE 头机器类型**。命名之外的兜底，覆盖便携版 exe 等直接可执行的产物。
+
+        两项都读不出（无架构标记的旧资产、非 PE 文件）时放行，不给正常升级添堵。
         """
-        machine = read_pe_machine(package_path)
-        if not machine:
-            return
         host = host_cpu_arch()
-        if machine == host:
-            return
-        # ARM64 机器能模拟跑 x86_64 与 x86 安装包，反向不成立。
-        if host == "arm64" and machine in ("x86_64", "x86"):
-            return
-        if host == "x86_64" and machine == "x86":
-            return
-        logger.error("升级包架构与本机不符 path=%s package=%s host=%s", package_path, machine, host)
+        process = current_windows_arch()
+        name_arch = asset_arch(Path(package_path).name)
+        # 安装体系要跟当前进程一致：x86_64 版在 ARM 上模拟运行时仍该装 x86_64 包。
+        if name_arch and name_arch != process and not self._arch_can_run(name_arch, host):
+            self._reject_package_arch(package_path, name_arch, host)
+
+        machine = read_pe_machine(package_path)
+        if machine and not self._arch_can_run(machine, host):
+            self._reject_package_arch(package_path, machine, host)
+
+    @staticmethod
+    def _arch_can_run(package_arch: str, host: str) -> bool:
+        """本机 host 能否运行 package_arch 的程序。"""
+        if package_arch == host:
+            return True
+        # ARM64 机器能模拟跑 x86_64 与 x86，x86_64 机器能跑 x86；反向都不成立。
+        if host == "arm64":
+            return package_arch in ("x86_64", "x86")
+        if host == "x86_64":
+            return package_arch == "x86"
+        return False
+
+    @staticmethod
+    def _reject_package_arch(package_path: str | Path, package_arch: str, host: str) -> None:
+        logger.error("升级包架构与本机不符 path=%s package=%s host=%s", package_path, package_arch, host)
         raise RuntimeError(
-            f"升级包是 {machine} 架构，本机是 {host}，无法运行。已终止升级，请到 GitHub 下载对应架构的安装包。"
+            f"升级包是 {package_arch} 架构，本机是 {host}，无法运行。已终止升级，请到 GitHub 下载对应架构的安装包。"
         )
 
     def verify_authenticode(self, package_path: str | Path) -> None:

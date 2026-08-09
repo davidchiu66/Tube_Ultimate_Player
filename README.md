@@ -19,7 +19,7 @@
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-438-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-442-16a34a?style=flat-square">
 </p>
 
 ## 亮点
@@ -42,7 +42,7 @@
 - 下载遇到浏览器 Cookie 解密失败时自动改用其它浏览器重试
 - 被设为系统默认浏览器的便携版浏览器也能被识别，Cookie 库按绝对路径定位
 - 升级包与 FFmpeg 安装包强制校验来源域名、大小与 SHA256，压缩包拒绝路径穿越条目
-- 升级前探测本机系统与 CPU 架构并在「关于」页展示，只挑与本机相符的安装包，启动前再核对 PE 机器类型
+- 升级前探测本机系统与 CPU 架构并在「关于」页展示，只挑与本机相符的安装包，启动前再按文件名与 PE 头核对一次架构
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
 - 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
@@ -317,7 +317,7 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `438` 项）：
+运行完整自动化测试（当前版本共 `442` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
