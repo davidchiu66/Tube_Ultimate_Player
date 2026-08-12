@@ -9,14 +9,18 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
 from resolver.models import SubtitleInfo
 from resolver.subtitle_parser import SubtitleParser
+from resolver.youtube_resolver import YoutubeResolver
 from services import subtitle_service
+from services.config_service import ConfigService
 from services.subtitle_service import materialize_subtitle, subtitle_cache_path
 
 
@@ -88,10 +92,204 @@ class ParserTests(unittest.TestCase):
 
         self.assertEqual(parsed, {})
 
-    def test_unsupported_only_language_is_skipped(self) -> None:
+    def test_unusual_format_is_kept_instead_of_silently_dropped(self) -> None:
+        # P3：只有 json3/srv3 这类私有格式时也要交出轨道，宁可 mpv 报错也不静默消失。
         parsed = SubtitleParser.parse({"en": [{"ext": "json3", "url": "https://x/en.json3"}]}, {})
 
+        self.assertEqual(list(parsed), ["en:manual"])
+        self.assertEqual(parsed["en:manual"].ext, "json3")
+
+    def test_srv3_is_preferred_over_json3(self) -> None:
+        parsed = SubtitleParser.parse(
+            {
+                "en": [
+                    {"ext": "json3", "url": "https://x/en.json3"},
+                    {"ext": "srv3", "url": "https://x/en.srv3"},
+                ]
+            },
+            {},
+        )
+
+        self.assertEqual(parsed["en:manual"].ext, "srv3")
+
+    def test_danmaku_xml_is_still_excluded(self) -> None:
+        parsed = SubtitleParser.parse(
+            {
+                "danmaku": [{"ext": "xml", "url": "https://x/danmaku.xml"}],
+                "en": [{"ext": "xml", "url": "https://x/en.xml"}],
+            },
+            {},
+        )
+
         self.assertEqual(parsed, {})
+
+    def test_configured_languages_drive_the_order(self) -> None:
+        tracks = {
+            "en": [{"ext": "srt", "url": "https://x/en.srt"}],
+            "ja": [{"ext": "srt", "url": "https://x/ja.srt"}],
+            "zh-Hans": [{"ext": "srt", "url": "https://x/zh.srt"}],
+        }
+
+        default_order = list(SubtitleParser.parse(tracks, {}))
+        japanese_first = list(SubtitleParser.parse(tracks, {}, preferred_languages=["ja", "en"]))
+
+        self.assertEqual(default_order[0], "zh-Hans:manual")
+        self.assertEqual(japanese_first[0], "ja:manual")
+        self.assertEqual(japanese_first[1], "en:manual")
+
+    def test_empty_language_config_falls_back_to_builtin_order(self) -> None:
+        tracks = {
+            "en": [{"ext": "srt", "url": "https://x/en.srt"}],
+            "zh-Hans": [{"ext": "srt", "url": "https://x/zh.srt"}],
+        }
+
+        self.assertEqual(
+            list(SubtitleParser.parse(tracks, {}, preferred_languages=[])),
+            list(SubtitleParser.parse(tracks, {})),
+        )
+
+
+class ParseObservabilityTests(unittest.TestCase):
+    """P4：靠 raw_manual / raw_auto / parsed 区分"站点没给"与"解析器丢了"。"""
+
+    def _debug_lines(self, subtitles: dict, automatic_captions: dict) -> list[str]:
+        with self.assertLogs("tube_player.resolver", level=logging.DEBUG) as captured:
+            SubtitleParser.parse(subtitles, automatic_captions)
+        return [line for line in captured.output if "subtitle parse" in line]
+
+    def test_site_returned_nothing(self) -> None:
+        lines = self._debug_lines({}, {})
+
+        self.assertIn("raw_manual=0 raw_auto=0 parsed=0", lines[0])
+
+    def test_counts_cover_both_dictionaries(self) -> None:
+        lines = self._debug_lines(YOUTUBE_SUBTITLES, {"ja": [{"ext": "srt", "url": "https://x/ja.srt"}]})
+
+        self.assertIn("raw_manual=3 raw_auto=1 parsed=4", lines[0])
+
+    def test_parser_dropping_everything_is_visible(self) -> None:
+        lines = self._debug_lines({"danmaku": [{"ext": "xml", "url": "https://x/d.xml"}]}, {})
+
+        self.assertIn("raw_manual=1 raw_auto=0 parsed=0", lines[0])
+
+
+class ResolveCommandTests(unittest.TestCase):
+    """P2：`--dump-single-json` 下四个字幕参数是空转的，不该再传。"""
+
+    @staticmethod
+    def _command() -> list[str]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = ConfigService(
+                default_path=Path("config/default_config.json"),
+                user_path=Path(temp_dir) / "user.json",
+            )
+            resolver = YoutubeResolver.__new__(YoutubeResolver)
+            resolver.config = config
+            resolver.ytdlp_path = Path("yt-dlp")
+            return resolver._build_command("https://www.youtube.com/watch?v=1")
+
+    def test_subtitle_flags_are_gone(self) -> None:
+        command = self._command()
+
+        for flag in ("--write-subs", "--write-auto-subs", "--sub-langs", "--sub-format"):
+            self.assertNotIn(flag, command)
+
+    def test_the_rest_of_the_command_is_untouched(self) -> None:
+        command = self._command()
+
+        self.assertIn("--dump-single-json", command)
+        self.assertIn("--skip-download", command)
+        self.assertIn("--no-playlist", command)
+        self.assertIn("--geo-bypass", command)
+        self.assertEqual(command[-1], "https://www.youtube.com/watch?v=1")
+
+
+class DownloadRetryTests(unittest.TestCase):
+    """429：YouTube 机翻字幕接口按 IP 限流，重试几次能救回来，救不回来要说清原因。"""
+
+    TRANSLATED_URL = "https://www.youtube.com/api/timedtext?v=abc&kind=asr&lang=en&tlang=zh-Hans"
+    PLAIN_URL = "https://www.youtube.com/api/timedtext?v=abc&lang=en"
+
+    def setUp(self) -> None:
+        sleeper = patch.object(subtitle_service.time, "sleep")
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
+
+    @staticmethod
+    def _http_error(status: int, headers: dict | None = None) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError("https://x", status, "boom", headers or {}, None)
+
+    def _download(self, url: str, side_effect) -> str:
+        with patch.object(subtitle_service, "_download_once", side_effect=side_effect) as once:
+            self.attempts = once
+            return subtitle_service._download(url, proxy="", headers=None)
+
+    def test_transient_429_is_retried_and_succeeds(self) -> None:
+        payload = self._download(
+            self.TRANSLATED_URL,
+            [self._http_error(429), "1\n00:00:01,000 --> 00:00:02,000\n你好\n"],
+        )
+
+        self.assertIn("你好", payload)
+        self.assertEqual(self.attempts.call_count, 2)
+
+    def test_attempts_are_capped(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self._download(self.TRANSLATED_URL, self._http_error(429))
+
+        self.assertEqual(self.attempts.call_count, subtitle_service.DOWNLOAD_ATTEMPTS)
+
+    def test_translated_track_gets_an_actionable_message(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            self._download(self.TRANSLATED_URL, self._http_error(429))
+
+        message = str(raised.exception)
+        self.assertIn("429", message)
+        self.assertIn("机器翻译", message)
+        self.assertIn("原文字幕", message)
+
+    def test_plain_track_message_does_not_blame_translation(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            self._download(self.PLAIN_URL, self._http_error(429))
+
+        message = str(raised.exception)
+        self.assertIn("429", message)
+        self.assertNotIn("机器翻译", message)
+
+    def test_expired_signature_is_reported_without_retrying(self) -> None:
+        with self.assertRaises(RuntimeError) as raised:
+            self._download(self.PLAIN_URL, self._http_error(403))
+
+        self.assertEqual(self.attempts.call_count, 1)
+        self.assertIn("重新解析", str(raised.exception))
+
+    def test_server_errors_are_retried(self) -> None:
+        payload = self._download(self.PLAIN_URL, [self._http_error(503), "ok"])
+
+        self.assertEqual(payload, "ok")
+        self.assertEqual(self.attempts.call_count, 2)
+
+    def test_retry_after_header_is_honoured_within_the_cap(self) -> None:
+        self._download(self.PLAIN_URL, [self._http_error(429, {"Retry-After": "4"}), "ok"])
+
+        delay = self.sleep.call_args[0][0]
+        self.assertGreaterEqual(delay, 4.0)
+        self.assertLessEqual(delay, 4.0 + 0.4)
+
+    def test_absurd_retry_after_is_clamped(self) -> None:
+        self._download(self.PLAIN_URL, [self._http_error(429, {"Retry-After": "600"}), "ok"])
+
+        delay = self.sleep.call_args[0][0]
+        self.assertLessEqual(delay, subtitle_service.MAX_RETRY_WAIT_SECONDS + 0.4)
+
+    def test_translated_tracks_are_labelled(self) -> None:
+        translated = SubtitleInfo(language="zh-Hans", ext="srt", url=self.TRANSLATED_URL, is_auto=True)
+        original = SubtitleInfo(language="en", ext="srt", url=self.PLAIN_URL, is_auto=True)
+
+        self.assertTrue(translated.is_translated)
+        self.assertIn("机翻", translated.label)
+        self.assertFalse(original.is_translated)
+        self.assertIn("自动", original.label)
 
 
 class MaterializeTests(unittest.TestCase):

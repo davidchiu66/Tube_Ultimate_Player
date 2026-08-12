@@ -10,6 +10,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app_paths import CACHE_DIR, RUNTIME_ROOT
+from services.firefox_profiles import (
+    COOKIE_DB_NAME,
+    copy_sqlite_database,
+    resolve_firefox_profile_dir,
+)
 
 
 class CookieFormatError(RuntimeError):
@@ -188,14 +193,16 @@ def _load_firefox_cookie_header(browser_spec: str, target_url: str) -> str:
     if profile_dir is None:
         return ""
 
-    cookie_db = profile_dir / "cookies.sqlite"
+    cookie_db = profile_dir / COOKIE_DB_NAME
     if not cookie_db.exists():
         return ""
 
-    fd, temp_path = tempfile.mkstemp(suffix=".sqlite")
-    os.close(fd)
+    temp_dir = tempfile.mkdtemp(prefix="tube_cookies_")
+    temp_path = Path(temp_dir) / COOKIE_DB_NAME
     try:
-        shutil.copy2(cookie_db, temp_path)
+        # 必须连 -wal 一起复制：Firefox 在跑的时候，刚登录的 Cookie 还在 WAL 里，
+        # 只拷主库会读到「未登录」的旧快照。副本放在独立目录，边车文件才有处可去。
+        copy_sqlite_database(cookie_db, temp_path)
         conn = sqlite3.connect(temp_path)
         try:
             rows = conn.execute(
@@ -207,13 +214,10 @@ def _load_firefox_cookie_header(browser_spec: str, target_url: str) -> str:
             ).fetchall()
         finally:
             conn.close()
-    except OSError:
+    except (OSError, sqlite3.Error):
         return ""
     finally:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     pairs: list[str] = []
     seen: set[str] = set()
@@ -233,37 +237,8 @@ def _load_firefox_cookie_header(browser_spec: str, target_url: str) -> str:
 
 
 def _resolve_firefox_profile_dir(profile: str) -> Path | None:
-    profile_path = Path(profile).expanduser() if profile else None
-    if profile_path is not None and profile_path.is_absolute():
-        return profile_path if (profile_path / "cookies.sqlite").is_file() else None
-
-    roots: list[Path]
-    if os.name == "nt":
-        roots = [Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox" / "Profiles"]
-    else:
-        home = Path.home()
-        roots = [
-            home / ".mozilla" / "firefox",
-            home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
-            home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
-        ]
-    if profile:
-        for root in roots:
-            target = root / profile
-            if (target / "cookies.sqlite").is_file():
-                return target
-        return None
-    for root in roots:
-        if not root.exists():
-            continue
-        try:
-            candidates = root.iterdir()
-        except OSError:
-            continue
-        for candidate in candidates:
-            if (candidate / "cookies.sqlite").is_file():
-                return candidate
-    return None
+    """定位 profile 目录；发现规则与浏览器列表、Cookie 探测共用一套。"""
+    return resolve_firefox_profile_dir(profile)
 
 
 def secure_cookie_file(path: str | Path) -> None:

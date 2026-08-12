@@ -4,7 +4,6 @@ from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSize, QTim
 from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -19,12 +18,16 @@ from PySide6.QtWidgets import (
 from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
 from ui.text_elision import elide_multiline_text, format_seconds, format_upload_date
 from ui.thumbnail_cache import ThumbnailCache
+from ui.widgets import NoScrollComboBox
 
 
 ITEM_HEIGHT = 92
 THUMB_WIDTH = 120
 THUMB_HEIGHT = 68
 PANEL_WIDTH = 430
+MIN_PANEL_WIDTH = 280
+HOT_ZONE_WIDTH = 22
+PANEL_MARGIN = 12
 
 
 class PlaylistItemWidget(QFrame):
@@ -147,9 +150,20 @@ class PlaylistOverlay(QFrame):
     delete_saved_requested = Signal(str)
     auto_play_changed = Signal(bool)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        side: str = "right",
+        default_title: str = "播放列表",
+        object_name: str = "PlaylistOverlay",
+        empty_text: str = "当前没有可用的播放列表",
+    ) -> None:
         super().__init__(parent)
-        self.setObjectName("PlaylistOverlay")
+        self._side = "left" if str(side).lower() == "left" else "right"
+        self._default_title = default_title
+        self._empty_text = empty_text
+        self.setObjectName(object_name)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMouseTracking(True)
 
@@ -159,7 +173,13 @@ class PlaylistOverlay(QFrame):
         self._active_row = -1
         self._selected_rows: set[int] = set()
         self._saved_playlists: list[SavedPlaylist] = []
+        # 与播放列表页同一套防护：程序化重填下拉框时禁止"切换即加载"。
+        self._suppress_saved_auto_load = 0
+        self._loaded_saved_key = ""
         self._open = False
+        # 左右两侧面板互斥显示：两份 PANEL_WIDTH 要 ≥884px，窄窗口下必然遮挡视频。
+        self._sibling_overlay: PlaylistOverlay | None = None
+        self._context_available = False
         self._network = QNetworkAccessManager(self)
         self._thumbnail_cache = ThumbnailCache(self)
 
@@ -172,14 +192,13 @@ class PlaylistOverlay(QFrame):
         self._animation.setDuration(220)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        self.title_label = QLabel("播放列表")
+        self.title_label = QLabel(default_title)
         self.title_label.setObjectName("OverlayTitle")
-        self.meta_label = QLabel("当前没有可用的播放列表")
+        self.meta_label = QLabel(empty_text)
         self.meta_label.setObjectName("MetaLabel")
 
-        self.saved_combo = QComboBox()
+        self.saved_combo = NoScrollComboBox()
         self.saved_combo.addItem("选择已保存列表", "")
-        self.load_button = QPushButton("加载")
         self.save_button = QPushButton("保存")
         self.delete_button = QPushButton("删除")
         self.auto_play_checkbox = QCheckBox("自动连播")
@@ -187,12 +206,11 @@ class PlaylistOverlay(QFrame):
         combo_row = QHBoxLayout()
         combo_row.setSpacing(6)
         combo_row.addWidget(self.saved_combo, 1)
-        combo_row.addWidget(self.load_button)
         combo_row.addWidget(self.save_button)
         combo_row.addWidget(self.delete_button)
 
         self.list_widget = QListWidget()
-        self.list_widget.setObjectName("PlaylistOverlayList")
+        self.list_widget.setObjectName(f"{object_name}List")
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_widget.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
@@ -223,10 +241,9 @@ class PlaylistOverlay(QFrame):
         layout.addWidget(self.list_widget, 1)
         layout.addLayout(action_row)
 
-        self.load_button.clicked.connect(self._load_saved)
         self.save_button.clicked.connect(self.save_requested)
         self.delete_button.clicked.connect(self._delete_saved)
-        self.saved_combo.currentIndexChanged.connect(self._update_button_state)
+        self.saved_combo.currentIndexChanged.connect(self._handle_saved_selection_changed)
         self.play_selected_button.clicked.connect(self._play_selected)
         self.download_selected_button.clicked.connect(self._download_selected)
         self.download_all_button.clicked.connect(self._download_all)
@@ -255,7 +272,7 @@ class PlaylistOverlay(QFrame):
             self._active_row = -1
             self._selected_rows = set()
             self.list_widget.clear()
-            self.title_label.setText("播放列表")
+            self.title_label.setText(self._default_title)
             self._update_empty_state_text()
             self._update_button_state()
             if not self.has_available_content():
@@ -302,16 +319,22 @@ class PlaylistOverlay(QFrame):
 
     def set_saved_playlists(self, playlists: list[SavedPlaylist], current_key: str = "") -> None:
         self._saved_playlists = list(playlists)
+        self._suppress_saved_auto_load += 1
         self.saved_combo.blockSignals(True)
-        self.saved_combo.clear()
-        self.saved_combo.addItem("选择已保存列表", "")
-        selected_index = 0
-        for index, playlist in enumerate(self._saved_playlists, start=1):
-            self.saved_combo.addItem(playlist.name, playlist.playlist_key)
-            if playlist.playlist_key == current_key:
-                selected_index = index
-        self.saved_combo.setCurrentIndex(selected_index)
-        self.saved_combo.blockSignals(False)
+        try:
+            self.saved_combo.clear()
+            self.saved_combo.addItem("选择已保存列表", "")
+            selected_index = 0
+            for index, playlist in enumerate(self._saved_playlists, start=1):
+                self.saved_combo.addItem(playlist.name, playlist.playlist_key)
+                if playlist.playlist_key == current_key:
+                    selected_index = index
+            self.saved_combo.setCurrentIndex(selected_index)
+        finally:
+            self.saved_combo.blockSignals(False)
+            self._suppress_saved_auto_load -= 1
+        # 记住主窗口刚加载完的那一项，避免用户手工再选一次时重复加载。
+        self._loaded_saved_key = str(current_key or "")
         if not self.has_playlist():
             self._update_empty_state_text()
             self._sync_selection_visuals()
@@ -361,6 +384,10 @@ class PlaylistOverlay(QFrame):
         if not self.has_available_content():
             return
         self._hide_timer.stop()
+        # 先收起兄弟面板，再滑入自己：两侧同时展开会互相遮挡视频画面。
+        sibling = self._sibling_overlay
+        if sibling is not None and sibling.is_open():
+            sibling.hide_overlay()
         self._open = True
         self.show()
         self.raise_()
@@ -372,16 +399,33 @@ class PlaylistOverlay(QFrame):
         self._open = False
         self._move_panel(animated)
 
+    def is_open(self) -> bool:
+        return self._open
+
+    def set_sibling_overlay(self, overlay: PlaylistOverlay | None) -> None:
+        self._sibling_overlay = overlay
+
     def relayout(self, host_rect) -> None:
         panel_height = max(320, host_rect.height() - 24)
         self.setFixedHeight(panel_height)
+        # 窄窗口下把面板压到半屏以内，否则 430px 会盖住大半个画面。
+        panel_width = min(PANEL_WIDTH, max(MIN_PANEL_WIDTH, host_rect.width() // 2 - 20))
+        if panel_width != self.width():
+            self.setFixedWidth(panel_width)
+            self._resize_item_hints()
         self._move_panel(animated=False)
 
     def has_playlist(self) -> bool:
         return self._playlist is not None and bool(self._playlist.entries)
 
     def has_available_content(self) -> bool:
-        return self.has_playlist() or bool(self._saved_playlists)
+        return self.has_playlist() or bool(self._saved_playlists) or self._context_available
+
+    def set_context_available(self, available: bool) -> None:
+        """允许面板在没有内容时也能滑入（左侧合集面板要能显示"不属于任何合集"的空态）。"""
+        self._context_available = bool(available)
+        if not self._context_available and not self.has_available_content():
+            self.hide_overlay(animated=False)
 
     def current_saved_key(self) -> str:
         return str(self.saved_combo.currentData() or "")
@@ -390,15 +434,21 @@ class PlaylistOverlay(QFrame):
         parent = self.parentWidget()
         if parent is None:
             return False
-        return pos.x() >= parent.width() - 22
+        if self._side == "left":
+            return pos.x() <= HOT_ZONE_WIDTH
+        return pos.x() >= parent.width() - HOT_ZONE_WIDTH
 
     def _move_panel(self, animated: bool) -> None:
         parent = self.parentWidget()
         if parent is None:
             return
-        visible_x = parent.width() - self.width() - 12
-        hidden_x = parent.width() + 4
-        y = max(12, (parent.height() - self.height()) // 2)
+        if self._side == "left":
+            visible_x = PANEL_MARGIN
+            hidden_x = -self.width() - 4
+        else:
+            visible_x = parent.width() - self.width() - PANEL_MARGIN
+            hidden_x = parent.width() + 4
+        y = max(PANEL_MARGIN, (parent.height() - self.height()) // 2)
         target = QPoint(visible_x if self._open else hidden_x, y)
         if animated:
             self._animation.stop()
@@ -461,10 +511,17 @@ class PlaylistOverlay(QFrame):
                 result.append(playlist.entries[index])
         return result
 
-    def _load_saved(self) -> None:
-        playlist_key = self.current_saved_key()
-        if playlist_key:
-            self.load_saved_requested.emit(playlist_key)
+    def _handle_saved_selection_changed(self, _index: int) -> None:
+        """切换已保存列表即加载，不再需要"加载"按钮。"""
+        self._update_button_state()
+        if self._suppress_saved_auto_load:
+            return
+        key = self.current_saved_key().strip()
+        # 占位项（key 为空）不触发；重复选中同一项也不重复加载。
+        if not key or key == self._loaded_saved_key:
+            return
+        self._loaded_saved_key = key
+        self.load_saved_requested.emit(key)
 
     def _delete_saved(self) -> None:
         playlist_key = self.current_saved_key()
@@ -484,20 +541,23 @@ class PlaylistOverlay(QFrame):
         self.download_all_button.setEnabled(has_playlist)
         self.cancel_button.setEnabled(has_available or self._open)
         self.save_button.setEnabled(has_playlist)
-        saved_key = self.current_saved_key()
-        self.load_button.setEnabled(bool(saved_key))
-        self.delete_button.setEnabled(bool(saved_key))
+        self.delete_button.setEnabled(bool(self.current_saved_key()))
 
-    @staticmethod
-    def _item_size_hint():
-        return QSize(PANEL_WIDTH - 28, ITEM_HEIGHT)
+    def _item_size_hint(self) -> QSize:
+        return QSize(max(MIN_PANEL_WIDTH, self.width()) - 28, ITEM_HEIGHT)
+
+    def _resize_item_hints(self) -> None:
+        """面板宽度变了要同步条目 sizeHint，否则窄窗口下条目横向溢出被裁掉。"""
+        hint = self._item_size_hint()
+        for row in range(self.list_widget.count()):
+            self.list_widget.item(row).setSizeHint(hint)
 
     def _update_empty_state_text(self) -> None:
         count = len(self._saved_playlists)
         if count > 0:
-            self.meta_label.setText(f"已保存 {count} 个播放列表，可从下拉框加载")
+            self.meta_label.setText(f"已保存 {count} 个列表，从下拉框选择即可加载")
         else:
-            self.meta_label.setText("当前没有可用的播放列表")
+            self.meta_label.setText(self._empty_text)
 
     def _sync_selection_visuals(self) -> None:
         # selectedIndexes 只返回选中项，配合上一轮的集合求对称差，

@@ -38,6 +38,17 @@ class FavoriteRepository:
         with self.db.connection() as conn:
             conn.execute("DELETE FROM favorite WHERE video_id = ?", (video_id,))
 
+    def remove_many(self, video_ids: list[str]) -> int:
+        """批量删除，返回实际删除的行数。"""
+        ids = [str(video_id) for video_id in video_ids if str(video_id or "").strip()]
+        if not ids:
+            return 0
+        # 一条语句一次事务，避免上千行时反复开关连接。
+        placeholders = ",".join("?" * len(ids))
+        with self.db.connection() as conn:
+            cursor = conn.execute(f"DELETE FROM favorite WHERE video_id IN ({placeholders})", ids)
+            return int(cursor.rowcount or 0)
+
     def is_favorite(self, video_id: str) -> bool:
         with self.db.connection() as conn:
             row = conn.execute(

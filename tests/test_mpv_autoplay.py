@@ -106,10 +106,14 @@ class QualitySwitchAutoplayTests(unittest.TestCase):
                 http_headers={"Referer": "https://example.com"},
             ),
             current_quality_label="720p",
+            current_audio_track_id="",
             _playback_finished=finished,
             mpv=mpv,
             _set_playback_finished=lambda value: setattr(state, "_playback_finished", value),
         )
+        # 取流地址走真实实现，切清晰度时的选轨逻辑才算被这两个用例覆盖到。
+        state._current_audio_track = lambda: MainWindow._current_audio_track(state)
+        state._current_stream_urls = lambda quality: MainWindow._current_stream_urls(state, quality)
         return state, load_calls
 
     def test_quality_switch_preserves_manual_pause(self) -> None:

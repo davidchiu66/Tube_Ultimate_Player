@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -18,6 +19,7 @@ from app_paths import (
     runtime_path,
     thirdpart_path,
 )
+from services.firefox_profiles import FirefoxProfile, firefox_profiles
 from services.shortcut_service import DEFAULT_SHORTCUTS
 
 
@@ -268,6 +270,14 @@ class ConfigService:
     def default_home_label(self) -> str:
         return "Bilibili" if self.default_home_source() == "bilibili" else "YouTube"
 
+    def playback_window_mode(self) -> str:
+        """进入播放时用窗口还是全屏。未知取值一律回落到窗口，避免配置手改后卡在全屏。"""
+        value = str(self.get("player.playback_window_mode", "window") or "window").strip().lower()
+        return value if value in {"window", "fullscreen"} else "window"
+
+    def playback_starts_fullscreen(self) -> bool:
+        return self.playback_window_mode() == "fullscreen"
+
     def shortcut_sequence(self, action: str) -> str:
         default = DEFAULT_SHORTCUTS.get(action, "")
         return str(self.get(f"shortcuts.{action}", default) or "").strip()
@@ -410,9 +420,51 @@ def detect_system_proxy() -> str:
     return ""
 
 
+def is_firefox_cookie_spec(spec: str) -> bool:
+    return str(spec or "").split(":", 1)[0].strip().lower() == "firefox"
+
+
+def rank_cookie_sources(sources: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    """按「实际读得出来的可能性」重排 Cookie 源，Firefox 优先。
+
+    Chromium 系从 127 起给 Cookie 库套了 App-Bound Encryption，yt-dlp 多半只能报
+    DPAPI 解密失败；Firefox 的 `moz_cookies.value` 是明文。所以在没有探测结果可用
+    时，Firefox 是唯一有把握读出东西的源 —— 就算它不是默认浏览器。理由与
+    `cookie_probe_service._ranked()` 是同一套。
+
+    只按内核分档、不动档内顺序（sorted 稳定），默认浏览器仍排在同类的最前面。
+    """
+    return sorted(sources, key=lambda item: 0 if is_firefox_cookie_spec(item[1]) else 1)
+
+
 def detect_browser_cookie_source() -> str:
-    sources = detect_browser_cookie_sources()
+    """没有探测结果时的兜底 Cookie 源。
+
+    原先直接取 `sources[0]`，也就是默认浏览器。默认浏览器是 Chromium 系时那个源
+    读不出 Cookie，于是「明明识别到了 Firefox 却读不出来，把 Firefox 设为默认浏览器
+    才行」—— 兜底顺序得按能不能读，而不是按谁是默认。
+    """
+    sources = rank_cookie_sources(detect_browser_cookie_sources())
     return str(sources[0][1]) if sources else ""
+
+
+def _firefox_cookie_spec(profile: FirefoxProfile, app_data: Path) -> str:
+    """Firefox profile 的 `--cookies-from-browser` 规格。
+
+    yt-dlp 会把裸目录名拼到 `%APPDATA%\\Mozilla\\Firefox\\Profiles` 下，所以标准位置
+    的 profile 给目录名就行；Microsoft Store 版的 profile 在 `Packages\\...\\LocalCache`
+    里，只能给绝对路径，否则 yt-dlp 会去标准目录扑空。
+    """
+    standard_root = app_data / "Mozilla" / "Firefox" / "Profiles"
+    if _same_path(profile.path.parent, standard_root):
+        return f"firefox:{profile.name}"
+    return f"firefox:{profile.path}"
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(
+        os.path.normpath(str(right))
+    )
 
 
 def detect_browser_cookie_sources(
@@ -445,11 +497,10 @@ def detect_browser_cookie_sources(
         if (opera_root / "Network" / "Cookies").exists() or (opera_root / "Cookies").exists():
             sources.append(("opera", "Opera", "opera"))
 
-        firefox_profiles = app_data / "Mozilla" / "Firefox" / "Profiles"
-        if firefox_profiles.exists():
-            for profile_dir in firefox_profiles.iterdir():
-                if (profile_dir / "cookies.sqlite").exists():
-                    sources.append(("firefox", f"Firefox ({profile_dir.name})", f"firefox:{profile_dir.name}"))
+        for profile in firefox_profiles(environ=env, platform_name=platform_value):
+            sources.append(
+                ("firefox", f"Firefox ({profile.name})", _firefox_cookie_spec(profile, app_data))
+            )
 
         portable_values = {value for _browser, _label, value in sources[:portable_count]}
         deduped: list[tuple[str, str]] = []

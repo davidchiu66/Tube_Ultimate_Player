@@ -13,6 +13,7 @@ from pathlib import Path
 
 from services.cookie_probe_service import (
     CookieDatabase,
+    _browser_user_data_roots,
     _has_login_cookie,
     probe_site_cookie_browsers,
     probe_site_cookie_browsers_detailed,
@@ -168,6 +169,41 @@ class ProbeTests(unittest.TestCase):
         report = probe_site_cookie_browsers_detailed(("youtube",), [db])
 
         self.assertEqual(report.unreadable, [])
+
+    def test_login_written_but_not_checkpointed_is_still_seen(self) -> None:
+        """Cookie 库是 WAL 模式：刚登录的 Cookie 常常还只在 `-wal` 里。
+
+        只复制主库、或用 immutable 打开副本，读到的都是「没登录」的旧快照 ——
+        浏览器正开着的时候这就是常态，探测必须能看见 WAL 中的写入。
+        """
+        path = self.root / "wal.db"
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+        conn.execute("PRAGMA journal_mode=wal")
+        conn.execute("CREATE TABLE moz_cookies (host TEXT, name TEXT, value TEXT)")
+        conn.execute("INSERT INTO moz_cookies VALUES ('.youtube.com', 'SAPISID', 'v')")
+        conn.commit()  # 故意不 checkpoint：数据留在 -wal 里
+        self.assertGreater(path.with_name(path.name + "-wal").stat().st_size, 0)
+
+        result = probe_site_cookie_browsers(
+            ("youtube",),
+            [CookieDatabase(browser_spec="firefox:p", path=path, kind="firefox")],
+        )
+
+        self.assertEqual(result, {"youtube": "firefox:p"})
+
+    def test_firefox_roots_cover_microsoft_store_and_snap(self) -> None:
+        """只认 %APPDATA% 时，Store 版 Firefox 的 profile 一个都定位不到。"""
+        env = {"APPDATA": r"C:\Users\t\Roaming", "LOCALAPPDATA": r"C:\Users\t\Local"}
+        windows = _browser_user_data_roots(
+            "firefox", home=Path(r"C:\Users\t"), environ=env, platform_name="win32"
+        )
+        self.assertIn(Path(env["APPDATA"]) / "Mozilla" / "Firefox" / "Profiles", windows)
+
+        home = Path("/home/t")
+        linux = _browser_user_data_roots("firefox", home=home, environ={}, platform_name="linux")
+        self.assertIn(home / ".mozilla" / "firefox", linux)
+        self.assertIn(home / "snap" / "firefox" / "common" / ".mozilla" / "firefox", linux)
 
 
 if __name__ == "__main__":

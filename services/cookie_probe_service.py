@@ -10,11 +10,16 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from services.firefox_profiles import (
+    COOKIE_DB_NAME,
+    copy_sqlite_database,
+    firefox_install_roots,
+)
 
 
 logger = logging.getLogger("tube_player.cookie")
@@ -126,17 +131,24 @@ def _sites_logged_in(database: CookieDatabase, sites: list[str]) -> list[str]:
 def _open_readonly(source: Path, copy_path: Path) -> sqlite3.Connection:
     """以只读方式打开 Cookie 库。
 
-    先复制副本（浏览器运行时通常对库文件加了锁）；复制失败再试直接以
-    immutable 只读打开。两条路都不通说明库被独占，抛 CookieDatabaseUnreadable。
+    先复制副本（浏览器运行时通常对库文件加了锁），复制失败再退回直接打开源库。
+
+    副本必须连 `-wal` 一起复制、且**不能**加 `immutable=1`：Cookie 库是 WAL 模式，
+    刚登录写入的 Cookie 常常还在 `-wal` 里没 checkpoint，而 `immutable=1` 会让
+    SQLite 直接无视 WAL。只拷主库或加了 immutable，读到的都是旧快照 —— 表现就是
+    「浏览器明明登录着，探测却说没登录」。直接打开源库那条路仍保留 immutable：
+    此时库多半正被独占，immutable 是唯一还能读出点东西的方式。
     """
     try:
-        shutil.copy2(source, copy_path)
+        copy_sqlite_database(source, copy_path)
         target: Path = copy_path
+        uri = f"file:{copy_path}?mode=ro"
     except OSError as exc:
         logger.debug("复制 Cookie 库失败，改为直接只读打开 path=%s detail=%s", source, exc)
         target = source
+        uri = f"file:{source}?mode=ro&immutable=1"
     try:
-        conn = sqlite3.connect(f"file:{target}?mode=ro&immutable=1", uri=True, timeout=1.0)
+        conn = sqlite3.connect(uri, uri=True, timeout=1.0)
     except sqlite3.Error as exc:
         raise CookieDatabaseUnreadable(str(exc)) from exc
     try:
@@ -147,6 +159,7 @@ def _open_readonly(source: Path, copy_path: Path) -> sqlite3.Connection:
         # 必须显式关闭：连接残留会在 Windows 上占住临时副本，让临时目录清理失败，
         # 那个清理异常还会顶替掉真正的错误原因。
         conn.close()
+        logger.debug("Cookie 库打不开 path=%s detail=%s", target, exc)
         raise CookieDatabaseUnreadable(str(exc)) from exc
     return conn
 
@@ -199,7 +212,7 @@ def _database_for_spec(spec: str, *, home: Path, environ: dict[str, str], platfo
     if browser == "firefox":
         for root in roots:
             profile_dir = Path(profile) if Path(profile).is_absolute() else root / profile
-            cookie_file = profile_dir / "cookies.sqlite"
+            cookie_file = profile_dir / COOKIE_DB_NAME
             if cookie_file.is_file():
                 return CookieDatabase(browser_spec=spec, path=cookie_file, kind="firefox")
         return None
@@ -222,7 +235,7 @@ def _browser_user_data_roots(browser: str, *, home: Path, environ: dict[str, str
             "chromium": [local / "Chromium" / "User Data"],
             "vivaldi": [local / "Vivaldi" / "User Data"],
             "opera": [app_data / "Opera Software" / "Opera Stable"],
-            "firefox": [app_data / "Mozilla" / "Firefox" / "Profiles"],
+            "firefox": _firefox_profile_parents(home=home, environ=environ, platform_name=platform_name),
         }
         return mapping.get(browser, [])
     config_home = Path(environ.get("XDG_CONFIG_HOME", "").strip() or home / ".config")
@@ -231,6 +244,21 @@ def _browser_user_data_roots(browser: str, *, home: Path, environ: dict[str, str
         "chromium": [config_home / "chromium", home / "snap" / "chromium" / "common" / "chromium"],
         "brave": [config_home / "BraveSoftware" / "Brave-Browser"],
         "vivaldi": [config_home / "vivaldi"],
-        "firefox": [home / ".mozilla" / "firefox"],
+        "firefox": _firefox_profile_parents(home=home, environ=environ, platform_name=platform_name),
     }
     return mapping.get(browser, [])
+
+
+def _firefox_profile_parents(*, home: Path, environ: dict[str, str], platform_name: str) -> list[Path]:
+    """profile 目录的可能父目录：Windows 在 `<root>/Profiles`，Linux 常直接在 `<root>` 下。
+
+    走共用的安装根发现，才能覆盖 Microsoft Store 版（数据被重定向到
+    `Packages\\...\\LocalCache`）与 Snap/Flatpak 版。只认 `%APPDATA%` 时这些安装的
+    profile 一个都定位不到，探测便会把「登录着的 Firefox」判成读不到。
+    """
+    parents: list[Path] = []
+    for root in firefox_install_roots(environ=environ, home=home, platform_name=platform_name):
+        for parent in (root / "Profiles", root):
+            if parent not in parents:
+                parents.append(parent)
+    return parents

@@ -115,6 +115,66 @@ class VideoQuality:
     audio_tbr: float | None = None
     filesize: int | None = None
     tbr: float | None = None
+    # 同档位的已混音变体地址（多语言视频才有）。选"随画面（免转码）"时改播它，
+    # 换回今天的单流行为——投屏没有 FFmpeg 时的出路（C1 裁定）。
+    muxed_video_url: str | None = None
+
+
+# 音轨下拉里"随画面（免转码）"这一项的 track_id。它不是一条真音轨，而是"回到
+# 已混音单流"的开关，故用哨兵值而不是某个 format_id。
+MUXED_AUDIO_TRACK_ID = "__muxed_audio__"
+
+
+@dataclass
+class AudioTrack:
+    """一条可选的音频轨（YouTube 的多语言配音）。
+
+    与 `VideoQuality.audio_url` 的关系：`VideoQuality` 上挂的是"默认轨"，供不关心
+    音轨的调用方（下载、投屏）直接用；这里是完整的可选清单，供用户在播放器里切换。
+    """
+
+    track_id: str
+    language: str
+    url: str
+    acodec: str = ""
+    abr: float | None = None
+    filesize: int | None = None
+    tbr: float | None = None
+    # yt-dlp 的语言偏好：10 = 原声，5 = 站点默认（按 Cookie/地区判定），其余 -1。
+    language_preference: int = -1
+    # yt-dlp 给的可读名，如 "English (US)"；缺失时回退语言码。
+    name: str = ""
+
+    @property
+    def is_original(self) -> bool:
+        return self.language_preference >= 10
+
+    @property
+    def is_site_default(self) -> bool:
+        return self.language_preference == 5
+
+    @property
+    def display_language(self) -> str:
+        code = str(self.language or "").strip()
+        localized = LANGUAGE_NAMES.get(code.lower())
+        if localized:
+            return localized
+        if self.name.strip():
+            return self.name.strip()
+        # en-US 这类带地区的码表里没有，退一步按主语言查（zh-Hant 已在上面命中，
+        # 不会在这里被降级成"中文"而丢掉简繁区分）。
+        base = code.split("-", 1)[0]
+        return LANGUAGE_NAMES.get(base.lower(), code)
+
+    @property
+    def label(self) -> str:
+        """下拉里显示的文案，如"英语（原声）"。
+
+        只给原声标后缀：站点默认轨对用户来说就是"正常的那条"，再标一次"默认"
+        只会让每条都有后缀，反而看不出哪条特殊。
+        """
+        name = self.display_language or self.language or "音轨"
+        return f"{name}（原声）" if self.is_original else name
 
 
 @dataclass
@@ -134,6 +194,11 @@ class SubtitleInfo:
         return self.language.lower().startswith("ai-")
 
     @property
+    def is_translated(self) -> bool:
+        """YouTube 的机翻轨：地址带 tlang=，由翻译接口现场生成，配额比原文轨紧得多。"""
+        return "tlang=" in str(self.url or "")
+
+    @property
     def display_language(self) -> str:
         if self.name.strip():
             return self.name.strip()
@@ -144,6 +209,9 @@ class SubtitleInfo:
     def label(self) -> str:
         if self.is_ai_generated:
             suffix = "AI 字幕"
+        elif self.is_translated:
+            # 机翻轨要标出来：它们共享 YouTube 翻译接口的配额，容易 429。
+            suffix = "机翻"
         else:
             suffix = "自动" if self.is_auto else "字幕"
         name = self.display_language
@@ -171,6 +239,8 @@ class VideoInfo:
     thumbnail: str = ""
     qualities: dict[str, VideoQuality] = field(default_factory=dict)
     subtitles: dict[str, SubtitleInfo] = field(default_factory=dict)
+    # 可选音轨（R9）：键 = track_id（即 format_id），插入序即下拉显示序。空表 = 无音轨可选。
+    audio_tracks: dict[str, AudioTrack] = field(default_factory=dict)
     automatic_captions: dict[str, Any] = field(default_factory=dict)
     http_headers: dict[str, str] = field(default_factory=dict)
     raw_info: dict[str, Any] | None = None

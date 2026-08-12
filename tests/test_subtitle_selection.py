@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from resolver.models import SubtitleInfo, VideoInfo  # noqa: E402
+from ui.main_window import MainWindow  # noqa: E402
 from ui.player_page import SUBTITLE_MORE_SENTINEL, SUBTITLE_SHORTLIST, PlayerPage  # noqa: E402
 from ui.subtitle_dialog import SubtitlePickerDialog  # noqa: E402
+from ui.toast import Toast  # noqa: E402
 
 
 def make_subtitles(count: int) -> dict[str, SubtitleInfo]:
@@ -101,6 +104,54 @@ class ShortlistTests(unittest.TestCase):
         self.assertEqual(self.page.subtitle_combo.currentData(), previous)
 
 
+class EmptySubtitleStateTests(unittest.TestCase):
+    """P1：没有字幕轨时要说清是"站点没给"，而不是让用户对着"关闭"猜。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self) -> None:
+        self.page = PlayerPage()
+        self.addCleanup(self.page.deleteLater)
+
+    def test_no_subtitles_shows_an_explicit_item(self) -> None:
+        self.page.update_video_info(make_video({}), "1080p")
+
+        self.assertEqual(self.page.subtitle_combo.count(), 1)
+        self.assertEqual(self.page.subtitle_combo.itemText(0), "无可用字幕")
+        self.assertEqual(self.page.subtitle_combo.currentData(), "")
+
+    def test_no_subtitles_shows_in_the_meta_line(self) -> None:
+        self.page.update_video_info(make_video({}), "1080p")
+        self.assertIn("无字幕", self.page.meta_label.text())
+
+        self.page.update_video_info(make_video(make_subtitles(3)), "1080p")
+        self.assertIn("字幕 3 个", self.page.meta_label.text())
+
+    def test_combo_stays_disabled_without_tracks(self) -> None:
+        self.page.update_video_info(make_video({}), "1080p")
+        self.page.set_playback_available(True)
+
+        self.assertFalse(self.page.subtitle_combo.isEnabled())
+
+    def test_switching_back_to_a_subtitled_video_restores_the_combo(self) -> None:
+        self.page.update_video_info(make_video({}), "1080p")
+        self.page.set_playback_available(True)
+
+        self.page.update_video_info(make_video(make_subtitles(2)), "1080p")
+
+        self.assertTrue(self.page.subtitle_combo.isEnabled())
+        self.assertEqual(self.page.subtitle_combo.itemText(0), "关闭")
+        self.assertEqual(self.page.subtitle_combo.count(), 3)
+
+    def test_local_file_has_no_subtitle_tracks(self) -> None:
+        self.page.update_local_file_info("D:/movie.mp4")
+
+        self.assertEqual(self.page.subtitle_combo.count(), 1)
+        self.assertEqual(self.page.subtitle_combo.itemText(0), "无可用字幕")
+
+
 class PickerDialogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -146,6 +197,64 @@ class PickerDialogTests(unittest.TestCase):
         dialog.search_edit.setText("Language 4")
 
         self.assertEqual(dialog.selected_key(), "")
+
+
+class SubtitleFailureToastTests(unittest.TestCase):
+    """429 的处置建议有两三句话，提示框不能把它裁成一行、也不能 3 秒就消失。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _toast(self) -> Toast:
+        host = QWidget()
+        host.resize(1200, 700)
+        self.addCleanup(host.deleteLater)
+        return Toast(host)
+
+    def test_long_message_gets_room_for_every_line(self) -> None:
+        toast = self._toast()
+        long_message = (
+            "字幕加载失败：字幕接口暂时限流（HTTP 429）。这条是机器翻译字幕，"
+            "YouTube 的翻译接口按 IP 限量，已自动重试 3 次仍未成功。"
+            "建议改选原文字幕（如 English），或等一两分钟再试。"
+        )
+
+        toast.show_message("短提示")
+        short_height = toast.height()
+        toast.show_message(long_message)
+
+        self.assertLessEqual(toast.width(), 420)
+        self.assertGreater(toast.height(), short_height)
+        self.assertGreaterEqual(toast.height(), toast.heightForWidth(toast.width()))
+
+    def test_short_message_still_uses_the_default_timeout(self) -> None:
+        state = SimpleNamespace(
+            _subtitle_request_id=7,
+            toast=SimpleNamespace(shown=[]),
+        )
+        state.toast.show_message = lambda message, timeout_ms=3000: state.toast.shown.append(
+            (message, timeout_ms)
+        )
+
+        MainWindow._subtitle_failed(state, 7, "en:manual", "字幕内容为空")
+
+        self.assertEqual(state.toast.shown[0][1], 3000)
+
+    def test_rate_limit_message_stays_on_screen_longer(self) -> None:
+        state = SimpleNamespace(_subtitle_request_id=7, toast=SimpleNamespace(shown=[]))
+        state.toast.show_message = lambda message, timeout_ms=3000: state.toast.shown.append(
+            (message, timeout_ms)
+        )
+
+        MainWindow._subtitle_failed(
+            state,
+            7,
+            "zh-Hans:auto",
+            "字幕接口暂时限流（HTTP 429）。这条是机器翻译字幕，建议改选原文字幕（如 English），或等一两分钟再试。",
+        )
+
+        self.assertGreater(state.toast.shown[0][1], 3000)
 
 
 if __name__ == "__main__":

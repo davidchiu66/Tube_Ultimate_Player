@@ -19,12 +19,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from resolver.models import VideoInfo
+from download.models import (
+    STATUS_COMPLETED,
+    STATUS_DOWNLOADING,
+    STATUS_FAILED,
+    STATUS_PAUSED,
+    STATUS_QUEUED,
+)
+from resolver.models import MUXED_AUDIO_TRACK_ID, VideoInfo
 from services.config_service import ConfigService
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 from ui.playlist_overlay import PlaylistOverlay
 from ui.text_elision import format_upload_date
 from ui.thumbnail_cache import build_image_request, read_image_reply
+from ui.widgets import NoScrollComboBox
 
 
 # 每格滚轮调整的音量，与键盘 volume_up / volume_down 的步长保持一致。
@@ -43,6 +51,7 @@ class PlayerPage(QWidget):
     volume_changed = Signal(int)
     speed_changed = Signal(float)
     quality_changed = Signal(str)
+    audio_track_changed = Signal(str)
     subtitle_changed = Signal(str)
     cast_requested = Signal()
     browser_play_requested = Signal()
@@ -55,6 +64,12 @@ class PlayerPage(QWidget):
     playlist_load_requested = Signal(str)
     playlist_delete_requested = Signal(str)
     playlist_auto_play_changed = Signal(bool)
+    collection_entry_requested = Signal(int)
+    collection_download_requested = Signal(object)
+    collection_save_requested = Signal()
+    collection_load_requested = Signal(str)
+    collection_delete_requested = Signal(str)
+    collection_auto_play_changed = Signal(bool)
 
     def __init__(self, config: ConfigService | None = None) -> None:
         super().__init__()
@@ -64,6 +79,8 @@ class PlayerPage(QWidget):
         self._position = 0.0
         self._playlist_count = 0
         self._playlist_index = -1
+        self._collection_count = 0
+        self._collection_index = -1
         self._volume_before_mute = 80
         self._seeking = False
         self._populating = False
@@ -72,6 +89,9 @@ class PlayerPage(QWidget):
         self._download_available = False
         self._favorite_available = False
         self._favorite_active = False
+        # 下载状态用 DownloadTask.status 的取值，空串表示当前视频没有下载任务。
+        self._download_state = ""
+        self._download_progress = 0.0
         self._cast_available = False
         self._browser_play_available = False
         self._cast_active = False
@@ -87,6 +107,7 @@ class PlayerPage(QWidget):
         self._auto_hide_enabled = False
         self._wheel_accumulator = 0.0
         self._subtitles: dict = {}
+        self._audio_tracks: dict = {}
         self._active_subtitle_key = ""
 
         self._click_timer = QTimer(self)
@@ -121,6 +142,12 @@ class PlayerPage(QWidget):
         self.meta_label = QLabel("时长 00:00 | 清晰度 Auto | 字幕 关闭")
         self.meta_label.setObjectName("MetaLabel")
 
+        # 收藏/下载状态标识。按钮文字只能表达「点了会发生什么」，这里补一条只读状态，
+        # 让用户不点开收藏页/下载页就知道当前视频收没收藏、下没下载完。
+        self.status_label = QLabel()
+        self.status_label.setObjectName("MetaLabel")
+        self.status_label.hide()
+
         self.loading_label = QLabel("正在准备视频，请稍等...")
         self.loading_label.setObjectName("MetaLabel")
         self.loading_label.hide()
@@ -140,6 +167,7 @@ class PlayerPage(QWidget):
         meta_text = QVBoxLayout()
         meta_text.addWidget(self.title_label)
         meta_text.addWidget(self.meta_label)
+        meta_text.addWidget(self.status_label)
         meta_text.addStretch()
         meta_row.addLayout(meta_text, 1)
         meta_row.addWidget(self.browser_play_button, 0, Qt.AlignmentFlag.AlignTop)
@@ -178,11 +206,17 @@ class PlayerPage(QWidget):
         self.speed_combo.setCurrentText("1.0x")
         self.speed_combo.setFixedWidth(88)
 
-        self.quality_combo = QComboBox()
+        self.quality_combo = NoScrollComboBox()
         self.quality_combo.addItem("Auto")
         self.quality_combo.setFixedWidth(104)
 
-        self.subtitle_combo = QComboBox()
+        # 音轨：切一次要重载整条流（见 main_window._change_audio_track），滚轮误触的
+        # 代价和清晰度一样，所以三个下拉统一用 NoScrollComboBox。
+        self.audio_combo = NoScrollComboBox()
+        self.audio_combo.addItem("默认音轨", "")
+        self.audio_combo.setFixedWidth(116)
+
+        self.subtitle_combo = NoScrollComboBox()
         self.subtitle_combo.addItem("关闭", "")
         self.subtitle_combo.setFixedWidth(108)
 
@@ -202,6 +236,7 @@ class PlayerPage(QWidget):
         controls.addLayout(self._control_group("音量", self.volume_slider))
         controls.addLayout(self._control_group("倍速", self.speed_combo))
         controls.addLayout(self._control_group("清晰度", self.quality_combo))
+        controls.addLayout(self._control_group("音轨", self.audio_combo))
         controls.addLayout(self._control_group("字幕", self.subtitle_combo))
         controls.addWidget(self.cast_button)
         controls.addWidget(self.fullscreen_button)
@@ -227,6 +262,18 @@ class PlayerPage(QWidget):
 
         self.playlist_overlay = PlaylistOverlay(self)
         self.playlist_overlay.hide()
+        # 左侧合集面板：与右侧播放列表同一个类，只是换了方向、标题和空态文案。
+        self.collection_overlay = PlaylistOverlay(
+            self,
+            side="left",
+            default_title="合集列表",
+            object_name="CollectionOverlay",
+            empty_text="当前视频不属于任何合集",
+        )
+        self.collection_overlay.hide()
+        # 两侧互斥：430px × 2 需要 ≥884px 宽，窄窗口下同时展开必然盖住画面。
+        self.playlist_overlay.set_sibling_overlay(self.collection_overlay)
+        self.collection_overlay.set_sibling_overlay(self.playlist_overlay)
 
         self.shortcut_hint = QLabel(self)
         self.shortcut_hint.setObjectName("ShortcutHint")
@@ -258,6 +305,7 @@ class PlayerPage(QWidget):
         self.volume_slider.valueChanged.connect(self._handle_volume_changed)
         self.speed_combo.currentIndexChanged.connect(self._emit_speed)
         self.quality_combo.currentTextChanged.connect(self._emit_quality)
+        self.audio_combo.currentIndexChanged.connect(self._emit_audio_track)
         self.subtitle_combo.currentIndexChanged.connect(self._emit_subtitle)
         self.cast_button.clicked.connect(self.cast_requested)
         self.fullscreen_button.clicked.connect(self.fullscreen_requested)
@@ -267,9 +315,16 @@ class PlayerPage(QWidget):
         self.playlist_overlay.load_saved_requested.connect(self.playlist_load_requested)
         self.playlist_overlay.delete_saved_requested.connect(self.playlist_delete_requested)
         self.playlist_overlay.auto_play_changed.connect(self.playlist_auto_play_changed)
+        self.collection_overlay.entry_activated.connect(self.collection_entry_requested)
+        self.collection_overlay.download_entries_requested.connect(self.collection_download_requested)
+        self.collection_overlay.save_requested.connect(self.collection_save_requested)
+        self.collection_overlay.load_saved_requested.connect(self.collection_load_requested)
+        self.collection_overlay.delete_saved_requested.connect(self.collection_delete_requested)
+        self.collection_overlay.auto_play_changed.connect(self.collection_auto_play_changed)
         self.installEventFilter(self)
         self._install_mouse_tracking(self.control_panel)
         self._install_mouse_tracking(self.playlist_overlay)
+        self._install_mouse_tracking(self.collection_overlay)
         self._setup_keyboard_shortcuts()
         app = QApplication.instance()
         if app is not None:
@@ -281,6 +336,7 @@ class PlayerPage(QWidget):
         super().resizeEvent(event)
         self._position_control_panel(animated=False)
         self.playlist_overlay.relayout(self.rect())
+        self.collection_overlay.relayout(self.rect())
         self._position_shortcut_hint()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
@@ -316,6 +372,8 @@ class PlayerPage(QWidget):
             or self.control_panel.isAncestorOf(watched)
             or watched is self.playlist_overlay
             or self.playlist_overlay.isAncestorOf(watched)
+            or watched is self.collection_overlay
+            or self.collection_overlay.isAncestorOf(watched)
         ):
             if event.type() == QEvent.Type.MouseMove:
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
@@ -339,6 +397,11 @@ class PlayerPage(QWidget):
             text = message or "正在解析视频，请稍等..."
             self.loading_label.setText(text)
             self.title_label.setText(text)
+            # 开始解析下一个视频时立刻清掉上一个的收藏/下载标识，否则标题已经变成
+            # 「正在解析…」，下面却还挂着上一个视频的「已收藏 · 已下载」。
+            # 走 set_favorite_state 而不是直接改字段，收藏按钮的文字才不会留在「已收藏」。
+            self.set_favorite_state(False, available=False)
+            self.set_download_state("")
         self._sync_auto_hide_state()
         self._update_playback_buttons()
         self._position_control_panel(animated=False)
@@ -356,8 +419,8 @@ class PlayerPage(QWidget):
             self._browser_play_available = False
             self._cast_active = False
             self._download_available = False
-            self._favorite_available = False
-            self._favorite_active = False
+            self.set_favorite_state(False, available=False)
+            self.set_download_state("")
             self.set_paused(True)
         else:
             self._loading = False
@@ -375,7 +438,35 @@ class PlayerPage(QWidget):
         self._favorite_active = favorite
         self._favorite_available = available
         self.favorite_button.setText("已收藏" if favorite else "收藏")
+        self._refresh_status_label()
         self._update_playback_buttons()
+
+    def set_download_state(self, status: str = "", progress: float = 0.0) -> None:
+        """记录当前视频的下载任务状态，空 status 表示没有任务。"""
+        self._download_state = str(status or "")
+        self._download_progress = float(progress or 0.0)
+        self._refresh_status_label()
+
+    def _download_state_text(self) -> str:
+        state = self._download_state
+        if state == STATUS_DOWNLOADING:
+            return f"下载中 {self._download_progress:.0f}%" if self._download_progress > 0 else "下载中"
+        return {
+            STATUS_COMPLETED: "已下载",
+            STATUS_QUEUED: "已加入下载队列",
+            STATUS_PAUSED: "下载已暂停",
+            STATUS_FAILED: "下载失败",
+        }.get(state, "")
+
+    def _refresh_status_label(self) -> None:
+        badges = []
+        if self._favorite_active:
+            badges.append("已收藏")
+        download_text = self._download_state_text()
+        if download_text:
+            badges.append(download_text)
+        self.status_label.setText(" · ".join(badges))
+        self.status_label.setVisible(bool(badges))
 
     def set_cast_available(self, available: bool) -> None:
         self._cast_available = available
@@ -416,7 +507,8 @@ class PlayerPage(QWidget):
         meta_parts = [
             f"时长 {format_seconds(video.duration)}",
             f"清晰度 {selected_quality}",
-            f"字幕 {len(video.subtitles)} 个",
+            # 「无字幕」比「字幕 0 个」更像一句话：用户看到 0 个会怀疑是程序没取到。
+            f"字幕 {len(video.subtitles)} 个" if video.subtitles else "无字幕",
         ]
         upload_date = format_upload_date(getattr(video, "upload_date", ""))
         if upload_date:
@@ -432,6 +524,11 @@ class PlayerPage(QWidget):
         if index >= 0:
             self.quality_combo.setCurrentIndex(index)
 
+        current_quality = video.qualities.get(selected_quality)
+        self._populate_audio_combo(
+            getattr(video, "audio_tracks", {}) or {},
+            muxed_available=bool(getattr(current_quality, "muxed_video_url", None)),
+        )
         self._populate_subtitle_combo(video.subtitles)
         self._active_subtitle_key = ""
 
@@ -441,15 +538,43 @@ class PlayerPage(QWidget):
         self.set_browser_play_available(bool(str(video.webpage_url or "").strip()))
         self._position_control_panel(animated=False)
 
+    def _populate_audio_combo(self, audio_tracks: dict, muxed_available: bool = False) -> None:
+        """填充音轨下拉；音轨表为空（单语言或 B 站）时只放一条占位并禁用。
+
+        `select_audio_tracks` 已按 D 裁定排好序，第一条就是默认轨，这里保持插入序、
+        默认选中第 0 项即可，不再另做排序。
+
+        当前档位存在已混音变体时，末尾追加「随画面（免转码）」（C1 裁定）：投屏没有
+        FFmpeg 时的出路，选中即回到今天的单流行为。它不是一条真音轨，用哨兵 track_id。
+        """
+        self._audio_tracks = dict(audio_tracks or {})
+        self.audio_combo.clear()
+        # 单条也按占位处理：一条轨没什么可选的，与 _update_playback_buttons 里
+        # `len(...) > 1` 的启用条件保持同一判据，避免"有个能读的语言名却点不动"。
+        if len(self._audio_tracks) < 2:
+            self.audio_combo.addItem("默认音轨", "")
+            return
+        for key, track in self._audio_tracks.items():
+            self.audio_combo.addItem(track.label, key)
+        if muxed_available:
+            self.audio_combo.addItem("随画面（免转码）", MUXED_AUDIO_TRACK_ID)
+
     def _populate_subtitle_combo(self, subtitles: dict) -> None:
         """下拉框只放前 SUBTITLE_SHORTLIST 条，其余走「更多字幕…」对话框。
 
         YouTube 的自动字幕可以有近五千条（机翻到各种语言），全塞进 QComboBox 既慢
         又没法找；SubtitleParser 已按「手动优先、中英文优先」排好序，取前面一截
         正好覆盖绝大多数使用场景。
+
+        一条也没有时把唯一项写成「无可用字幕」并禁用：站点没给字幕是常态，
+        但「关闭」这个文案让人分不清是没有字幕还是程序没取到。
         """
         self._subtitles = dict(subtitles or {})
         self.subtitle_combo.clear()
+        if not self._subtitles:
+            self.subtitle_combo.addItem("无可用字幕", "")
+            self._update_playback_buttons()
+            return
         self.subtitle_combo.addItem("关闭", "")
         for key, subtitle in list(self._subtitles.items())[:SUBTITLE_SHORTLIST]:
             self.subtitle_combo.addItem(subtitle.label, key)
@@ -458,6 +583,7 @@ class PlayerPage(QWidget):
                 f"更多字幕…（共 {len(self._subtitles)} 条）",
                 SUBTITLE_MORE_SENTINEL,
             )
+        self._update_playback_buttons()
 
     def _ensure_subtitle_item(self, key: str) -> None:
         """把对话框里选中的字幕补进下拉框并选中它。"""
@@ -487,9 +613,8 @@ class PlayerPage(QWidget):
         self.thumbnail_label.setPixmap(QPixmap())
         self.quality_combo.clear()
         self.quality_combo.addItem("本地")
-        self.subtitle_combo.clear()
-        self.subtitle_combo.addItem("关闭", "")
-        self._subtitles = {}
+        self._populate_audio_combo({})
+        self._populate_subtitle_combo({})
         self._active_subtitle_key = ""
         self._populating = False
         self.set_download_available(False)
@@ -514,6 +639,9 @@ class PlayerPage(QWidget):
         self.fullscreen_button.setText("退出全屏" if fullscreen else "全屏")
         self._control_pointer_inside = False
         self._control_interaction_active = False
+        # 全屏切换会改变可用宽度，两侧面板都要重新算宽度与滑出位置。
+        self.playlist_overlay.relayout(self.rect())
+        self.collection_overlay.relayout(self.rect())
         if self._controls_visible:
             self._controls_visible = False
             self._position_control_panel(animated=True)
@@ -541,6 +669,34 @@ class PlayerPage(QWidget):
     def set_playlist_current_index(self, index: int) -> None:
         self._playlist_index = index
         self.playlist_overlay.set_current_index(index)
+
+    # ------------------------------------------------------------------
+    # 左侧合集面板
+    # ------------------------------------------------------------------
+
+    def set_collection_context(self, playlist, current_index: int = -1, auto_play_next: bool = False) -> None:
+        self._collection_count = len(playlist.entries) if playlist is not None else 0
+        self._collection_index = current_index
+        self.collection_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
+        # 条目控件是动态建的，建完要重新铺一遍鼠标跟踪，否则面板内移动不算"活动"。
+        self._install_mouse_tracking(self.collection_overlay)
+        self.collection_overlay.relayout(self.rect())
+
+    def clear_collection_context(self) -> None:
+        self._collection_count = 0
+        self._collection_index = -1
+        self.collection_overlay.set_playlist(None)
+
+    def set_collection_saved_items(self, playlists, current_key: str = "") -> None:
+        self.collection_overlay.set_saved_playlists(playlists, current_key=current_key)
+
+    def set_collection_current_index(self, index: int) -> None:
+        self._collection_index = index
+        self.collection_overlay.set_current_index(index)
+
+    def set_collection_available(self, available: bool) -> None:
+        """有视频在播就允许左侧滑出，即便探测结果是"不属于任何合集"（显示空态）。"""
+        self.collection_overlay.set_context_available(available)
 
     def update_position(self, seconds: float) -> None:
         self._position = max(0.0, float(seconds or 0.0))
@@ -653,6 +809,10 @@ class PlayerPage(QWidget):
         if not self._populating:
             self.quality_changed.emit(label)
 
+    def _emit_audio_track(self) -> None:
+        if not self._populating:
+            self.audio_track_changed.emit(str(self.audio_combo.currentData() or ""))
+
     def _emit_subtitle(self) -> None:
         if self._populating:
             return
@@ -693,7 +853,12 @@ class PlayerPage(QWidget):
         self.cast_button.setEnabled(enabled and (self._cast_available or self._cast_active))
         self.speed_combo.setEnabled(enabled and not self._cast_active)
         self.quality_combo.setEnabled(enabled and not self._cast_active)
-        self.subtitle_combo.setEnabled(enabled and not self._cast_active)
+        # 只有一条音轨时没得选，和字幕下拉同理保持禁用。
+        self.audio_combo.setEnabled(
+            enabled and not self._cast_active and len(self._audio_tracks) > 1
+        )
+        # 没有字幕轨时保持禁用：下拉里只有「无可用字幕」一项，可点也没有意义。
+        self.subtitle_combo.setEnabled(enabled and not self._cast_active and bool(self._subtitles))
         self.progress_slider.setEnabled(enabled and (not self._cast_active or self._cast_seek_supported))
         self.volume_slider.setEnabled(enabled and (not self._cast_active or self._cast_volume_supported))
         self.play_button.setText("播放" if self._paused or self._playback_finished else "暂停")
@@ -715,6 +880,7 @@ class PlayerPage(QWidget):
         was_in_control_zone = self._control_pointer_inside
         self._show_cursor()
         self.playlist_overlay.handle_pointer(pos_in_self)
+        self.collection_overlay.handle_pointer(pos_in_self)
         if in_control_zone:
             self._control_pointer_inside = True
         elif self._can_hide_controls_for_pointer_exit():
@@ -734,6 +900,7 @@ class PlayerPage(QWidget):
             return
         self._hide_controls()
         self.playlist_overlay.handle_idle_timeout()
+        self.collection_overlay.handle_idle_timeout()
         self._set_cursor_hidden(True)
 
     def _is_in_control_hot_zone(self, pos: QPoint) -> bool:
@@ -782,7 +949,7 @@ class PlayerPage(QWidget):
 
     def _set_cursor_hidden(self, hidden: bool) -> None:
         cursor = QCursor(Qt.CursorShape.BlankCursor if hidden else Qt.CursorShape.ArrowCursor)
-        for widget in (self, self.video_widget, self.control_panel, self.playlist_overlay):
+        for widget in (self, self.video_widget, self.control_panel, self.playlist_overlay, self.collection_overlay):
             widget.setCursor(cursor)
 
     def _install_mouse_tracking(self, widget: QWidget) -> None:
@@ -928,6 +1095,12 @@ class PlayerPage(QWidget):
 
     def _shortcut_playlist_step(self, delta: int) -> None:
         if not self._shortcut_context_active():
+            return
+        # 右侧播放列表为空时，快捷键跟着左侧合集走，否则合集里翻集只能用鼠标。
+        if self._playlist_count <= 0 and self._collection_count > 0:
+            target = self._collection_index + int(delta)
+            if 0 <= target < self._collection_count:
+                self.collection_entry_requested.emit(target)
             return
         target = self._playlist_index + int(delta)
         if 0 <= target < self._playlist_count:

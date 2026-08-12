@@ -24,7 +24,10 @@ class Toast(QFrame):
         parent = self.parentWidget()
         if parent:
             width = min(max(self.sizeHint().width(), 260), 420)
-            self.resize(width, self.sizeHint().height())
+            # 宽度被夹到上限后必须按新宽度重算高度：字幕限流那种两三行的处置建议
+            # 如果沿用 sizeHint 的"一行"高度，后面几行会被直接裁掉。
+            height = self.heightForWidth(width)
+            self.resize(width, height if height > 0 else self.sizeHint().height())
             x = max(12, parent.width() - self.width() - 24)
             y = max(12, parent.height() - self.height() - 24)
             self.move(x, y)

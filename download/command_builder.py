@@ -15,22 +15,26 @@ def build_download_task(
     video: VideoInfo,
     quality_label: str,
     config: ConfigService,
+    audio_format_id: str = "",
 ) -> DownloadTask:
+    """`audio_format_id` 非空时取代清晰度自带的默认音轨，让下载与播放器里选中的音轨一致。"""
     quality = video.qualities.get(quality_label) if quality_label else None
     format_selector = "bestvideo+bestaudio/best"
     expected_bytes = None
     if quality:
         format_selector = quality.format_id
+        track = video.audio_tracks.get(audio_format_id) if audio_format_id else None
+        selected_audio_id = track.track_id if track else (quality.audio_format_id or "")
         expected_bytes = _expected_bytes(
             quality.filesize,
-            quality.audio_filesize,
+            track.filesize if track else quality.audio_filesize,
             quality.tbr,
-            quality.audio_tbr,
+            (track.tbr or track.abr) if track else quality.audio_tbr,
             video.duration,
         )
-        if quality.audio_format_id:
+        if selected_audio_id:
             if _ffmpeg_available(config):
-                format_selector = f"{quality.format_id}+{quality.audio_format_id}"
+                format_selector = f"{quality.format_id}+{selected_audio_id}"
             else:
                 return DownloadTask(
                     url=video.webpage_url,

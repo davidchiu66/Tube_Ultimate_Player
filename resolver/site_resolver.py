@@ -16,7 +16,11 @@ from pathlib import Path
 
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
 from resolver.youtube_resolver import YoutubeResolver
-from services.config_service import ConfigService, detect_browser_cookie_sources
+from services.config_service import (
+    ConfigService,
+    detect_browser_cookie_sources,
+    rank_cookie_sources,
+)
 from services.cookie_service import load_browser_cookie_header, load_cookie_header
 
 
@@ -34,8 +38,10 @@ _BILIBILI_SEARCH_PAGE_LIMIT = 45
 _HOME_CACHE_TTL_SECONDS = 300.0
 _SEARCH_CACHE_TTL_SECONDS = 1800.0
 _CREATOR_CACHE_TTL_SECONDS = 600.0
+_COLLECTION_CACHE_TTL_SECONDS = 600.0
 _MAX_PAGE_CACHE_ITEMS = 48
 _MAX_CREATOR_CACHE_ITEMS = 32
+_MAX_COLLECTION_CACHE_ITEMS = 32
 
 
 class SiteResolver:
@@ -45,9 +51,11 @@ class SiteResolver:
         self.bilibili = BilibiliResolver(config, self.youtube)
         self._page_cache: OrderedDict[str, tuple[float, list[HomeVideo], bool]] = OrderedDict()
         self._creator_cache: OrderedDict[str, tuple[float, PlaylistInfo | None]] = OrderedDict()
+        self._collection_cache: OrderedDict[str, tuple[float, PlaylistInfo | None]] = OrderedDict()
         # 首页/搜索与作者列表都可能被多个 worker 线程同时读写，各自加锁保护。
         self._page_cache_lock = threading.Lock()
         self._creator_cache_lock = threading.Lock()
+        self._collection_cache_lock = threading.Lock()
 
     def home_source(self) -> str:
         return self.config.default_home_source()
@@ -143,6 +151,37 @@ class SiteResolver:
             video.source_site,
             creator_key,
             len(entries) if playlist else 0,
+        )
+        return deepcopy(playlist)
+
+    def resolve_collection_playlist(self, video: VideoInfo) -> PlaylistInfo | None:
+        """当前视频所属合集。返回 None 表示"不属于任何合集"，是常态而非错误。"""
+        site = self.normalize_source(video.source_site)
+        if not site:
+            return None
+        identity = str(video.webpage_url or video.video_id or "").strip()
+        if not identity:
+            return None
+
+        cache_key = f"collection|{site}|{identity}|{self._config_fingerprint(site)}"
+        cached = self._collection_cache_lookup(cache_key)
+        if cached is not None:
+            logger.info("collection cache hit site=%s video=%s", site, video.video_id)
+            return cached[0]
+
+        if site == "bilibili":
+            playlist = self.bilibili.resolve_collection(video)
+        else:
+            playlist = self.youtube.resolve_collection(video)
+        if playlist is not None and not playlist.entries:
+            playlist = None
+        # 「不属于合集」也进缓存：否则每次切集都要重新打一次探测请求。
+        self._collection_cache_store(cache_key, playlist)
+        logger.info(
+            "collection resolved site=%s video=%s count=%s",
+            site,
+            video.video_id,
+            len(playlist.entries) if playlist else 0,
         )
         return deepcopy(playlist)
 
@@ -252,6 +291,30 @@ class SiteResolver:
             self._creator_cache.move_to_end(key)
             while len(self._creator_cache) > _MAX_CREATOR_CACHE_ITEMS:
                 self._creator_cache.popitem(last=False)
+
+    def _collection_cache_lookup(self, key: str) -> tuple[PlaylistInfo | None] | None:
+        """命中返回单元素元组，未命中返回 None。
+
+        合集的 None 是有意义的结果（不属于任何合集），所以不能像 creator 那样
+        直接用 None 表示"没缓存"。
+        """
+        with self._collection_cache_lock:
+            cached = self._collection_cache.get(key)
+            if cached is None:
+                return None
+            cached_at, playlist = cached
+            if time.time() - cached_at > _COLLECTION_CACHE_TTL_SECONDS:
+                self._collection_cache.pop(key, None)
+                return None
+            self._collection_cache.move_to_end(key)
+            return (deepcopy(playlist),)
+
+    def _collection_cache_store(self, key: str, playlist: PlaylistInfo | None) -> None:
+        with self._collection_cache_lock:
+            self._collection_cache[key] = (time.time(), deepcopy(playlist))
+            self._collection_cache.move_to_end(key)
+            while len(self._collection_cache) > _MAX_COLLECTION_CACHE_ITEMS:
+                self._collection_cache.popitem(last=False)
 
 
 class BilibiliResolver:
@@ -414,6 +477,10 @@ class BilibiliResolver:
             cookie_policy="prefer",
         )
         data = payload.get("data", {})
+        return self._pages_playlist_from_view(data, url, bvid=bvid, aid=aid)
+
+    def _pages_playlist_from_view(self, data: dict, url: str, *, bvid: str, aid: str) -> PlaylistInfo:
+        """把 view 接口的 data.pages 转成分 P 列表。合集探测会复用同一份 data，不再重复请求。"""
         pages = data.get("pages") or []
         video_url = f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://www.bilibili.com/video/av{aid}"
         entries = []
@@ -459,6 +526,140 @@ class BilibiliResolver:
                 _playlist_entry_from_dict(item)
                 for item in entries
             ],
+        )
+
+    def resolve_collection(self, video: VideoInfo) -> PlaylistInfo | None:
+        """当前视频所属的"合集"，按 UGC 合集 → 多 P → 番剧季的优先级探测。
+
+        单 P 且无合集的普通稿件返回 None——这是常态，调用方只写 debug 日志，不打扰用户。
+        """
+        url = str(video.webpage_url or "").strip()
+        if not url:
+            return None
+        if "/bangumi/play/" in urllib.parse.urlparse(url).path:
+            playlist = self._resolve_bangumi_season_playlist(url)
+            if not playlist.entries:
+                return None
+            playlist.playlist_id = f"bilibili:bangumi:{playlist.playlist_id}"
+            playlist.source_type = "collection"
+            for entry in playlist.entries:
+                entry.playlist_id = playlist.playlist_id
+            return playlist
+
+        bvid = _extract_bvid(url)
+        aid = _extract_aid(url)
+        if not bvid and not aid:
+            return None
+        params = {"bvid": bvid} if bvid else {"aid": aid}
+        payload = self._request_json(
+            "https://api.bilibili.com/x/web-interface/view",
+            params=params,
+            cookie_policy="prefer",
+        )
+        data = payload.get("data") or {}
+
+        season = data.get("ugc_season")
+        if isinstance(season, dict) and season:
+            playlist = self._collection_from_ugc_season(
+                season,
+                url,
+                bvid=bvid,
+                aid=aid,
+                uploader=str((data.get("owner") or {}).get("name") or "").strip(),
+            )
+            if playlist is not None:
+                return playlist
+
+        # 无合集但多 P：用户在多 P 稿件里期待左侧能看到同稿件的其他分 P。
+        if len(data.get("pages") or []) > 1:
+            playlist = self._pages_playlist_from_view(data, url, bvid=bvid, aid=aid)
+            if playlist.entries:
+                playlist.playlist_id = f"bilibili:pages:{bvid or f'av{aid}'}"
+                playlist.source_type = "collection"
+                for entry in playlist.entries:
+                    entry.playlist_id = playlist.playlist_id
+                return playlist
+        return None
+
+    def _collection_from_ugc_season(
+        self,
+        season: dict,
+        url: str,
+        *,
+        bvid: str,
+        aid: str,
+        uploader: str = "",
+    ) -> PlaylistInfo | None:
+        """把 view 接口里的 ugc_season 摊平成合集列表。
+
+        sections 是"章节"，播放器左侧只需要一条线性队列，所以按 sections 顺序拼接、
+        统一重排 position。
+        """
+        season_id = str(season.get("id") or "").strip()
+        playlist_id = f"bilibili:ugcseason:{season_id or bvid or aid}"
+        season_mid = str(season.get("mid") or "").strip()
+        # 合集地址要稳定（不能用当前这一集的 URL），否则保存后换集就认不出是同一个合集。
+        # 这个 space 合集页地址本身也能被 resolve_playlist 解析回来。
+        season_url = (
+            f"https://space.bilibili.com/{season_mid}/channel/collectiondetail?sid={season_id}"
+            if season_mid and season_id
+            else url
+        )
+        current_key = _collection_base_key(_bilibili_video_key(url, bvid=bvid, aid=aid))
+        entries: list[PlaylistEntry] = []
+        current_video_id = ""
+        for section in season.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            for episode in section.get("episodes") or []:
+                if not isinstance(episode, dict):
+                    continue
+                episode_bvid = str(episode.get("bvid") or "").strip()
+                episode_aid = str(episode.get("aid") or "").strip()
+                if not episode_bvid and not episode_aid:
+                    continue
+                arc = episode.get("arc") if isinstance(episode.get("arc"), dict) else {}
+                page = episode.get("page") if isinstance(episode.get("page"), dict) else {}
+                page_no = int(page.get("page") or 0)
+                base_url = (
+                    f"https://www.bilibili.com/video/{episode_bvid}"
+                    if episode_bvid
+                    else f"https://www.bilibili.com/video/av{episode_aid}"
+                )
+                entry_url = f"{base_url}?p={page_no}" if page_no > 1 else base_url
+                video_id = _bilibili_video_key(entry_url, bvid=episode_bvid, aid=episode_aid)
+                title = _strip_html(
+                    str(episode.get("title") or arc.get("title") or "").strip() or episode_bvid or episode_aid
+                )
+                entries.append(
+                    PlaylistEntry(
+                        playlist_id=playlist_id,
+                        video_id=video_id,
+                        title=title,
+                        webpage_url=entry_url,
+                        source_site="bilibili",
+                        uploader=uploader,
+                        duration=int(arc.get("duration") or page.get("duration") or 0),
+                        thumbnail=_normalize_bilibili_thumbnail(str(arc.get("pic") or "")),
+                        position=len(entries) + 1,
+                        availability="",
+                    )
+                )
+                if not current_video_id and _collection_base_key(video_id) == current_key:
+                    current_video_id = video_id
+        if not entries:
+            return None
+        return PlaylistInfo(
+            playlist_id=playlist_id,
+            title=_strip_html(str(season.get("title") or "").strip()) or f"合集 {season_id}",
+            webpage_url=season_url,
+            source_site="bilibili",
+            uploader=uploader,
+            thumbnail=_normalize_bilibili_thumbnail(str(season.get("cover") or "")),
+            entry_count=len(entries),
+            source_type="collection",
+            current_video_id=current_video_id or entries[0].video_id,
+            entries=entries,
         )
 
     def _season_url_from_episode(self, url: str) -> str:
@@ -936,7 +1137,8 @@ class BilibiliResolver:
             if header:
                 return header
 
-        for _label, browser_spec in detect_browser_cookie_sources():
+        # Firefox 优先：load_browser_cookie_header 目前只读得了 Firefox，排前面能少走几轮空转。
+        for _label, browser_spec in rank_cookie_sources(detect_browser_cookie_sources()):
             if browser_spec in tried:
                 continue
             header = load_browser_cookie_header(browser_spec, url)
@@ -1257,6 +1459,19 @@ def _extract_space_mid(text: str) -> str:
 def _extract_space_list_id(text: str) -> str:
     match = re.search(r"/lists/(\d+)", str(text or ""))
     return match.group(1) if match else ""
+
+
+def _collection_base_key(video_id: str) -> str:
+    """去掉分 P 后缀的视频键。
+
+    合集里的条目一般不带 `:pN`，而当前播放地址可能带（`?p=1`），
+    直接比对会把"同一集"判成两条。
+    """
+    key = str(video_id or "")
+    head, sep, tail = key.rpartition(":p")
+    if sep and tail.isdigit():
+        return head
+    return key
 
 
 def _bilibili_video_key(url: str, bvid: str = "", aid: str = "") -> str:

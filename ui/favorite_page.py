@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -21,6 +22,8 @@ from ui.player_page import format_seconds
 class FavoritePage(QWidget):
     play_requested = Signal(str)
     remove_requested = Signal(str)
+    download_videos_requested = Signal(list)
+    remove_videos_requested = Signal(list)
 
     def __init__(self, favorites: FavoriteRepository) -> None:
         super().__init__()
@@ -35,7 +38,7 @@ class FavoritePage(QWidget):
         self.list_widget.setHorizontalHeaderLabels(["标题", "来源", "作者", "时长", "收藏时间", "操作"])
         self.list_widget.verticalHeader().setVisible(False)
         self.list_widget.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.list_widget.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.list_widget.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.list_widget.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.list_widget.setAlternatingRowColors(False)
         table_header = self.list_widget.horizontalHeader()
@@ -61,18 +64,43 @@ class FavoritePage(QWidget):
         header.addWidget(self.play_button)
         header.addWidget(self.remove_button)
 
+        self.download_selected_button = QPushButton("下载选中")
+        self.download_all_button = QPushButton("下载全部")
+        self.delete_selected_button = QPushButton("删除选中")
+        self.delete_all_button = QPushButton("删除全部")
+        self._batch_buttons = (
+            self.download_selected_button,
+            self.download_all_button,
+            self.delete_selected_button,
+            self.delete_all_button,
+        )
+        batch_row = QHBoxLayout()
+        batch_row.setContentsMargins(0, 0, 0, 0)
+        batch_row.setSpacing(8)
+        for button in self._batch_buttons:
+            button.setFixedHeight(28)
+            button.setObjectName("LibraryActionButton")
+            batch_row.addWidget(button)
+        batch_row.addStretch(1)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
         layout.addLayout(header)
         layout.addWidget(self.search_edit)
+        layout.addLayout(batch_row)
         layout.addWidget(self.list_widget, 1)
 
         self.search_edit.textChanged.connect(self._apply_filter)
         self.refresh_button.clicked.connect(self.refresh)
         self.play_button.clicked.connect(self._play_selected)
         self.remove_button.clicked.connect(self._remove_selected)
+        self.download_selected_button.clicked.connect(lambda: self._emit_batch("download", selected_only=True))
+        self.download_all_button.clicked.connect(lambda: self._emit_batch("download", selected_only=False))
+        self.delete_selected_button.clicked.connect(lambda: self._emit_batch("delete", selected_only=True))
+        self.delete_all_button.clicked.connect(lambda: self._emit_batch("delete", selected_only=False))
         self.list_widget.itemDoubleClicked.connect(lambda _item: self._play_selected())
+        self.list_widget.itemSelectionChanged.connect(self._update_batch_buttons)
         self.refresh()
 
     def refresh(self) -> None:
@@ -130,6 +158,62 @@ class FavoritePage(QWidget):
                 )
             ).casefold()
             self.list_widget.setRowHidden(row, bool(query and query not in haystack))
+        self._update_batch_buttons()
+
+    # ------------------------------------------------------------------
+    # 批量操作
+    # ------------------------------------------------------------------
+
+    def _visible_rows(self) -> list[int]:
+        """当前筛选后可见的行，按表格从上到下的顺序。
+
+        「全部」按这个口径而不是整张表：用户搜索之后点「删除全部」，
+        期望删的几乎一定是眼前这些（与下载页一致）。
+        """
+        return [row for row in range(self.list_widget.rowCount()) if not self.list_widget.isRowHidden(row)]
+
+    def _selected_rows(self) -> list[int]:
+        selected = {index.row() for index in self.list_widget.selectionModel().selectedRows()}
+        return [row for row in self._visible_rows() if row in selected]
+
+    def _records_for_rows(self, rows: list[int]) -> list[dict]:
+        return [self._rows[row] for row in rows if 0 <= row < len(self._rows)]
+
+    def _emit_batch(self, action: str, *, selected_only: bool) -> None:
+        rows = self._selected_rows() if selected_only else self._visible_rows()
+        records = self._records_for_rows(rows)
+        if not records:
+            QMessageBox.information(self, "提示", "没有可操作的收藏。")
+            return
+        if action == "download":
+            self.download_videos_requested.emit(records)
+            return
+        if not self._confirm_delete(len(records), selected_only=selected_only):
+            return
+        video_ids = [str(record.get("video_id") or "") for record in records]
+        self.remove_videos_requested.emit([video_id for video_id in video_ids if video_id])
+
+    def _confirm_delete(self, count: int, *, selected_only: bool) -> bool:
+        scope = "选中的" if selected_only else "列表中当前显示的"
+        # 如实说明只删收藏记录：本地已下载的文件不归收藏页管。
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            f"将删除{scope} {count} 条收藏记录。\n\n已下载的本地文件不会被删除。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _update_batch_buttons(self) -> None:
+        visible = self._visible_rows()
+        selected = self._selected_rows()
+        self.download_selected_button.setEnabled(bool(selected))
+        self.delete_selected_button.setEnabled(bool(selected))
+        self.download_all_button.setEnabled(bool(visible))
+        self.delete_all_button.setEnabled(bool(visible))
+        self.download_all_button.setToolTip(f"下载当前列表中显示的 {len(visible)} 个视频")
+        self.delete_all_button.setToolTip(f"删除当前列表中显示的 {len(visible)} 条收藏记录")
 
     def _play_selected(self) -> None:
         row = self.list_widget.currentRow()

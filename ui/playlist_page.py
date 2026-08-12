@@ -3,7 +3,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -21,6 +20,7 @@ from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
 from resolver.source_utils import source_site_label
 from ui.player_page import format_seconds
 from ui.text_elision import format_upload_date
+from ui.widgets import NoScrollComboBox
 
 
 class PlaylistPage(QWidget):
@@ -37,10 +37,14 @@ class PlaylistPage(QWidget):
         self._playlist: PlaylistInfo | None = None
         self._current_index = -1
         self._saved_playlists: list[SavedPlaylist] = []
+        # 程序化重填下拉框时禁止自动加载。blockSignals 只挡得住信号，挡不住重填过程中
+        # 对 _update_button_state 的直接调用链，所以另外用计数器做第二道保险。
+        self._suppress_saved_auto_load = 0
+        self._loaded_saved_key = ""
 
         self.title_label = QLabel("播放列表")
         self.title_label.setObjectName("PageTitle")
-        self.meta_label = QLabel("当前没有打开的播放列表，可从上方选择已保存列表加载。")
+        self.meta_label = QLabel("当前没有打开的播放列表，可从上方选择已保存列表。")
         self.meta_label.setObjectName("MetaLabel")
         self.description_label = QLabel("双击列表项即可开始播放；支持多选后批量下载，播放中条目会以 ▶ 标记。")
         self.description_label.setObjectName("MetaLabel")
@@ -50,9 +54,8 @@ class PlaylistPage(QWidget):
         self.search_edit.setPlaceholderText("搜索标题、来源、作者或链接")
         self.search_edit.setClearButtonEnabled(True)
 
-        self.saved_combo = QComboBox()
+        self.saved_combo = NoScrollComboBox()
         self.saved_combo.addItem("选择已保存列表", "")
-        self.load_saved_button = QPushButton("加载")
         self.delete_saved_button = QPushButton("删除")
 
         self.loading_bar = QProgressBar()
@@ -97,7 +100,6 @@ class PlaylistPage(QWidget):
         saved_row.setSpacing(8)
         saved_row.addWidget(QLabel("已保存列表"))
         saved_row.addWidget(self.saved_combo, 1)
-        saved_row.addWidget(self.load_saved_button)
         saved_row.addWidget(self.delete_saved_button)
 
         action_row = QHBoxLayout()
@@ -124,7 +126,6 @@ class PlaylistPage(QWidget):
         layout.addWidget(self.table, 1)
 
         self.back_button.clicked.connect(self.back_requested)
-        self.load_saved_button.clicked.connect(self._load_saved)
         self.delete_saved_button.clicked.connect(self._delete_saved)
         self.play_selected_button.clicked.connect(self._play_selected)
         self.play_all_button.clicked.connect(lambda: self._emit_play_index(0))
@@ -134,7 +135,7 @@ class PlaylistPage(QWidget):
         self.select_all_button.clicked.connect(self.table.selectAll)
         self.auto_play_checkbox.toggled.connect(self.auto_play_changed)
         self.search_edit.textChanged.connect(self._apply_filter)
-        self.saved_combo.currentIndexChanged.connect(self._update_button_state)
+        self.saved_combo.currentIndexChanged.connect(self._handle_saved_selection_changed)
         self.table.itemSelectionChanged.connect(self._update_button_state)
         self.table.cellDoubleClicked.connect(lambda row, _column: self._emit_play_index(row))
 
@@ -180,19 +181,25 @@ class PlaylistPage(QWidget):
 
     def set_saved_playlists(self, playlists: list[SavedPlaylist], current_key: str = "") -> None:
         self._saved_playlists = list(playlists)
+        self._suppress_saved_auto_load += 1
         self.saved_combo.blockSignals(True)
-        self.saved_combo.clear()
-        self.saved_combo.addItem("选择已保存列表", "")
-        selected_index = 0
-        for index, playlist in enumerate(self._saved_playlists, start=1):
-            self.saved_combo.addItem(
-                f"{playlist.name}（{len(playlist.entries)} 条）" if playlist.entries else playlist.name,
-                playlist.playlist_key,
-            )
-            if playlist.playlist_key == current_key:
-                selected_index = index
-        self.saved_combo.setCurrentIndex(selected_index)
-        self.saved_combo.blockSignals(False)
+        try:
+            self.saved_combo.clear()
+            self.saved_combo.addItem("选择已保存列表", "")
+            selected_index = 0
+            for index, playlist in enumerate(self._saved_playlists, start=1):
+                self.saved_combo.addItem(
+                    f"{playlist.name}（{len(playlist.entries)} 条）" if playlist.entries else playlist.name,
+                    playlist.playlist_key,
+                )
+                if playlist.playlist_key == current_key:
+                    selected_index = index
+            self.saved_combo.setCurrentIndex(selected_index)
+        finally:
+            self.saved_combo.blockSignals(False)
+            self._suppress_saved_auto_load -= 1
+        # 记住主窗口刚加载完的那一项，避免用户手工再选一次时重复加载。
+        self._loaded_saved_key = str(current_key or "")
         self._update_empty_state_text()
         self._update_button_state()
 
@@ -274,10 +281,17 @@ class PlaylistPage(QWidget):
         if self._playlist and self._playlist.entries:
             self.download_entries_requested.emit(list(self._playlist.entries))
 
-    def _load_saved(self) -> None:
-        playlist_key = self.current_saved_key()
-        if playlist_key:
-            self.load_saved_requested.emit(playlist_key)
+    def _handle_saved_selection_changed(self, _index: int) -> None:
+        """切换已保存列表即加载，不再需要"加载"按钮。"""
+        self._update_button_state()
+        if self._suppress_saved_auto_load:
+            return
+        key = self.current_saved_key().strip()
+        # 占位项（key 为空）不触发；重复选中同一项也不重复加载。
+        if not key or key == self._loaded_saved_key:
+            return
+        self._loaded_saved_key = key
+        self.load_saved_requested.emit(key)
 
     def _delete_saved(self) -> None:
         playlist_key = self.current_saved_key()
@@ -327,7 +341,6 @@ class PlaylistPage(QWidget):
         self.download_all_button.setEnabled(has_playlist)
         self.save_button.setEnabled(has_playlist)
         self.select_all_button.setEnabled(has_playlist)
-        self.load_saved_button.setEnabled(bool(saved_key))
         self.delete_saved_button.setEnabled(bool(saved_key))
 
     def _update_empty_state_text(self) -> None:
@@ -335,6 +348,6 @@ class PlaylistPage(QWidget):
             return
         saved_count = len(self._saved_playlists)
         if saved_count:
-            self.meta_label.setText(f"已保存 {saved_count} 个播放列表，请从上方下拉框选择后加载。")
+            self.meta_label.setText(f"已保存 {saved_count} 个播放列表，从上方下拉框选择即可加载。")
         else:
             self.meta_label.setText("当前没有打开或保存的播放列表。播放或解析列表后，可在这里查看和管理。")

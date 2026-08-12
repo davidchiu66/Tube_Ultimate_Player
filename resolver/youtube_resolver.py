@@ -14,9 +14,14 @@ from app_paths import thirdpart_path
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
 from resolver.quality_selector import QualitySelector
 from resolver.subtitle_parser import SubtitleParser
-from services.config_service import ConfigService, detect_browser_cookie_sources
+from services.config_service import (
+    ConfigService,
+    detect_browser_cookie_sources,
+    rank_cookie_sources,
+)
 from services.cookie_service import prepare_cookie_file
 from services.chromium_cookie_extractor import extract_cookies_to_netscape
+from services.locale_service import system_language_tag
 from services.logging_service import sanitize_command
 
 
@@ -293,6 +298,29 @@ class YoutubeResolver:
         )
         return paged, has_next
 
+    def resolve_collection(self, video: VideoInfo) -> PlaylistInfo | None:
+        """当前视频所属的"合集"。
+
+        YouTube 没有公开接口能回答"这个视频属于哪些播放列表"，只能用播放 URL 自带的
+        `list=` 或 yt-dlp 元数据里偶尔存在的 `playlist_id`。普通视频返回 None 是站点
+        能力边界，不是缺陷。
+        """
+        list_id = _playlist_id_from_url(str(video.webpage_url or ""))
+        if not list_id:
+            raw = video.raw_info or {}
+            list_id = str(raw.get("playlist_id") or "").strip()
+        if not list_id:
+            return None
+        playlist = self.resolve_playlist_generic(f"https://www.youtube.com/playlist?list={list_id}")
+        if not playlist.entries:
+            return None
+        playlist.playlist_id = f"youtube:playlist:{list_id}"
+        playlist.source_type = "collection"
+        playlist.current_video_id = str(video.video_id or "")
+        for entry in playlist.entries:
+            entry.playlist_id = playlist.playlist_id
+        return playlist
+
     def fetch_creator_videos(
         self,
         video: VideoInfo,
@@ -408,9 +436,15 @@ class YoutubeResolver:
         return result
 
     def _alternate_cookie_browsers(self, *, include_current: bool = False) -> list[str]:
-        current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser()
+        """换浏览器重试的候选，按「读得出来的可能性」排序。
+
+        `current` 要跟真正用出去的那个源对齐 —— 自动模式下实际用的是按站点探测出的
+        浏览器（`auto_cookie_browser_for_site`），拿默认浏览器来比会把已经失败过的源
+        当成新候选再试一遍，还把真正可用的挤到后面。与 `download_worker` 保持一致。
+        """
+        current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site("youtube")
         browsers: list[str] = []
-        for _label, value in detect_browser_cookie_sources():
+        for _label, value in rank_cookie_sources(detect_browser_cookie_sources()):
             if not value or value in browsers:
                 continue
             if value == current and not include_current:
@@ -496,7 +530,10 @@ class YoutubeResolver:
         override_cookie_browser: str = "",
         explicit_cookie_file: str = "",
     ) -> list[str]:
-        languages = self.config.get("youtube.subtitle_languages", ["zh-Hans", "zh-Hant", "zh", "en"])
+        # 不再传 --write-subs / --write-auto-subs / --sub-langs / --sub-format：
+        # `--dump-single-json` 下这四个参数只影响 requested_subtitles 与真正落盘的文件，
+        # 对 subtitles / automatic_captions 两个原始字典没有任何过滤作用（实测删除前后输出一致）。
+        # 用户配置的字幕语言改由 SubtitleParser 在排序阶段生效。
         command = [
             str(self.ytdlp_path),
             "--dump-single-json",
@@ -509,12 +546,6 @@ class YoutubeResolver:
             "5",
             "--fragment-retries",
             "5",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            ",".join(languages),
-            "--sub-format",
-            "vtt/srt/best",
         ]
 
         js_runtime = self.config.js_runtime()
@@ -592,6 +623,9 @@ class YoutubeResolver:
             "--yes-playlist",
             "--skip-download",
             "--geo-bypass",
+            # 合集/播放列表也要日期：--flat-playlist 默认不给 timestamp，左侧滑出的
+            # 合集列表因此只有标题没有上传日期，而首页/创作者页带了这个参数所以有。
+            *_APPROXIMATE_DATE_ARGS,
             "--socket-timeout",
             "30",
             "--retries",
@@ -646,9 +680,22 @@ class YoutubeResolver:
         elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
             command.extend(["--cookies-from-browser", auto_cookie_browser])
 
+    def _preferred_audio_language(self) -> str:
+        """默认音轨的偏好语言：配置显式指定优先，否则按系统语言（D 裁定）。
+
+        配置项不存在时回退到系统语言标签，保证没有 player 配置的旧用户也能用上
+        D 裁定的匹配链；空串表示"无偏好"，由 QualitySelector 走站点默认/原声。
+        """
+        configured = str(self.config.get("player.default_audio_language", "") or "").strip()
+        return configured if configured and configured != "auto" else system_language_tag()
+
     def _parse_info(self, info: dict, warnings: str = "") -> VideoInfo:
         formats = info.get("formats") or []
-        qualities = QualitySelector.select_all(formats)
+        audio_tracks = QualitySelector.select_audio_tracks(
+            formats, self._preferred_audio_language()
+        )
+        # 传入已选好的音轨表，避免 select_all 再算一遍（两次结果必须一致，否则默认轨会错位）。
+        qualities = QualitySelector.select_all(formats, audio_tracks=audio_tracks)
         if not qualities:
             ytdlp_logger.error("no playable qualities found: %s", self._format_stats(info, formats))
             raise RuntimeError(self._format_no_quality_error(info, formats, warnings))
@@ -656,6 +703,11 @@ class YoutubeResolver:
         subtitles = SubtitleParser.parse(
             info.get("subtitles") or {},
             info.get("automatic_captions") or {},
+            # 配置里的字幕语言在这里生效：决定下拉框里哪几条排在最前面。
+            preferred_languages=self.config.get(
+                "youtube.subtitle_languages",
+                ["zh-Hans", "zh-Hant", "zh", "en"],
+            ),
         )
 
         webpage_url = str(info.get("webpage_url") or "")
@@ -694,6 +746,7 @@ class YoutubeResolver:
             webpage_url=webpage_url,
             thumbnail=_normalize_thumbnail_url(str(info.get("thumbnail") or "")),
             qualities=qualities,
+            audio_tracks=audio_tracks,
             subtitles=subtitles,
             automatic_captions=info.get("automatic_captions") or {},
             http_headers=info.get("http_headers") or {},

@@ -18,7 +18,11 @@ from download.command_builder import (
     should_retry_with_cookie_file,
 )
 from download.models import DownloadTask
-from services.config_service import ConfigService, detect_browser_cookie_sources
+from services.config_service import (
+    ConfigService,
+    detect_browser_cookie_sources,
+    rank_cookie_sources,
+)
 from services.logging_service import sanitize_command
 
 
@@ -123,11 +127,11 @@ class DownloadWorker(QRunnable):
             self.signals.failed.emit(self.task.task_id, output.error_message())
 
     def _alternate_cookie_browsers(self) -> list[str]:
-        """除当前正在用的浏览器之外，其它可用的 Cookie 源。"""
+        """除当前正在用的浏览器之外，其它可用的 Cookie 源，按读得出来的可能性排序。"""
         site = self.config.cookie_site_for_url(self.task.url)
         current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site(site)
         browsers: list[str] = []
-        for _label, value in detect_browser_cookie_sources():
+        for _label, value in rank_cookie_sources(detect_browser_cookie_sources()):
             if not value or value == current or value in browsers:
                 continue
             browsers.append(value)

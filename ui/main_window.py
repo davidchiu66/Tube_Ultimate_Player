@@ -31,9 +31,19 @@ from dlna.controller import DlnaController, build_didl_lite
 from dlna.media_server import DlnaMediaServer, DlnaMediaSource, mime_type_for_extension, mime_type_for_file
 from dlna.models import DlnaDevice
 from download.download_manager import DownloadManager
+from download.models import DownloadTask
 from player.mpv_player import MpvPlayer
 from platform_support import is_root_user
-from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, SavedPlaylist, VideoInfo, VideoQuality
+from resolver.models import (
+    MUXED_AUDIO_TRACK_ID,
+    AudioTrack,
+    HomeVideo,
+    PlaylistEntry,
+    PlaylistInfo,
+    SavedPlaylist,
+    VideoInfo,
+    VideoQuality,
+)
 from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
@@ -52,6 +62,7 @@ from ui.toolbar import PlayerToolbar
 from ui.toast import Toast
 from ui.url_dialog import UrlPlayDialog
 from workers.archive_extract_worker import ArchiveExtractWorker
+from workers.collection_worker import CollectionWorker
 from workers.cookie_probe_worker import CookieProbeWorker
 from workers.creator_videos_worker import CreatorVideosWorker
 from workers.dlna_worker import DlnaActionWorker
@@ -121,6 +132,8 @@ class MainWindow(QMainWindow):
         self.current_video: VideoInfo | None = None
         self.current_local_media_path = ""
         self.current_quality_label = ""
+        # 所选音轨的 track_id；空串 = 跟随清晰度自带的默认轨（单语言视频恒为空）。
+        self.current_audio_track_id = ""
         self.current_playlist: PlaylistInfo | None = None
         self.current_playlist_index = -1
         self.current_playlist_key = ""
@@ -130,8 +143,20 @@ class MainWindow(QMainWindow):
         self._playback_return_widget: QWidget | None = None
         self._playback_finished = False
         self._was_maximized_before_fullscreen: bool | None = None
+        # "进入播放默认全屏"只在一次播放动作的开头生效一次：用户之后手动退出全屏，
+        # 不能因为播放列表自动连播、切清晰度等内部重载又被拉回全屏。
+        self._pending_playback_fullscreen = False
         self._creator_playlist_generation = 0
         self._creator_playlist_workers: dict[tuple[int, str], CreatorVideosWorker] = {}
+        # 左侧「合集列表」：与右侧播放列表各自独立一套状态，互不覆盖。
+        self.current_collection: PlaylistInfo | None = None
+        self.current_collection_index = -1
+        self.current_collection_key = ""
+        self.current_collection_auto_play = False
+        self._collection_generation = 0
+        self._collection_workers: dict[tuple[int, str], CollectionWorker] = {}
+        # 谁最后驱动了当前播放，谁负责连播；空串表示单条播放，没有队列在驱动。
+        self._active_queue = ""
         # 线程池 worker 在结束前必须留有 Python 引用，详见 _start_worker 的说明。
         self._active_workers: dict[int, object] = {}
         self._worker_sequence = 0
@@ -307,6 +332,8 @@ class MainWindow(QMainWindow):
         page = FavoritePage(self.favorites)
         page.play_requested.connect(self.play_url)
         page.remove_requested.connect(self._remove_favorite)
+        page.download_videos_requested.connect(self._download_favorite_records)
+        page.remove_videos_requested.connect(self._remove_favorites)
         return page
 
     def _create_history_page(self) -> HistoryPage:
@@ -372,6 +399,7 @@ class MainWindow(QMainWindow):
         self.player_page.volume_changed.connect(self._set_volume)
         self.player_page.speed_changed.connect(self._set_speed)
         self.player_page.quality_changed.connect(self._change_quality)
+        self.player_page.audio_track_changed.connect(self._change_audio_track)
         self.player_page.subtitle_changed.connect(self._change_subtitle)
         self.player_page.cast_requested.connect(self._show_cast_dialog)
         self.player_page.browser_play_requested.connect(self._open_current_video_in_browser)
@@ -381,11 +409,21 @@ class MainWindow(QMainWindow):
         self.player_page.playlist_entry_requested.connect(self._play_playlist_index)
         self.player_page.playlist_download_requested.connect(self._download_playlist_entries)
         self.player_page.playlist_save_requested.connect(self._save_active_playlist)
-        self.player_page.playlist_load_requested.connect(self._load_saved_playlist)
+        self.player_page.playlist_load_requested.connect(self._load_saved_playlist_from_overlay)
         self.player_page.playlist_delete_requested.connect(self._delete_saved_playlist)
         self.player_page.playlist_auto_play_changed.connect(self._set_playlist_auto_play)
+        self.player_page.collection_entry_requested.connect(self._play_collection_index)
+        self.player_page.collection_download_requested.connect(self._download_playlist_entries)
+        self.player_page.collection_save_requested.connect(self._save_active_collection)
+        self.player_page.collection_load_requested.connect(self._load_saved_collection_from_overlay)
+        self.player_page.collection_delete_requested.connect(self._delete_saved_playlist)
+        self.player_page.collection_auto_play_changed.connect(self._set_collection_auto_play)
 
         self.download_manager.message.connect(self.toast.show_message)
+        # 下载页是懒加载的，状态标识不能依赖它的连接，这里单独订阅一份。
+        self.download_manager.task_added.connect(self._sync_download_state_from_task)
+        self.download_manager.task_changed.connect(self._sync_download_state_from_task)
+        self.download_manager.task_removed.connect(self._handle_download_task_removed)
 
         self.mpv.position_changed.connect(self._handle_mpv_position_changed)
         self.mpv.duration_changed.connect(self._handle_mpv_duration_changed)
@@ -516,8 +554,11 @@ class MainWindow(QMainWindow):
 
         self._remember_playback_return_widget()
         self._clear_playlist_context()
+        # 单条播放不属于任何队列，连播交给探测结果决定。
+        self._active_queue = ""
         self.current_local_media_path = ""
         logger.info("play url requested: %s", target)
+        self._arm_playback_window_mode()
         self.stack.setCurrentWidget(self.player_page)
         self.player_page.set_loading(True, "正在解析视频地址，请稍候...")
 
@@ -839,16 +880,226 @@ class MainWindow(QMainWindow):
             return
         self._play_playlist_entry(self.current_playlist, index)
 
-    def _play_playlist_entry(self, playlist: PlaylistInfo, index: int) -> None:
+    # ------------------------------------------------------------------
+    # 左侧「合集列表」
+    # ------------------------------------------------------------------
+
+    def _activate_collection(
+        self,
+        playlist: PlaylistInfo,
+        *,
+        current_index: int = -1,
+        collection_key: str = "",
+        auto_play_next: bool = False,
+    ) -> None:
+        self.current_collection = playlist
+        self.current_collection_index = current_index
+        self.current_collection_key = collection_key
+        self.current_collection_auto_play = auto_play_next
+        self.player_page.set_collection_context(
+            playlist,
+            current_index=current_index,
+            auto_play_next=auto_play_next,
+        )
+        self.player_page.set_collection_available(True)
+        self._refresh_saved_playlists()
+
+    def _clear_collection_context(self, *, keep_available: bool = False) -> None:
+        """清空左侧面板。keep_available=True 用于"探测完成但不属于任何合集"，此时仍允许滑出看空态。"""
+        self.current_collection = None
+        self.current_collection_index = -1
+        self.current_collection_key = ""
+        self.current_collection_auto_play = False
+        if self._active_queue == "collection":
+            self._active_queue = ""
+        self.player_page.clear_collection_context()
+        self.player_page.set_collection_available(keep_available)
+
+    def _play_collection_index(self, index: int) -> None:
+        if self.current_collection is None:
+            return
+        self._play_collection_entry(self.current_collection, index)
+
+    def _play_collection_entry(self, playlist: PlaylistInfo, index: int, *, arm_window_mode: bool = True) -> None:
+        if not (0 <= index < len(playlist.entries)):
+            return
+        if self._dlna_device is not None or self._dlna_cast_pending:
+            self._stop_dlna_cast(resume_local=False, notify=False)
+        entry = playlist.entries[index]
+        logger.info("collection play requested collection=%s index=%s title=%s", playlist.title, index, entry.title)
+        if arm_window_mode:
+            self._arm_playback_window_mode()
+        self._remember_playback_return_widget()
+        self.current_collection = playlist
+        self.current_collection_index = index
+        self._active_queue = "collection"
+        self.player_page.set_collection_current_index(index)
+        self.stack.setCurrentWidget(self.player_page)
+        self.player_page.set_loading(True, f"正在解析合集第 {index + 1} 条视频，请稍候...")
+
+        worker = ResolverWorker(entry.webpage_url, self.resolver)
+        worker.signals.success.connect(self._resolved)
+        worker.signals.error.connect(self._resolve_failed)
+        worker.signals.finished.connect(self._url_resolve_finished)
+        self._start_worker(worker)
+
+    def _save_active_collection(self) -> None:
+        playlist = self.current_collection
+        if playlist is None or not playlist.entries:
+            QMessageBox.information(self, "提示", "当前没有可保存的合集。")
+            return
+        default_name = playlist.title or "我的合集"
+        name, ok = QInputDialog.getText(self, "保存合集", "请输入合集名称：", text=default_name)
+        if not ok:
+            return
+        collection_name = str(name or "").strip()
+        if not collection_name:
+            QMessageBox.information(self, "提示", "合集名称不能为空。")
+            return
+        # source_type 固定写 "collection"：左侧下拉只列这一类，混进播放列表会互相干扰。
+        collection_key = self.playlists.save_playlist(
+            name=collection_name,
+            entries=playlist.entries,
+            source_url=playlist.webpage_url,
+            source_type="collection",
+            auto_play_next=self.current_collection_auto_play,
+            playlist_key=self.current_collection_key or None,
+        )
+        self.current_collection_key = collection_key
+        self._refresh_saved_playlists()
+        self.toast.show_message(f"已保存合集：{collection_name}")
+
+    def _load_saved_collection_from_overlay(self, playlist_key: str) -> None:
+        """左侧加载已保存合集：只换左侧内容，不跳页、不打断当前播放。"""
+        saved = self.playlists.get_playlist(playlist_key)
+        if saved is None:
+            QMessageBox.warning(self, "提示", "没有找到对应的已保存合集。")
+            self._refresh_saved_playlists()
+            return
+        playlist = self._saved_to_playlist(saved)
+        current_video_id = self.current_video.video_id if self.current_video else ""
+        self._activate_collection(
+            playlist,
+            current_index=self._find_playlist_index(playlist, current_video_id),
+            collection_key=saved.playlist_key,
+            auto_play_next=saved.auto_play_next,
+        )
+        self.toast.show_message(f"已加载合集：{saved.name}")
+
+    def _set_collection_auto_play(self, enabled: bool) -> None:
+        self.current_collection_auto_play = bool(enabled)
+        if self.current_collection is not None:
+            self.player_page.set_collection_context(
+                self.current_collection,
+                current_index=self.current_collection_index,
+                auto_play_next=self.current_collection_auto_play,
+            )
+        if self.current_collection_key:
+            self.playlists.set_auto_play_next(self.current_collection_key, self.current_collection_auto_play)
+            self._refresh_saved_playlists()
+
+    def _schedule_collection_probe(self, video: VideoInfo) -> None:
+        """解析成功后探测当前视频所属合集。晚一点发起，先把播放跑起来。"""
+        self._collection_generation += 1
+        generation = self._collection_generation
+        video_id = video.video_id
+        index = self._find_playlist_index(self.current_collection, video_id) if self.current_collection else -1
+        if index >= 0:
+            # 还在同一个合集里换集：只挪高亮，不要把面板收回去闪一下。
+            self.current_collection_index = index
+            self.player_page.set_collection_current_index(index)
+        else:
+            self._clear_collection_context()
+        if self.resolver.normalize_source(video.source_site) == "":
+            return
+        QTimer.singleShot(
+            600,
+            lambda: self._start_collection_worker(generation, video_id, video),
+        )
+
+    def _start_collection_worker(self, generation: int, video_id: str, video: VideoInfo) -> None:
+        if not self._is_collection_request_current(generation, video_id):
+            logger.debug("collection start ignored as stale generation=%s video=%s", generation, video_id)
+            return
+        worker = CollectionWorker(self.resolver, video, generation=generation)
+        worker.signals.success.connect(self._collection_loaded)
+        worker.signals.error.connect(self._collection_failed)
+        worker.signals.finished.connect(self._collection_worker_finished)
+        self._collection_workers[(generation, video_id)] = worker
+        self._start_worker(worker, -1)
+
+    @Slot(int, str, object)
+    @_skip_after_shutdown
+    def _collection_loaded(self, generation: int, video_id: str, playlist: PlaylistInfo | None) -> None:
+        if not self._is_collection_request_current(generation, video_id):
+            logger.debug("collection result ignored as stale generation=%s video=%s", generation, video_id)
+            return
+        if playlist is None or not playlist.entries:
+            # 「不属于任何合集」是常态，只记日志，不打扰用户。
+            logger.debug("collection not found video=%s", video_id)
+            self._clear_collection_context(keep_available=True)
+            return
+        current_index = self._find_playlist_index(playlist, video_id)
+        if current_index < 0:
+            current_index = max(0, self._find_playlist_index(playlist, playlist.current_video_id))
+        auto_play_next = self.current_collection_auto_play
+        collection_key = ""
+        saved = self._find_saved_collection(playlist.webpage_url)
+        if saved is not None:
+            collection_key = saved.playlist_key
+            auto_play_next = saved.auto_play_next
+        self._activate_collection(
+            playlist,
+            current_index=current_index,
+            collection_key=collection_key,
+            auto_play_next=auto_play_next,
+        )
+        logger.info("collection applied video=%s count=%s", video_id, len(playlist.entries))
+
+    @Slot(int, str, str)
+    @_skip_after_shutdown
+    def _collection_failed(self, generation: int, video_id: str, message: str) -> None:
+        if not self._is_collection_request_current(generation, video_id):
+            return
+        # 探测失败不影响播放，也不弹提示：左侧空着即可。
+        logger.warning("collection probe failed video=%s: %s", video_id, message)
+        self._clear_collection_context(keep_available=True)
+
+    @Slot(int, str)
+    @_skip_after_shutdown
+    def _collection_worker_finished(self, generation: int, video_id: str) -> None:
+        self._collection_workers.pop((generation, video_id), None)
+
+    def _is_collection_request_current(self, generation: int, video_id: str) -> bool:
+        return (
+            generation == self._collection_generation
+            and self.current_video is not None
+            and self.current_video.video_id == video_id
+        )
+
+    def _find_saved_collection(self, source_url: str) -> SavedPlaylist | None:
+        """按来源地址找已保存的合集，用来复用同一条记录而不是每次另存一份。"""
+        url = str(source_url or "").strip()
+        if not url:
+            return None
+        for saved in self.playlists.all_playlists():
+            if str(saved.source_type or "") == "collection" and str(saved.source_url or "") == url:
+                return saved
+        return None
+
+    def _play_playlist_entry(self, playlist: PlaylistInfo, index: int, *, arm_window_mode: bool = True) -> None:
         if not (0 <= index < len(playlist.entries)):
             return
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         entry = playlist.entries[index]
         logger.info("playlist play requested playlist=%s index=%s title=%s", playlist.title, index, entry.title)
+        if arm_window_mode:
+            self._arm_playback_window_mode()
         self._remember_playback_return_widget()
         self.current_playlist = playlist
         self.current_playlist_index = index
+        self._active_queue = "playlist"
         page = self._created_page("playlist")
         if page is not None:
             page.set_current_index(index)
@@ -905,12 +1156,12 @@ class MainWindow(QMainWindow):
         self._refresh_saved_playlists(current_key=playlist_key)
         self.toast.show_message(f"已保存播放列表：{playlist_name}")
 
-    def _load_saved_playlist(self, playlist_key: str) -> None:
+    def _load_saved_playlist(self, playlist_key: str, *, switch_page: bool = True) -> bool:
         saved = self.playlists.get_playlist(playlist_key)
         if saved is None:
             QMessageBox.warning(self, "提示", "没有找到对应的已保存播放列表。")
             self._refresh_saved_playlists()
-            return
+            return False
         playlist = self._saved_to_playlist(saved)
         self._activate_playlist(
             playlist,
@@ -918,21 +1169,33 @@ class MainWindow(QMainWindow):
             playlist_key=saved.playlist_key,
             auto_play_next=saved.auto_play_next,
         )
-        self.stack.setCurrentWidget(self.playlist_page)
+        if switch_page:
+            self.stack.setCurrentWidget(self.playlist_page)
+        return True
+
+    def _load_saved_playlist_from_overlay(self, playlist_key: str) -> None:
+        """浮层加载不跳页：只换浮层内容，不打断当前播放。"""
+        if not self._load_saved_playlist(playlist_key, switch_page=False):
+            return
+        name = self.current_playlist.title if self.current_playlist else ""
+        self.toast.show_message(f"已加载播放列表：{name}" if name else "已加载播放列表")
 
     def _delete_saved_playlist(self, playlist_key: str) -> None:
         saved = self.playlists.get_playlist(playlist_key)
         if saved is None:
             self._refresh_saved_playlists()
             return
-        answer = QMessageBox.question(self, "删除播放列表", f"确定删除“{saved.name}”吗？")
+        # 播放列表与合集共用同一份保存记录，提示文案就不写死"播放列表"了。
+        answer = QMessageBox.question(self, "删除已保存列表", f"确定删除“{saved.name}”吗？")
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.playlists.delete_playlist(playlist_key)
         if self.current_playlist_key == playlist_key:
             self.current_playlist_key = ""
+        if self.current_collection_key == playlist_key:
+            self.current_collection_key = ""
         self._refresh_saved_playlists()
-        self.toast.show_message(f"已删除播放列表：{saved.name}")
+        self.toast.show_message(f"已删除：{saved.name}")
 
     def _set_playlist_auto_play(self, enabled: bool) -> None:
         self.current_playlist_auto_play = bool(enabled)
@@ -960,6 +1223,9 @@ class MainWindow(QMainWindow):
         if page is not None:
             page.set_saved_playlists(playlists, selected_key)
         self.player_page.set_playlist_saved_items(playlists, selected_key)
+        # 左侧下拉只列合集：把播放列表也塞进去，两个面板就成了同一份内容的两个入口。
+        collections = [saved for saved in playlists if str(saved.source_type or "") == "collection"]
+        self.player_page.set_collection_saved_items(collections, self.current_collection_key)
 
     def _saved_to_playlist(self, saved: SavedPlaylist) -> PlaylistInfo:
         return PlaylistInfo(
@@ -1000,6 +1266,8 @@ class MainWindow(QMainWindow):
                 video.title,
             )
             self.current_quality_label = ""
+            self.current_audio_track_id = ""
+            self._pending_playback_fullscreen = False
             self.player_page.set_loading(False)
             self.player_page.set_playback_available(False)
             self.player_page.set_cast_available(False)
@@ -1013,6 +1281,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.current_quality_label = quality.label
+        self.current_audio_track_id = self._select_default_audio_track(video)
         logger.info(
             "video resolved id=%s title=%s selected_quality=%s qualities=%s subtitles=%s",
             video.video_id,
@@ -1021,8 +1290,17 @@ class MainWindow(QMainWindow):
             list(video.qualities.keys()),
             len(video.subtitles),
         )
+        if not video.subtitles:
+            # 站点没有字幕轨是常态（尤其是中文自媒体视频），只留一条日志，不弹提示骚扰用户；
+            # 界面上由「无可用字幕」下拉项负责解释。
+            logger.info(
+                "no subtitle tracks available site=%s id=%s",
+                video.source_site,
+                video.video_id,
+            )
         self.player_page.update_video_info(video, quality.label)
         self.player_page.set_favorite_state(self.favorites.is_favorite(video.video_id), available=True)
+        self._sync_current_download_state()
         if self.current_playlist:
             self.player_page.set_playlist_context(
                 self.current_playlist,
@@ -1034,7 +1312,8 @@ class MainWindow(QMainWindow):
                 playlist_page.set_current_index(self.current_playlist_index)
 
         try:
-            self.mpv.load(quality.video_url, quality.audio_url, headers=video.http_headers)
+            video_url, audio_url = self._current_stream_urls(quality)
+            self.mpv.load(video_url, audio_url, headers=video.http_headers)
             self._set_playback_finished(False)
             self.player_page.set_loading(False)
             self.player_page.set_playback_available(True)
@@ -1047,12 +1326,16 @@ class MainWindow(QMainWindow):
                 history_page.refresh()
             if self.current_playlist is None:
                 self._schedule_creator_playlist(video)
+            self._schedule_collection_probe(video)
+            self._apply_playback_window_mode()
         except Exception as exc:
+            self._pending_playback_fullscreen = False
             logger.exception("playback load failed")
             QMessageBox.critical(self, "播放失败", str(exc))
 
     @_skip_after_shutdown
     def _resolve_failed(self, message: str) -> None:
+        self._pending_playback_fullscreen = False
         logger.error("resolve failed: %s", message)
         QMessageBox.critical(
             self,
@@ -1071,6 +1354,73 @@ class MainWindow(QMainWindow):
         # 解析成功但没有任何清晰度时返回 None，由调用方给出提示，避免 StopIteration 逃逸。
         return next(iter(video.qualities.values()), None)
 
+    def _select_default_audio_track(self, video: VideoInfo) -> str:
+        """按 D 裁定挑默认音轨，返回 track_id；没有可选音轨时返回空串。
+
+        `select_audio_tracks()` 已按同一条链排好序（配置 → 系统语言 → 站点默认 →
+        原声 → 第一条），这里取首条即可；配置里指定的语言在解析层就已参与排序。
+        """
+        tracks = getattr(video, "audio_tracks", None) or {}
+        return next(iter(tracks), "")
+
+    def _current_stream_urls(self, quality: VideoQuality) -> tuple[str, str | None]:
+        """把"所选音轨"折算成 (video_url, audio_url)，三处 mpv.load() 共用。
+
+        这是"切清晰度不丢音轨"的实现点：清晰度换了，音轨仍按 current_audio_track_id 挂。
+        """
+        if self.current_audio_track_id == MUXED_AUDIO_TRACK_ID:
+            # 「随画面（免转码）」：回到已混音单流，语言由站点决定（C1）。
+            muxed_url = getattr(quality, "muxed_video_url", None)
+            if muxed_url:
+                return muxed_url, None
+        track = self._current_audio_track()
+        # 本档位自带音频（muxed）时不外挂音轨，否则会出现两条音频。
+        if track and quality.audio_url:
+            return quality.video_url, track.url
+        return quality.video_url, quality.audio_url
+
+    def _current_audio_track(self) -> AudioTrack | None:
+        if not self.current_video or not self.current_audio_track_id:
+            return None
+        tracks = getattr(self.current_video, "audio_tracks", None) or {}
+        return tracks.get(self.current_audio_track_id)
+
+    def _cast_audio_codec(self, quality: VideoQuality) -> str:
+        """投屏混流时上报的音轨编码：跟随所选音轨，而非清晰度自带的默认轨。"""
+        track = self._current_audio_track()
+        return track.acodec if track else quality.acodec
+
+    def _change_audio_track(self, track_id: str) -> None:
+        if not self.current_video or track_id == self.current_audio_track_id:
+            return
+        quality = self.current_video.qualities.get(self.current_quality_label)
+        if not quality:
+            return
+        tracks = getattr(self.current_video, "audio_tracks", None) or {}
+        if track_id and track_id != MUXED_AUDIO_TRACK_ID and track_id not in tracks:
+            return
+
+        previous = self.current_audio_track_id
+        playback_finished = self._playback_finished
+        position = 0.0 if playback_finished else self.mpv.position()
+        autoplay = playback_finished or not self.mpv.get_bool("pause")
+        # 先落状态再算地址：_current_stream_urls 读的就是它。失败时回滚。
+        self.current_audio_track_id = track_id
+        video_url, audio_url = self._current_stream_urls(quality)
+        try:
+            self.mpv.load(
+                video_url,
+                audio_url,
+                start_position=position,
+                headers=self.current_video.http_headers,
+                autoplay=autoplay,
+            )
+            self._set_playback_finished(False)
+        except Exception as exc:
+            self.current_audio_track_id = previous
+            logger.exception("audio track switch failed track_id=%s", track_id)
+            QMessageBox.critical(self, "切换音轨失败", str(exc))
+
     def _change_quality(self, label: str) -> None:
         if not self.current_video or label == self.current_quality_label:
             return
@@ -1081,10 +1431,11 @@ class MainWindow(QMainWindow):
         playback_finished = self._playback_finished
         position = 0.0 if playback_finished else self.mpv.position()
         autoplay = playback_finished or not self.mpv.get_bool("pause")
+        video_url, audio_url = self._current_stream_urls(quality)
         try:
             self.mpv.load(
-                quality.video_url,
-                quality.audio_url,
+                video_url,
+                audio_url,
                 start_position=position,
                 headers=self.current_video.http_headers,
                 autoplay=autoplay,
@@ -1148,7 +1499,9 @@ class MainWindow(QMainWindow):
     def _subtitle_failed(self, request_id: int, key: str, message: str) -> None:
         if request_id != self._subtitle_request_id:
             return
-        self.toast.show_message(f"字幕加载失败：{message}")
+        # 限流类提示是两三句话的处置建议（改选原文字幕、稍后再试），3 秒读不完。
+        timeout = 8000 if len(message) > 40 else 3000
+        self.toast.show_message(f"字幕加载失败：{message}", timeout_ms=timeout)
 
     def _set_volume(self, volume: int) -> None:
         self.config.set("player.volume", volume)
@@ -1165,7 +1518,14 @@ class MainWindow(QMainWindow):
         if not self.current_video:
             QMessageBox.information(self, "提示", "当前没有可下载的视频。")
             return
-        self._enqueue_download(self.current_video, self.current_quality_label)
+        # 下载跟随下拉里选中的那条音轨；「随画面（免转码）」不是真音轨，
+        # _current_audio_track() 对它返回 None，于是退回清晰度自带的默认轨。
+        track = self._current_audio_track()
+        self._enqueue_download(
+            self.current_video,
+            self.current_quality_label,
+            track.track_id if track else "",
+        )
 
     def _open_current_video_in_browser(self) -> None:
         url = str(self.current_video.webpage_url or "").strip() if self.current_video else ""
@@ -1192,9 +1552,11 @@ class MainWindow(QMainWindow):
             "Auto",
         )
 
-    def _enqueue_download(self, video: VideoInfo, quality_label: str) -> None:
+    def _enqueue_download(
+        self, video: VideoInfo, quality_label: str, audio_format_id: str = ""
+    ) -> None:
         try:
-            task = self.download_manager.enqueue(video, quality_label)
+            task = self.download_manager.enqueue(video, quality_label, audio_format_id)
         except Exception:
             logger.exception("download enqueue failed title=%s", video.title)
             self.toast.show_message(f"下载失败：{video.title or video.webpage_url}")
@@ -1222,6 +1584,49 @@ class MainWindow(QMainWindow):
             self.player_page.set_favorite_state(False, available=True)
         self.toast.show_message("已从收藏中移除")
 
+    def _remove_favorites(self, video_ids: list) -> None:
+        """收藏页批量删除：一条语句删完再统一刷新视图。"""
+        ids = [str(video_id) for video_id in list(video_ids or []) if str(video_id or "").strip()]
+        if not ids:
+            return
+        removed = self.favorites.remove_many(ids)
+        self._refresh_favorite_views()
+        if self.current_video and self.current_video.video_id in set(ids):
+            self.player_page.set_favorite_state(False, available=True)
+        self.toast.show_message(f"已从收藏中移除 {removed} 条")
+
+    def _download_favorite_records(self, records: list) -> None:
+        """收藏页批量下载。收藏表里没有清晰度信息，统一按 Auto 入队。"""
+        videos = []
+        for record in list(records or []):
+            url = str(record.get("webpage_url") or "").strip()
+            if not url:
+                continue
+            videos.append(
+                VideoInfo(
+                    video_id=str(record.get("video_id") or ""),
+                    title=str(record.get("title") or ""),
+                    source_site=str(record.get("source_site") or ""),
+                    uploader=str(record.get("uploader") or ""),
+                    duration=int(record.get("duration") or 0),
+                    webpage_url=url,
+                    thumbnail=str(record.get("thumbnail") or ""),
+                )
+            )
+        if not videos:
+            self.toast.show_message("下载失败：收藏记录里没有可用的视频地址")
+            return
+        try:
+            created, skipped = self.download_manager.enqueue_many(videos, "Auto")
+        except Exception:
+            logger.exception("favorite batch download failed count=%s", len(videos))
+            self.toast.show_message("批量下载失败")
+            return
+        message = f"已加入下载队列 {created} 个"
+        if skipped:
+            message += f"，跳过 {skipped} 个（已在队列或已完成）"
+        self.toast.show_message(message)
+
     def _refresh_favorite_views(self) -> None:
         favorite_ids = self.favorites.favorite_ids()
         self.home_page.set_favorite_ids(favorite_ids)
@@ -1231,6 +1636,31 @@ class MainWindow(QMainWindow):
         if self.current_video:
             self.player_page.set_favorite_state(self.current_video.video_id in favorite_ids, available=True)
 
+    def _sync_current_download_state(self) -> None:
+        """把当前播放视频的下载任务状态同步给播放页。"""
+        video = self.current_video
+        if video is None:
+            self.player_page.set_download_state("")
+            return
+        task = self.download_manager.task_for_video(url=video.webpage_url, video_id=video.video_id)
+        if task is None:
+            self.player_page.set_download_state("")
+        else:
+            self.player_page.set_download_state(task.status, task.progress)
+
+    def _sync_download_state_from_task(self, task: DownloadTask) -> None:
+        """只有当变化的任务正是当前播放的视频时才刷新，避免下载队列刷屏拖累播放页。"""
+        video = self.current_video
+        if video is None:
+            return
+        same_url = bool(task.url) and task.url == video.webpage_url
+        same_id = bool(task.video_id) and task.video_id == video.video_id
+        if same_url or same_id:
+            self.player_page.set_download_state(task.status, task.progress)
+
+    def _handle_download_task_removed(self, _task_id: str) -> None:
+        self._sync_current_download_state()
+
     def play_local_file(self, path: str) -> None:
         logger.info("play local file requested: %s", path)
         if self._dlna_device is not None or self._dlna_cast_pending:
@@ -1239,7 +1669,10 @@ class MainWindow(QMainWindow):
         self.current_video = None
         self.current_local_media_path = str(Path(path).resolve())
         self.current_quality_label = ""
+        self.current_audio_track_id = ""
         self._clear_playlist_context()
+        self._clear_collection_context()
+        self._arm_playback_window_mode()
         self.stack.setCurrentWidget(self.player_page)
         try:
             self.mpv.load(path)
@@ -1249,7 +1682,10 @@ class MainWindow(QMainWindow):
             self.player_page.set_cast_available(True)
             self.player_page.set_paused(False)
             self.player_page.set_download_available(False)
+            self.player_page.set_download_state("")
+            self._apply_playback_window_mode()
         except Exception as exc:
+            self._pending_playback_fullscreen = False
             logger.exception("local playback load failed path=%s", path)
             QMessageBox.critical(self, "播放失败", str(exc))
 
@@ -1266,14 +1702,35 @@ class MainWindow(QMainWindow):
         self._return_after_stop()
 
     def _handle_playback_finished(self) -> None:
-        if self.current_playlist is not None and self.current_playlist_auto_play:
-            next_index = self.current_playlist_index + 1
-            if next_index < len(self.current_playlist.entries):
-                logger.info("playlist autoplay next index=%s", next_index)
-                self._play_playlist_entry(self.current_playlist, next_index)
-                return
+        # 谁最后驱动了当前播放，谁优先负责连播；另一侧作为兜底。
+        first = self._advance_collection_queue if self._active_queue == "collection" else self._advance_playlist_queue
+        second = self._advance_playlist_queue if self._active_queue == "collection" else self._advance_collection_queue
+        if first() or second():
+            return
         logger.info("playback reached end; waiting for replay")
         self._set_playback_finished(True)
+
+    def _advance_playlist_queue(self) -> bool:
+        if self.current_playlist is None or not self.current_playlist_auto_play:
+            return False
+        next_index = self.current_playlist_index + 1
+        if next_index >= len(self.current_playlist.entries):
+            return False
+        logger.info("playlist autoplay next index=%s", next_index)
+        # 连播是同一次播放会话的延续，不重新套用"进入播放"的窗口模式：
+        # 用户中途退出全屏后，不该被下一集又拽回全屏。
+        self._play_playlist_entry(self.current_playlist, next_index, arm_window_mode=False)
+        return True
+
+    def _advance_collection_queue(self) -> bool:
+        if self.current_collection is None or not self.current_collection_auto_play:
+            return False
+        next_index = self.current_collection_index + 1
+        if next_index >= len(self.current_collection.entries):
+            return False
+        logger.info("collection autoplay next index=%s", next_index)
+        self._play_collection_entry(self.current_collection, next_index, arm_window_mode=False)
+        return True
 
     def _toggle_play_pause(self) -> None:
         try:
@@ -1347,8 +1804,11 @@ class MainWindow(QMainWindow):
         if quality is None:
             self.toast.show_message("当前清晰度没有可投屏媒体地址")
             return
+        # 投屏跟随当前所选音轨（C1）：选了「随画面」就退回单流免转码，
+        # 选了具体语言则仍走 FFmpeg 混流，播的语言与本地一致。
+        cast_video_url, cast_audio_url = self._current_stream_urls(quality)
         ffmpeg_path = ""
-        if quality.audio_url:
+        if cast_audio_url:
             ffmpeg_dir = self.ffmpeg_install_service.effective_ffmpeg_dir()
             if ffmpeg_dir:
                 executable = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
@@ -1356,7 +1816,15 @@ class MainWindow(QMainWindow):
                 if candidate.is_file():
                     ffmpeg_path = str(candidate)
             if not ffmpeg_path:
-                self.toast.show_message("当前视频为分离音视频流，投屏前需要在设置中配置 FFmpeg")
+                # C1：本档位有已混音变体时，"随画面（免转码）"就是不装 FFmpeg 也能投的出路，
+                # 提示里点名它；没有该变体时（如 1440p 只有纯视频轨）仍是老文案。
+                if getattr(quality, "muxed_video_url", None):
+                    self.toast.show_message(
+                        "当前音轨需要 FFmpeg 混流才能投屏；"
+                        "也可把音轨切到「随画面（免转码）」直接投，代价是语言由站点决定"
+                    )
+                else:
+                    self.toast.show_message("当前视频为分离音视频流，投屏前需要在设置中配置 FFmpeg")
                 return
 
         device = self._select_dlna_device(video.title)
@@ -1367,15 +1835,15 @@ class MainWindow(QMainWindow):
         _, proxy = self.config.effective_proxy()
         source = DlnaMediaSource(
             title=video.title,
-            video_url=quality.video_url,
-            audio_url=quality.audio_url,
+            video_url=cast_video_url,
+            audio_url=cast_audio_url,
             headers=dict(video.http_headers),
             mime_type=mime_type_for_extension(quality.ext),
             video_codec=quality.vcodec,
-            audio_codec=quality.acodec,
+            audio_codec=self._cast_audio_codec(quality),
             ffmpeg_path=ffmpeg_path,
             proxy=proxy,
-            start_position=position if quality.audio_url else 0.0,
+            start_position=position if cast_audio_url else 0.0,
         )
         try:
             media_url = self.dlna_media_server.register_source(
@@ -1803,6 +2271,23 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         self.stack.setCurrentWidget(self.about_page)
+
+    def _arm_playback_window_mode(self) -> None:
+        """一次播放动作开始时记下是否要自动全屏，等真正出画面再执行。
+
+        解析可能失败，提前全屏会让用户对着一块黑屏找退出键，所以只在这里"上膛"。
+        """
+        self._pending_playback_fullscreen = self.config.playback_starts_fullscreen()
+
+    def _apply_playback_window_mode(self) -> None:
+        """媒体已经加载成功时调用，按配置进入全屏；窗口模式不动当前窗口状态。"""
+        if not self._pending_playback_fullscreen:
+            return
+        self._pending_playback_fullscreen = False
+        if self.isFullScreen():
+            return
+        logger.info("applying playback window mode: fullscreen")
+        self._enter_player_fullscreen()
 
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():

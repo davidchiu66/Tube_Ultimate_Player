@@ -124,8 +124,17 @@ class WorkerRetryTests(unittest.TestCase):
             def error_message(self) -> str:
                 return self.text
 
-        def fake_run(force_cookie_file: bool = False, override_cookie_browser: str = ""):
-            attempts.append("file" if force_cookie_file else (override_cookie_browser or "primary"))
+        def fake_run(
+            force_cookie_file: bool = False,
+            override_cookie_browser: str = "",
+            explicit_cookie_file: str = "",
+        ):
+            # 签名必须跟 _run_once 一致：漏一个关键字参数的话，只有在恰好走到那条
+            # 分支的运行里才会炸，表现为「偶发」失败而不是稳定的签名错误。
+            if explicit_cookie_file:
+                attempts.append("chromium-cookie-file")
+            else:
+                attempts.append("file" if force_cookie_file else (override_cookie_browser or "primary"))
             index = min(len(attempts) - 1, len(outcomes) - 1)
             return Output(*outcomes[index])
 
@@ -137,9 +146,15 @@ class WorkerRetryTests(unittest.TestCase):
         failed: list[str] = []
         worker.signals.completed.connect(lambda _tid, path: completed.append(path))
         worker.signals.failed.connect(lambda _tid, msg: failed.append(msg))
-        with patch(
-            "download.download_worker.detect_browser_cookie_sources",
-            return_value=[("Brave", "brave:Default"), ("Firefox", "firefox:p1"), ("Chrome", "chrome:Default")],
+        with (
+            patch(
+                "download.download_worker.detect_browser_cookie_sources",
+                return_value=[("Brave", "brave:Default"), ("Firefox", "firefox:p1"), ("Chrome", "chrome:Default")],
+            ),
+            # 这几个用例考的是「换浏览器重试」。不打桩的话，全程失败的用例会一路走到
+            # 现解 Chromium Cookie 那步，而那步会真的去开子进程读本机浏览器的库 ——
+            # 成功与否取决于跑测试的机器上装了什么、有没有开着，于是偶发失败。
+            patch("download.download_worker.chromium_cookie_fallback_file", return_value=""),
         ):
             worker.run()
         return completed, failed

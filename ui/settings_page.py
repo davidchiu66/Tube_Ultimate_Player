@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from resolver.models import LANGUAGE_NAMES
 from services.config_service import (
     PROXY_MODE_AUTO,
     PROXY_MODE_LABELS,
@@ -34,11 +35,19 @@ from services.config_service import (
     detect_browser_cookie_sources,
 )
 from services.cookie_service import secure_cookie_file
+from services.locale_service import system_language_tag
 from services.runtime_install_service import RuntimeStatus
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 
 
 logger = logging.getLogger("tube_player.ui")
+
+# 默认音轨语言下拉的候选。LANGUAGE_NAMES 里还有 zh-cn / zh-tw 这类带地区的键，
+# 放进设置页只会让列表变长而选不出差别——语言级的偏好足够匹配到具体音轨。
+AUDIO_LANGUAGE_CHOICES = (
+    "zh", "zh-hans", "zh-hant", "yue", "en", "ja", "ko",
+    "es", "fr", "de", "ru", "pt", "ar", "it", "th", "vi", "id", "hi",
+)
 
 
 class SettingsPage(QWidget):
@@ -84,13 +93,52 @@ class SettingsPage(QWidget):
         default_home_row.setSpacing(16)
         default_home_row.addWidget(self.default_home_bilibili)
         default_home_row.addWidget(self.default_home_youtube)
+        # 这个选项同时决定首页站点与下面 Cookie 编辑框的目标站点，备注就是为了说明这层关联。
+        self.default_home_hint = QLabel("涉及网站 Cookie 选择")
+        self.default_home_hint.setObjectName("MetaLabel")
+        default_home_row.addWidget(self.default_home_hint)
         default_home_row.addStretch(1)
+
+        self.playback_window_group = QButtonGroup(self)
+        self.playback_window_windowed = QRadioButton("窗口")
+        self.playback_window_fullscreen = QRadioButton("全屏")
+        self.playback_window_group.addButton(self.playback_window_windowed)
+        self.playback_window_group.addButton(self.playback_window_fullscreen)
+        playback_window_row = QHBoxLayout()
+        playback_window_row.setContentsMargins(0, 0, 0, 0)
+        playback_window_row.setSpacing(16)
+        playback_window_row.addWidget(self.playback_window_windowed)
+        playback_window_row.addWidget(self.playback_window_fullscreen)
+        self.playback_window_hint = QLabel("开始播放时的窗口状态，全屏后可按退出全屏快捷键返回窗口")
+        self.playback_window_hint.setObjectName("MetaLabel")
+        playback_window_row.addWidget(self.playback_window_hint)
+        playback_window_row.addStretch(1)
+        self._playback_window_row = playback_window_row
+
+        self.default_audio_language_combo = QComboBox()
+        # 首项把探测到的系统语言写进文案，用户不必猜"跟随系统"到底跟到了哪一种。
+        detected = system_language_tag()
+        self.default_audio_language_combo.addItem(f"跟随系统（{detected or '未知'}）", "auto")
+        for code in AUDIO_LANGUAGE_CHOICES:
+            name = LANGUAGE_NAMES.get(code, code)
+            self.default_audio_language_combo.addItem(f"{name}（{code}）", code)
+        audio_language_row = QHBoxLayout()
+        audio_language_row.setContentsMargins(0, 0, 0, 0)
+        audio_language_row.setSpacing(16)
+        audio_language_row.addWidget(self.default_audio_language_combo)
+        self.default_audio_language_hint = QLabel(
+            "多语言配音视频优先选这个语言的音轨；视频没有该语言时回退到原声轨"
+        )
+        self.default_audio_language_hint.setObjectName("MetaLabel")
+        audio_language_row.addWidget(self.default_audio_language_hint)
+        audio_language_row.addStretch(1)
+        self._audio_language_row = audio_language_row
 
         self.cookie_edit = QTextEdit()
         self.cookie_edit.setMinimumHeight(150)
         self.cookie_edit.setPlaceholderText(
             "粘贴 Netscape cookies.txt 内容，或浏览器请求头里的 Cookie: a=b; c=d\n"
-            "内容会保存到当前默认首页对应的网站 Cookie。"
+            "内容会保存到当前网站选择对应的网站 Cookie。"
         )
         self.cookie_content_label = QLabel()
 
@@ -166,7 +214,9 @@ class SettingsPage(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow("默认首页", default_home_row)
+        form.addRow("网站选择", default_home_row)
+        form.addRow("进入播放", self._playback_window_row)
+        form.addRow("默认音轨语言", self._audio_language_row)
         form.addRow("当前有效代理", self.active_proxy_label)
         form.addRow("代理模式", self.proxy_mode_combo)
         form.addRow("配置代理", self.proxy_edit)
@@ -267,6 +317,14 @@ class SettingsPage(QWidget):
         self._cookie_site = default_home
         self.default_home_bilibili.setChecked(default_home != "youtube")
         self.default_home_youtube.setChecked(default_home == "youtube")
+        starts_fullscreen = self.config.playback_starts_fullscreen()
+        self.playback_window_windowed.setChecked(not starts_fullscreen)
+        self.playback_window_fullscreen.setChecked(starts_fullscreen)
+        audio_language = str(self.config.get("player.default_audio_language", "auto") or "auto")
+        audio_language_index = self.default_audio_language_combo.findData(audio_language)
+        self.default_audio_language_combo.setCurrentIndex(
+            audio_language_index if audio_language_index >= 0 else 0
+        )
         self.proxy_edit.setText(str(self.config.get("youtube.proxy", "") or ""))
         proxy_mode_index = self.proxy_mode_combo.findData(self.config.proxy_mode())
         self.proxy_mode_combo.setCurrentIndex(proxy_mode_index if proxy_mode_index >= 0 else 0)
@@ -318,6 +376,14 @@ class SettingsPage(QWidget):
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
         self.config.set("network.proxy_mode", self.proxy_mode_combo.currentData() or PROXY_MODE_AUTO)
         self.config.set("content.default_home", "youtube" if self.default_home_youtube.isChecked() else "bilibili")
+        self.config.set(
+            "player.playback_window_mode",
+            "fullscreen" if self.playback_window_fullscreen.isChecked() else "window",
+        )
+        self.config.set(
+            "player.default_audio_language",
+            self.default_audio_language_combo.currentData() or "auto",
+        )
         cookie_browser = self.cookie_browser_combo.currentData() or ""
         self.config.set("youtube.cookie_browser", cookie_browser)
         self.config.set(

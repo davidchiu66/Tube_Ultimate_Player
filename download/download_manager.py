@@ -69,7 +69,30 @@ class DownloadManager(QObject):
     def tasks(self) -> list[DownloadTask]:
         return list(self._tasks)
 
-    def enqueue(self, video: VideoInfo, quality_label: str) -> DownloadTask | None:
+    def task_for_video(self, url: str = "", video_id: str = "") -> DownloadTask | None:
+        """按 URL 或 video_id 找当前视频对应的下载任务，供播放页显示下载状态。
+
+        优先走 URL 索引（enqueue 的去重键就是它）；同一个视频从不同入口进来时
+        URL 可能带多余的查询参数，所以再按 video_id 兜底扫一遍。
+        """
+        target_url = str(url or "").strip()
+        if target_url:
+            task = self._url_index.get(target_url)
+            if task is not None and task.status != STATUS_DELETED:
+                return task
+        target_id = str(video_id or "").strip()
+        if not target_id:
+            return None
+        for task in self._tasks:
+            if task.status == STATUS_DELETED:
+                continue
+            if str(task.video_id or "").strip() == target_id:
+                return task
+        return None
+
+    def enqueue(
+        self, video: VideoInfo, quality_label: str, audio_format_id: str = ""
+    ) -> DownloadTask | None:
         url = video.webpage_url
         existing = self._find_by_url(url)
         if existing:
@@ -79,7 +102,7 @@ class DownloadManager(QObject):
                 self.message.emit(f"下载任务已存在：{existing.title}")
             return existing
 
-        task = build_download_task(video, quality_label, self.config)
+        task = build_download_task(video, quality_label, self.config, audio_format_id)
         self._tasks.append(task)
         self._register_task(task)
         logger.info(
@@ -94,6 +117,30 @@ class DownloadManager(QObject):
         self._save_tasks()
         self._schedule()
         return task
+
+    def enqueue_many(self, videos: list[VideoInfo], quality_label: str) -> tuple[int, int]:
+        """批量入队，返回（新建条数, 已存在条数）。
+
+        逐条走 enqueue 会按条落盘、调度并弹一次 toast（50 条就是 50 条消息刷屏），
+        所以这里自己建任务、最后统一落盘 + 调度一次，消息交给调用方汇总。
+        """
+        created = 0
+        skipped = 0
+        for video in list(videos or []):
+            url = str(video.webpage_url or "").strip()
+            if not url or self._find_by_url(url) is not None:
+                skipped += 1
+                continue
+            task = build_download_task(video, quality_label, self.config)
+            self._tasks.append(task)
+            self._register_task(task)
+            self.task_added.emit(task)
+            created += 1
+        if created:
+            logger.info("download batch queued count=%s quality=%s", created, quality_label)
+            self._save_tasks()
+            self._schedule()
+        return created, skipped
 
     def pause_task(self, task_id: str) -> None:
         task = self._find(task_id)
