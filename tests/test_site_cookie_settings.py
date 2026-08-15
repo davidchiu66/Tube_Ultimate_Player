@@ -52,7 +52,7 @@ class SiteCookieSettingsTests(unittest.TestCase):
             self.assertEqual(config.cookie_file("bilibili"), str(legacy_cookie))
             self.assertEqual(config.cookie_file("youtube"), "")
 
-    def test_settings_switch_cookie_content_with_default_home(self) -> None:
+    def test_settings_switch_cookie_content_with_site_config_selector(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             youtube_cookie = root / "youtube.txt"
@@ -73,10 +73,12 @@ class SiteCookieSettingsTests(unittest.TestCase):
             self.assertEqual(page.cookie_edit.toPlainText(), "bilibili-cookie")
             page.cookie_edit.setPlainText("bilibili-cookie-updated")
             page.default_home_youtube.setChecked(True)
+            self.assertEqual(page.cookie_content_label.text(), "Bilibili Cookie 内容")
+            page.site_config_youtube.setChecked(True)
             self.assertEqual(page.cookie_content_label.text(), "YouTube Cookie 内容")
             self.assertEqual(page.cookie_edit.toPlainText(), "youtube-cookie")
             page.cookie_edit.setPlainText("youtube-cookie-updated")
-            page.default_home_bilibili.setChecked(True)
+            page.site_config_bilibili.setChecked(True)
             self.assertEqual(page.cookie_edit.toPlainText(), "bilibili-cookie-updated")
 
             page.save()

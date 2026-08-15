@@ -58,6 +58,10 @@ class PlaylistEntry:
     position: int = 0
     availability: str = ""
     upload_date: str = ""
+    section_id: str = ""
+    section_title: str = ""
+    section_position: int = 0
+    section_thumbnail: str = ""
 
     def to_home_video(self) -> HomeVideo:
         return HomeVideo(
@@ -83,6 +87,17 @@ class PlaylistInfo:
     entry_count: int = 0
     source_type: str = "playlist"
     current_video_id: str = ""
+    current_section_id: str = ""
+    entries: list[PlaylistEntry] = field(default_factory=list)
+    sections: list[PlaylistSection] = field(default_factory=list)
+
+
+@dataclass
+class PlaylistSection:
+    section_id: str
+    title: str
+    position: int
+    thumbnail: str = ""
     entries: list[PlaylistEntry] = field(default_factory=list)
 
 
@@ -118,6 +133,21 @@ class VideoQuality:
     # 同档位的已混音变体地址（多语言视频才有）。选"随画面（免转码）"时改播它，
     # 换回今天的单流行为——投屏没有 FFmpeg 时的出路（C1 裁定）。
     muxed_video_url: str | None = None
+
+
+@dataclass(frozen=True)
+class PlaybackQualityHint:
+    label: str
+    height: int
+    fps: int
+
+
+@dataclass(frozen=True)
+class PlaybackRequestContext:
+    request_id: int
+    target_url: str
+    reason: str = "direct"
+    quality_hint: PlaybackQualityHint | None = None
 
 
 # 音轨下拉里"随画面（免转码）"这一项的 track_id。它不是一条真音轨，而是"回到

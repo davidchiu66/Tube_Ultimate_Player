@@ -427,7 +427,7 @@ class YoutubeResolver:
     ) -> subprocess.CompletedProcess[str]:
         if not self._should_retry_with_alternate_browser(result):
             return result
-        for index, browser in enumerate(self._alternate_cookie_browsers(), start=1):
+        for index, browser in enumerate(self._alternate_cookie_browsers(url=url), start=1):
             ytdlp_logger.warning("retrying with alternate browser cookies source=%s url=%s", browser, url)
             command = builder(browser)
             result = self._run_ytdlp(command, url, f"{attempt_prefix}-alt-browser-{index}")
@@ -435,14 +435,15 @@ class YoutubeResolver:
                 return result
         return result
 
-    def _alternate_cookie_browsers(self, *, include_current: bool = False) -> list[str]:
+    def _alternate_cookie_browsers(self, *, include_current: bool = False, url: str = "") -> list[str]:
         """换浏览器重试的候选，按「读得出来的可能性」排序。
 
         `current` 要跟真正用出去的那个源对齐 —— 自动模式下实际用的是按站点探测出的
         浏览器（`auto_cookie_browser_for_site`），拿默认浏览器来比会把已经失败过的源
         当成新候选再试一遍，还把真正可用的挤到后面。与 `download_worker` 保持一致。
         """
-        current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site("youtube")
+        site = self.config.cookie_site_for_url(url) if url else "youtube"
+        current = self.config.explicit_cookie_browser_for_site(site) or self.config.auto_cookie_browser_for_site(site)
         browsers: list[str] = []
         for _label, value in rank_cookie_sources(detect_browser_cookie_sources()):
             if not value or value in browsers:
@@ -461,9 +462,10 @@ class YoutubeResolver:
         解出 Cookie 就返回其路径，全失败返回 ""。
         """
         tried: set[str] = set()
-        preferred = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site("youtube")
+        site = self.config.cookie_site_for_url(url)
+        preferred = self.config.explicit_cookie_browser_for_site(site) or self.config.auto_cookie_browser_for_site(site)
         candidates: list[str] = [preferred] if preferred else []
-        candidates.extend(self._alternate_cookie_browsers(include_current=True))
+        candidates.extend(self._alternate_cookie_browsers(include_current=True, url=url))
         for spec in candidates:
             browser = str(spec or "").split(":", 1)[0].strip().lower()
             if not browser or browser in ("firefox", "opera") or spec in tried:
@@ -479,7 +481,7 @@ class YoutubeResolver:
 
         返回 ("browser", spec) / ("file", path) / ("none", "")。
         """
-        explicit = self.config.explicit_cookie_browser()
+        explicit = self.config.explicit_cookie_browser_for_site(self.config.cookie_site_for_url(url))
         if explicit:
             return ("browser", explicit)
         cookie_file = self.config.cookie_file_for_url(url)
@@ -496,7 +498,7 @@ class YoutubeResolver:
         yt-dlp 对「Cookie 无效」并不报错：退出码 0、JSON 里 entries 为空。所以
         只靠 returncode 判断永远发现不了这种失败，必须按内容判断后另找 Cookie 源。
         """
-        for index, browser in enumerate(self._alternate_cookie_browsers(include_current=True), start=1):
+        for index, browser in enumerate(self._alternate_cookie_browsers(include_current=True, url=url), start=1):
             ytdlp_logger.warning("空结果，改用浏览器 Cookie 重试 source=%s url=%s", browser, url)
             result = self._run_ytdlp(builder(browser), url, f"{attempt_prefix}-empty-retry-{index}")
             if result.returncode == 0 and _json_entry_count(result.stdout) > 0:
@@ -667,7 +669,9 @@ class YoutubeResolver:
         explicit_cookie_file 是「浏览器 DPAPI 解不了」时由本程序现解的 Chromium
         Netscape 文件，优先级最高（见 chromium_cookie_fallback_file）。
         """
-        cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser()
+        cookie_browser = override_cookie_browser or self.config.explicit_cookie_browser_for_site(
+            self.config.cookie_site_for_url(url)
+        )
         cookie_file = self.config.cookie_file_for_url(url)
         if explicit_cookie_file:
             command.extend(["--cookies", explicit_cookie_file])
@@ -677,7 +681,7 @@ class YoutubeResolver:
             command.extend(["--cookies-from-browser", cookie_browser])
         elif cookie_file:
             command.extend(["--cookies", prepare_cookie_file(cookie_file, url)])
-        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site("youtube"):
+        elif auto_cookie_browser := self.config.auto_cookie_browser_for_site(self.config.cookie_site_for_url(url)):
             command.extend(["--cookies-from-browser", auto_cookie_browser])
 
     def _preferred_audio_language(self) -> str:

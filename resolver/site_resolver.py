@@ -14,7 +14,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 
-from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
+from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, PlaylistSection, VideoInfo
 from resolver.youtube_resolver import YoutubeResolver
 from services.config_service import (
     ConfigService,
@@ -163,7 +163,8 @@ class SiteResolver:
         if not identity:
             return None
 
-        cache_key = f"collection|{site}|{identity}|{self._config_fingerprint(site)}"
+        fingerprint = self._config_fingerprint(site)
+        cache_key = f"collection|{site}|{identity}|{fingerprint}"
         cached = self._collection_cache_lookup(cache_key)
         if cached is not None:
             logger.info("collection cache hit site=%s video=%s", site, video.video_id)
@@ -177,6 +178,19 @@ class SiteResolver:
             playlist = None
         # 「不属于合集」也进缓存：否则每次切集都要重新打一次探测请求。
         self._collection_cache_store(cache_key, playlist)
+        if playlist is not None:
+            # 同一合集换集时直接复用刚解析出的完整层级，不再按每个视频重复请求接口。
+            current_index = next(
+                (index for index, entry in enumerate(playlist.entries) if entry.video_id == playlist.current_video_id),
+                0,
+            )
+            start = max(0, current_index - 4)
+            nearby_entries = playlist.entries[start : start + 12]
+            for entry in nearby_entries:
+                for alias in (entry.webpage_url, entry.video_id):
+                    alias = str(alias or "").strip()
+                    if alias:
+                        self._collection_cache_store(f"collection|{site}|{alias}|{fingerprint}", playlist)
         logger.info(
             "collection resolved site=%s video=%s count=%s",
             site,
@@ -246,7 +260,7 @@ class SiteResolver:
         proxy_label, proxy_value = self.config.effective_proxy()
         payload = {
             "source": source,
-            "cookie_browser": self.config.cookie_browser(),
+            "cookie_browser": self.config.cookie_browser_for_site(source),
             "cookie_file": cookie_stamp,
             "proxy_label": proxy_label,
             "proxy_value": proxy_value,
@@ -590,11 +604,7 @@ class BilibiliResolver:
         aid: str,
         uploader: str = "",
     ) -> PlaylistInfo | None:
-        """把 view 接口里的 ugc_season 摊平成合集列表。
-
-        sections 是"章节"，播放器左侧只需要一条线性队列，所以按 sections 顺序拼接、
-        统一重排 position。
-        """
+        """保留 ugc_season 的章节层级，同时维护兼容用的扁平 entries。"""
         season_id = str(season.get("id") or "").strip()
         playlist_id = f"bilibili:ugcseason:{season_id or bvid or aid}"
         season_mid = str(season.get("mid") or "").strip()
@@ -605,12 +615,22 @@ class BilibiliResolver:
             if season_mid and season_id
             else url
         )
-        current_key = _collection_base_key(_bilibili_video_key(url, bvid=bvid, aid=aid))
+        current_key = _bilibili_video_key(url, bvid=bvid, aid=aid)
+        current_base_key = _collection_base_key(current_key)
         entries: list[PlaylistEntry] = []
-        current_video_id = ""
-        for section in season.get("sections") or []:
+        source_sections: list[PlaylistSection] = []
+        album_sections: list[PlaylistSection] = []
+        has_multi_page_album = False
+        album_position = 0
+        for section_index, section in enumerate(season.get("sections") or [], start=1):
             if not isinstance(section, dict):
                 continue
+            source_section_id = str(section.get("id") or section_index).strip()
+            source_section_title = _strip_html(str(section.get("title") or "").strip())
+            source_section_thumbnail = _normalize_bilibili_thumbnail(
+                str(section.get("cover") or section.get("thumbnail") or "")
+            )
+            source_section_entries: list[PlaylistEntry] = []
             for episode in section.get("episodes") or []:
                 if not isinstance(episode, dict):
                     continue
@@ -619,36 +639,91 @@ class BilibiliResolver:
                 if not episode_bvid and not episode_aid:
                     continue
                 arc = episode.get("arc") if isinstance(episode.get("arc"), dict) else {}
-                page = episode.get("page") if isinstance(episode.get("page"), dict) else {}
-                page_no = int(page.get("page") or 0)
                 base_url = (
                     f"https://www.bilibili.com/video/{episode_bvid}"
                     if episode_bvid
                     else f"https://www.bilibili.com/video/av{episode_aid}"
                 )
-                entry_url = f"{base_url}?p={page_no}" if page_no > 1 else base_url
-                video_id = _bilibili_video_key(entry_url, bvid=episode_bvid, aid=episode_aid)
-                title = _strip_html(
+                album_title = _strip_html(
                     str(episode.get("title") or arc.get("title") or "").strip() or episode_bvid or episode_aid
                 )
-                entries.append(
-                    PlaylistEntry(
+                album_thumbnail = _normalize_bilibili_thumbnail(str(arc.get("pic") or ""))
+                raw_pages = episode.get("pages") if isinstance(episode.get("pages"), list) else []
+                pages = [page for page in raw_pages if isinstance(page, dict)]
+                if not pages:
+                    page = episode.get("page") if isinstance(episode.get("page"), dict) else {}
+                    pages = [page]
+                multi_page = len(pages) > 1
+                has_multi_page_album = has_multi_page_album or multi_page
+                album_position += 1
+                album_id = str(episode.get("id") or episode_bvid or episode_aid or album_position).strip()
+                album_entries: list[PlaylistEntry] = []
+                for page_index, page in enumerate(pages, start=1):
+                    page_no = int(page.get("page") or page_index)
+                    entry_url = f"{base_url}?p={page_no}" if multi_page or page_no > 1 else base_url
+                    video_id = _bilibili_video_key(entry_url, bvid=episode_bvid, aid=episode_aid)
+                    page_title = _strip_html(str(page.get("part") or "").strip())
+                    entry = PlaylistEntry(
                         playlist_id=playlist_id,
                         video_id=video_id,
-                        title=title,
+                        title=page_title if multi_page and page_title else album_title,
                         webpage_url=entry_url,
                         source_site="bilibili",
                         uploader=uploader,
-                        duration=int(arc.get("duration") or page.get("duration") or 0),
-                        thumbnail=_normalize_bilibili_thumbnail(str(arc.get("pic") or "")),
+                        duration=int(page.get("duration") or arc.get("duration") or 0),
+                        thumbnail=album_thumbnail,
                         position=len(entries) + 1,
                         availability="",
+                        section_id=source_section_id,
+                        section_title=source_section_title,
+                        section_position=section_index,
+                        section_thumbnail=source_section_thumbnail,
+                    )
+                    entries.append(entry)
+                    source_section_entries.append(entry)
+                    album_entries.append(entry)
+                if album_entries:
+                    album_sections.append(
+                        PlaylistSection(
+                            section_id=album_id,
+                            title=album_title,
+                            position=album_position,
+                            thumbnail=album_thumbnail,
+                            entries=album_entries,
+                        )
+                    )
+            if source_section_entries:
+                source_sections.append(
+                    PlaylistSection(
+                        section_id=source_section_id,
+                        title=source_section_title or f"专辑 {section_index}",
+                        position=section_index,
+                        thumbnail=source_section_thumbnail or source_section_entries[0].thumbnail,
+                        entries=source_section_entries,
                     )
                 )
-                if not current_video_id and _collection_base_key(video_id) == current_key:
-                    current_video_id = video_id
         if not entries:
             return None
+        if has_multi_page_album:
+            sections = album_sections
+            for album in sections:
+                for entry in album.entries:
+                    entry.section_id = album.section_id
+                    entry.section_title = album.title
+                    entry.section_position = album.position
+                    entry.section_thumbnail = album.thumbnail
+        else:
+            sections = source_sections
+            raw_sections = season.get("sections") or []
+            # 单个无标题 section 对用户没有额外信息，继续显示原来的扁平列表。
+            if len(sections) == 1 and len(raw_sections) == 1 and not str(raw_sections[0].get("title") or "").strip():
+                sections = []
+        current_entry = next((entry for entry in entries if entry.video_id == current_key), None)
+        if current_entry is None:
+            current_entry = next(
+                (entry for entry in entries if _collection_base_key(entry.video_id) == current_base_key),
+                entries[0],
+            )
         return PlaylistInfo(
             playlist_id=playlist_id,
             title=_strip_html(str(season.get("title") or "").strip()) or f"合集 {season_id}",
@@ -658,8 +733,10 @@ class BilibiliResolver:
             thumbnail=_normalize_bilibili_thumbnail(str(season.get("cover") or "")),
             entry_count=len(entries),
             source_type="collection",
-            current_video_id=current_video_id or entries[0].video_id,
+            current_video_id=current_entry.video_id,
+            current_section_id=current_entry.section_id,
             entries=entries,
+            sections=sections,
         )
 
     def _season_url_from_episode(self, url: str) -> str:
@@ -1123,14 +1200,15 @@ class BilibiliResolver:
     def _browser_cookie_header(self, url: str) -> str:
         tried: set[str] = set()
 
-        explicit = self.config.explicit_cookie_browser()
+        site = self.config.cookie_site_for_url(url)
+        explicit = self.config.explicit_cookie_browser_for_site(site)
         if explicit:
             tried.add(explicit)
             header = load_browser_cookie_header(explicit, url)
             if header:
                 return header
 
-        auto = self.config.auto_cookie_browser_for_site(self.config.cookie_site_for_url(url))
+        auto = self.config.auto_cookie_browser_for_site(site)
         if auto:
             tried.add(auto)
             header = load_browser_cookie_header(auto, url)

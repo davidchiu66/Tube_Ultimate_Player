@@ -1,6 +1,7 @@
 {
   "player": {
     "default_quality": "high",
+    "default_quality_by_site": {},
     "hardware_decode": "auto-safe",
     "volume": 80,
     "speed": 1.0,

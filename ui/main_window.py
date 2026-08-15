@@ -40,13 +40,17 @@ from resolver.models import (
     HomeVideo,
     PlaylistEntry,
     PlaylistInfo,
+    PlaylistSection,
+    PlaybackQualityHint,
+    PlaybackRequestContext,
     SavedPlaylist,
     VideoInfo,
     VideoQuality,
 )
-from resolver.quality_selector import select_quality_by_tier
+from resolver.quality_selector import select_quality_by_hint, select_quality_by_tier
 from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
+from services.network_quality_service import NetworkMeasurement, NetworkMeasurementCache, select_quality_for_bandwidth
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
 from services.runtime_install_service import NODE_TRUSTED_HOSTS, RuntimeInstallService
 from services.restart_service import RestartError, restart_application
@@ -76,6 +80,7 @@ from workers.search_worker import SearchWorker
 from workers.subtitle_worker import SubtitleLoadWorker
 from workers.update_check_worker import UpdateCheckWorker
 from workers.update_download_worker import UpdateDownloadWorker
+from workers.network_probe_worker import NetworkProbeWorker
 
 
 logger = logging.getLogger("tube_player.ui")
@@ -84,6 +89,8 @@ logger = logging.getLogger("tube_player.ui")
 SHUTDOWN_WAIT_MS = 3000
 # 首页结果在界面层的复用时长，与 SiteResolver 的首页缓存 TTL 保持一致。
 HOME_CACHE_TTL_SECONDS = 300.0
+_COOKIE_PROBE_STATE_LOCK = threading.Lock()
+_COOKIE_PROBE_INFLIGHT = False
 
 
 def _skip_after_shutdown(method):
@@ -191,6 +198,13 @@ class MainWindow(QMainWindow):
         # "进入播放默认全屏"只在一次播放动作的开头生效一次：用户之后手动退出全屏，
         # 不能因为播放列表自动连播、切清晰度等内部重载又被拉回全屏。
         self._pending_playback_fullscreen = False
+        self._playback_request_id = 0
+        self._pending_quality_hint: PlaybackQualityHint | None = None
+        self._pending_quality_reason = "direct"
+        self._playback_request_context: PlaybackRequestContext | None = None
+        self._pending_smart_video: VideoInfo | None = None
+        self._pending_smart_kbps: float | None = None
+        self._network_measurements = NetworkMeasurementCache()
         self._creator_playlist_generation = 0
         self._creator_playlist_workers: dict[tuple[int, str], CreatorVideosWorker] = {}
         # 左侧「合集列表」：与右侧播放列表各自独立一套状态，互不覆盖。
@@ -237,8 +251,8 @@ class MainWindow(QMainWindow):
         # 记录上一次浏览动作是「首页」还是「搜索」。切换站点时只据此取向：
         # 搜索框里的残留文本不该把首页浏览劫持成又一次搜索。
         self._browse_mode = "home"
-        # 首页/搜索使用的站点由工具栏单选框决定，默认 BiliBili，与「默认首页」配置项无关。
-        self._browse_source = "bilibili"
+        # 工具栏首次站点跟随设置中的默认首页，之后切换只影响本次会话。
+        self._browse_source = self.config.default_home_source()
         # 每发起一轮首页/搜索加载就自增，用来丢弃切换站点后才回来的旧结果。
         self._browse_generation = 0
         self._subtitle_request_id = 0
@@ -611,6 +625,7 @@ class MainWindow(QMainWindow):
         self._clear_playlist_context()
         # 单条播放不属于任何队列，连播交给探测结果决定。
         self._active_queue = ""
+        request_id = self._begin_playback_request(target, reason="direct")
         self.current_local_media_path = ""
         logger.info("play url requested: %s", target)
         self._arm_playback_window_mode()
@@ -618,14 +633,39 @@ class MainWindow(QMainWindow):
         self.player_page.set_loading(True, "正在解析视频地址，请稍候...")
 
         worker = ResolverWorker(target, self.resolver)
-        worker.signals.success.connect(self._resolved)
-        worker.signals.error.connect(self._resolve_failed)
-        worker.signals.finished.connect(self._url_resolve_finished)
+        worker.signals.success.connect(lambda video: self._resolved_for_request(request_id, video))
+        worker.signals.error.connect(lambda message: self._resolve_failed_for_request(request_id, message))
+        worker.signals.finished.connect(lambda: self._url_resolve_finished(request_id))
         self._start_worker(worker)
 
     @_skip_after_shutdown
-    def _url_resolve_finished(self) -> None:
-        self.player_page.set_loading(False)
+    def _url_resolve_finished(self, request_id: int | None = None) -> None:
+        if request_id is not None and request_id != self._playback_request_id:
+            return
+        if self._pending_smart_video is None:
+            self.player_page.set_loading(False)
+
+    def _begin_playback_request(self, target_url: str, *, reason: str, inherit: bool = False) -> int:
+        self._playback_request_id += 1
+        self._pending_quality_reason = reason
+        self._pending_quality_hint = self._quality_hint() if inherit else None
+        self._playback_request_context = PlaybackRequestContext(
+            self._playback_request_id,
+            str(target_url or ""),
+            reason,
+            self._pending_quality_hint,
+        )
+        self._pending_smart_video = None
+        self._pending_smart_kbps = None
+        return self._playback_request_id
+
+    def _quality_hint(self) -> PlaybackQualityHint | None:
+        if not self.current_video or not self.current_quality_label:
+            return None
+        quality = self.current_video.qualities.get(self.current_quality_label)
+        if quality is None:
+            return None
+        return PlaybackQualityHint(quality.label, int(quality.height or 0), int(quality.fps or 0))
 
     def _load_playlist(self, url: str, auto_play_current: bool = False) -> None:
         self._invalidate_creator_playlist_request()
@@ -985,6 +1025,11 @@ class MainWindow(QMainWindow):
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         entry = playlist.entries[index]
+        inherit = (
+            self._active_queue == "collection"
+            and self.current_collection is not None
+            and self.current_collection.playlist_id == playlist.playlist_id
+        )
         logger.info("collection play requested collection=%s index=%s title=%s", playlist.title, index, entry.title)
         if arm_window_mode:
             self._arm_playback_window_mode()
@@ -992,14 +1037,19 @@ class MainWindow(QMainWindow):
         self.current_collection = playlist
         self.current_collection_index = index
         self._active_queue = "collection"
+        request_id = self._begin_playback_request(
+            entry.webpage_url,
+            reason="queue_manual" if arm_window_mode else "autoplay",
+            inherit=inherit,
+        )
         self.player_page.set_collection_current_index(index)
         self.stack.setCurrentWidget(self.player_page)
         self.player_page.set_loading(True, f"正在解析合集第 {index + 1} 条视频，请稍候...")
 
         worker = ResolverWorker(entry.webpage_url, self.resolver)
-        worker.signals.success.connect(self._resolved)
-        worker.signals.error.connect(self._resolve_failed)
-        worker.signals.finished.connect(self._url_resolve_finished)
+        worker.signals.success.connect(lambda video: self._resolved_for_request(request_id, video))
+        worker.signals.error.connect(lambda message: self._resolve_failed_for_request(request_id, message))
+        worker.signals.finished.connect(lambda: self._url_resolve_finished(request_id))
         self._start_worker(worker)
 
     def _save_active_collection(self) -> None:
@@ -1152,6 +1202,11 @@ class MainWindow(QMainWindow):
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         entry = playlist.entries[index]
+        inherit = (
+            self._active_queue == "playlist"
+            and self.current_playlist is not None
+            and self.current_playlist.playlist_id == playlist.playlist_id
+        )
         logger.info("playlist play requested playlist=%s index=%s title=%s", playlist.title, index, entry.title)
         if arm_window_mode:
             self._arm_playback_window_mode()
@@ -1159,6 +1214,11 @@ class MainWindow(QMainWindow):
         self.current_playlist = playlist
         self.current_playlist_index = index
         self._active_queue = "playlist"
+        request_id = self._begin_playback_request(
+            entry.webpage_url,
+            reason="queue_manual" if arm_window_mode else "autoplay",
+            inherit=inherit,
+        )
         page = self._created_page("playlist")
         if page is not None:
             page.set_current_index(index)
@@ -1167,9 +1227,9 @@ class MainWindow(QMainWindow):
         self.player_page.set_loading(True, f"正在解析播放列表第 {index + 1} 条视频，请稍候...")
 
         worker = ResolverWorker(entry.webpage_url, self.resolver)
-        worker.signals.success.connect(self._resolved)
-        worker.signals.error.connect(self._resolve_failed)
-        worker.signals.finished.connect(self._url_resolve_finished)
+        worker.signals.success.connect(lambda video: self._resolved_for_request(request_id, video))
+        worker.signals.error.connect(lambda message: self._resolve_failed_for_request(request_id, message))
+        worker.signals.finished.connect(lambda: self._url_resolve_finished(request_id))
         self._start_worker(worker)
 
     def _download_playlist_entries(self, entries: list[PlaylistEntry]) -> None:
@@ -1287,6 +1347,22 @@ class MainWindow(QMainWindow):
         self.player_page.set_collection_saved_items(collections, self.current_collection_key)
 
     def _saved_to_playlist(self, saved: SavedPlaylist) -> PlaylistInfo:
+        sections_by_id: dict[str, PlaylistSection] = {}
+        for entry in saved.entries:
+            section_id = str(getattr(entry, "section_id", "") or "")
+            if not section_id:
+                continue
+            section = sections_by_id.get(section_id)
+            if section is None:
+                section = PlaylistSection(
+                    section_id=section_id,
+                    title=str(getattr(entry, "section_title", "") or ""),
+                    position=int(getattr(entry, "section_position", 0) or 0),
+                    thumbnail=str(getattr(entry, "section_thumbnail", "") or entry.thumbnail),
+                )
+                sections_by_id[section_id] = section
+            section.entries.append(entry)
+        sections = sorted(sections_by_id.values(), key=lambda section: section.position)
         return PlaylistInfo(
             playlist_id=saved.playlist_key,
             title=saved.name,
@@ -1297,6 +1373,7 @@ class MainWindow(QMainWindow):
             entry_count=len(saved.entries),
             source_type=saved.source_type,
             entries=list(saved.entries),
+            sections=sections if len(sections) > 1 or any(section.title for section in sections) else [],
         )
 
     @staticmethod
@@ -1309,6 +1386,13 @@ class MainWindow(QMainWindow):
         return -1
 
     @_skip_after_shutdown
+    def _resolved_for_request(self, request_id: int, video: VideoInfo) -> None:
+        if request_id != self._playback_request_id:
+            logger.info("ignoring stale resolve result request=%s current=%s", request_id, self._playback_request_id)
+            return
+        self._resolved(video)
+
+    @_skip_after_shutdown
     def _resolved(self, video: VideoInfo) -> None:
         self.current_video = video
         self.current_local_media_path = ""
@@ -1319,6 +1403,8 @@ class MainWindow(QMainWindow):
         self._pending_recent_url = ""
         quality = self._select_default_quality(video)
         if quality is None:
+            if self._pending_smart_video is video:
+                return
             logger.error(
                 "video resolved without playable quality id=%s title=%s",
                 video.video_id,
@@ -1340,6 +1426,8 @@ class MainWindow(QMainWindow):
             )
             return
         self.current_quality_label = quality.label
+        self._pending_quality_hint = None
+        self._pending_quality_reason = "direct"
         self.current_audio_track_id = self._select_default_audio_track(video)
         logger.info(
             "video resolved id=%s title=%s selected_quality=%s qualities=%s subtitles=%s",
@@ -1406,11 +1494,97 @@ class MainWindow(QMainWindow):
             f"{message}",
         )
 
+    @_skip_after_shutdown
+    def _resolve_failed_for_request(self, request_id: int, message: str) -> None:
+        if request_id != self._playback_request_id:
+            logger.info("ignoring stale resolve error request=%s current=%s", request_id, self._playback_request_id)
+            return
+        self._resolve_failed(message)
+
     def _select_default_quality(self, video: VideoInfo) -> VideoQuality | None:
-        override = self.config.default_quality_label_override()
+        inherited = select_quality_by_hint(video.qualities, getattr(self, "_pending_quality_hint", None))
+        if inherited is not None:
+            return inherited
+        site = str(video.source_site or "youtube").lower()
+        resolver = getattr(self, "resolver", None)
+        if resolver is not None:
+            site = resolver.normalize_source(site) or self.config.cookie_site_for_url(video.webpage_url)
+        try:
+            override = self.config.default_quality_label_override(site)
+        except TypeError:
+            override = self.config.default_quality_label_override()
         if override and override in video.qualities:
             return video.qualities[override]
-        return select_quality_by_tier(video.qualities, self.config.default_quality_tier())
+        mode_getter = getattr(self.config, "default_quality_mode", None)
+        if mode_getter is not None:
+            mode = mode_getter(site)
+        else:
+            try:
+                mode = self.config.default_quality_tier(site)
+            except TypeError:
+                mode = self.config.default_quality_tier()
+        if mode != "smart":
+            return select_quality_by_tier(video.qualities, mode)
+        if self._pending_smart_kbps is not None:
+            kbps = self._pending_smart_kbps
+            self._pending_smart_kbps = None
+            if kbps < 0:
+                return select_quality_by_tier(video.qualities, "medium")
+            return select_quality_for_bandwidth(video.qualities, kbps)
+        candidate = max(
+            video.qualities.values(),
+            key=lambda quality: (int(quality.height or 0), int(quality.fps or 0), float(quality.tbr or 0)),
+            default=None,
+        )
+        if candidate is None:
+            return None
+        _proxy_label, proxy = self.config.effective_proxy()
+        cached = self._network_measurements.get(site, candidate.video_url, proxy)
+        if cached is not None:
+            return select_quality_for_bandwidth(video.qualities, cached.kbps)
+        self._start_network_probe(video, candidate.video_url, site, proxy)
+        return None
+
+    def _start_network_probe(self, video: VideoInfo, url: str, site: str, proxy: str) -> None:
+        request_id = self._playback_request_id
+        self._pending_smart_video = video
+        self.player_page.set_loading(True, "正在评估网络并选择画质...")
+        worker = NetworkProbeWorker(url, video.http_headers, proxy)
+        worker.signals.success.connect(
+            lambda kbps: self._network_probe_succeeded(request_id, video, url, site, proxy, kbps)
+        )
+        worker.signals.error.connect(lambda message: self._network_probe_failed(request_id, video, message))
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _network_probe_succeeded(
+        self,
+        request_id: int,
+        video: VideoInfo,
+        url: str,
+        site: str,
+        proxy: str,
+        kbps: float,
+    ) -> None:
+        if request_id != self._playback_request_id or self._pending_smart_video is not video:
+            return
+        self._network_measurements.put(
+            NetworkMeasurement(site, urlparse(url).hostname or "", proxy, float(kbps), time.monotonic()),
+            url,
+        )
+        self._pending_smart_video = None
+        self._pending_smart_kbps = float(kbps)
+        logger.info("network quality measured site=%s host=%s kbps=%.0f", site, urlparse(url).hostname or "", kbps)
+        self._resolved(video)
+
+    @_skip_after_shutdown
+    def _network_probe_failed(self, request_id: int, video: VideoInfo, message: str) -> None:
+        if request_id != self._playback_request_id or self._pending_smart_video is not video:
+            return
+        logger.warning("network quality probe failed site=%s: %s", video.source_site, message)
+        self._pending_smart_video = None
+        self._pending_smart_kbps = -1.0
+        self._resolved(video)
 
     def _select_default_audio_track(self, video: VideoInfo) -> str:
         """按 D 裁定挑默认音轨，返回 track_id；没有可选音轨时返回空串。
@@ -1812,6 +1986,13 @@ class MainWindow(QMainWindow):
         if self.current_collection is None or not self.current_collection_auto_play:
             return False
         next_index = self.current_collection_index + 1
+        if 0 <= self.current_collection_index < len(self.current_collection.entries):
+            current_entry = self.current_collection.entries[self.current_collection_index]
+            section_id = str(getattr(current_entry, "section_id", "") or "")
+            if section_id and next_index < len(self.current_collection.entries):
+                next_section = str(getattr(self.current_collection.entries[next_index], "section_id", "") or "")
+                if next_section != section_id:
+                    return False
         if next_index >= len(self.current_collection.entries):
             return False
         logger.info("collection autoplay next index=%s", next_index)
@@ -2799,11 +2980,24 @@ class MainWindow(QMainWindow):
         """启动后异步探测各站点的登录 Cookie 浏览器（仅「自动检测」模式）。"""
         if not self.config.cookie_auto_probe_enabled():
             return
+        global _COOKIE_PROBE_INFLIGHT
+        with _COOKIE_PROBE_STATE_LOCK:
+            if _COOKIE_PROBE_INFLIGHT:
+                logger.debug("cookie probe already running")
+                return
+            _COOKIE_PROBE_INFLIGHT = True
         worker = CookieProbeWorker()
         worker.signals.success.connect(self._cookie_probe_finished)
         worker.signals.error.connect(self._cookie_probe_failed)
+        worker.signals.finished.connect(self._cookie_probe_worker_finished)
         # 优先级设低：探测只影响后续请求的 Cookie 选择，不该和首页加载抢线程。
         self._start_worker(worker, -1)
+
+    @staticmethod
+    def _cookie_probe_worker_finished() -> None:
+        global _COOKIE_PROBE_INFLIGHT
+        with _COOKIE_PROBE_STATE_LOCK:
+            _COOKIE_PROBE_INFLIGHT = False
 
     @Slot(object)
     @_skip_after_shutdown

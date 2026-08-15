@@ -37,7 +37,9 @@ PROXY_MODE_LABELS = {
 }
 
 QUALITY_TIERS = ("high", "medium", "low")
+QUALITY_MODES = ("smart", *QUALITY_TIERS)
 QUALITY_TIER_LABELS = {
+    "smart": "智能选择",
     "high": "高（最高分辨率）",
     "medium": "中（中间分辨率）",
     "low": "低（最低分辨率）",
@@ -283,16 +285,35 @@ class ConfigService:
     def default_home_label(self) -> str:
         return "Bilibili" if self.default_home_source() == "bilibili" else "YouTube"
 
-    def default_quality_tier(self) -> str:
-        """返回 high/medium/low；旧值和非法值按 high 处理。"""
-        value = str(self.get("player.default_quality", "high") or "").strip().lower()
-        return value if value in QUALITY_TIERS else "high"
+    def default_quality_mode(self, site: str = "") -> str:
+        """返回站点的 smart/high/medium/low；旧值和非法值按 high 处理。"""
+        normalized_site = self._normalize_cookie_site(site)
+        value = str(
+            self.get(
+                f"player.default_quality_by_site.{normalized_site}",
+                self.get("player.default_quality", "high"),
+            )
+            or ""
+        ).strip().lower()
+        return value if value in QUALITY_MODES else "high"
 
-    def default_quality_label_override(self) -> str:
-        """返回旧配置里的精确清晰度标签；档位、Auto 和空值返回空串。"""
-        value = str(self.get("player.default_quality", "") or "").strip()
+    def default_quality_tier(self, site: str = "") -> str:
+        """兼容旧调用；smart 不属于固定档位，回退 medium。"""
+        mode = self.default_quality_mode(site)
+        return mode if mode in QUALITY_TIERS else "medium"
+
+    def default_quality_label_override(self, site: str = "") -> str:
+        """返回站点旧配置里的精确清晰度标签；模式值、Auto 和空值返回空串。"""
+        normalized_site = self._normalize_cookie_site(site)
+        value = str(
+            self.get(
+                f"player.default_quality_by_site.{normalized_site}",
+                self.get("player.default_quality", ""),
+            )
+            or ""
+        ).strip()
         normalized = value.lower()
-        if not value or normalized == "auto" or normalized in QUALITY_TIERS:
+        if not value or normalized == "auto" or normalized in QUALITY_MODES:
             return ""
         return value
 
@@ -311,31 +332,55 @@ class ConfigService:
     def shortcut_sequences(self) -> dict[str, str]:
         return {action: self.shortcut_sequence(action) for action in DEFAULT_SHORTCUTS}
 
-    def cookie_browser(self) -> str:
-        browser = str(self.get("youtube.cookie_browser", "") or "").strip()
-        profile = str(self.get("youtube.cookie_browser_profile", "") or "").strip()
+    def configured_cookie_browser_for_site(self, site: str) -> str:
+        normalized_site = self._normalize_cookie_site(site)
+        configured = self.get(f"cookies.{normalized_site}.browser", None)
+        if configured is None and normalized_site == "youtube":
+            configured = self.get("youtube.cookie_browser", "auto")
+        if configured is None:
+            configured = "auto"
+        return str(configured or "").strip()
+
+    def cookie_browser_profile_for_site(self, site: str) -> str:
+        normalized_site = self._normalize_cookie_site(site)
+        configured = self.get(f"cookies.{normalized_site}.browser_profile", None)
+        if configured is None and normalized_site == "youtube":
+            configured = self.get("youtube.cookie_browser_profile", "")
+        return str(configured or "").strip()
+
+    def cookie_browser_for_site(self, site: str) -> str:
+        browser = self.configured_cookie_browser_for_site(site)
+        profile = self.cookie_browser_profile_for_site(site)
         if not browser:
             return ""
         if browser == "auto":
-            return detect_browser_cookie_source()
+            return self.auto_cookie_browser_for_site(site)
         if ":" in browser:
             return browser
         return f"{browser}:{profile}" if profile else browser
 
-    def explicit_cookie_browser(self) -> str:
-        browser = str(self.get("youtube.cookie_browser", "") or "").strip()
-        profile = str(self.get("youtube.cookie_browser_profile", "") or "").strip()
+    def cookie_browser(self) -> str:
+        """兼容旧调用，保留历史的 YouTube 语义。"""
+        return self.cookie_browser_for_site("youtube")
+
+    def explicit_cookie_browser_for_site(self, site: str) -> str:
+        browser = self.configured_cookie_browser_for_site(site)
+        profile = self.cookie_browser_profile_for_site(site)
         if not browser or browser == "auto":
             return ""
         if ":" in browser:
             return browser
         return f"{browser}:{profile}" if profile else browser
 
+    def explicit_cookie_browser(self) -> str:
+        """兼容旧调用，保留历史的 YouTube 语义。"""
+        return self.explicit_cookie_browser_for_site("youtube")
+
     def auto_cookie_browser(self) -> str:
-        browser = str(self.get("youtube.cookie_browser", "") or "").strip()
-        if browser != "auto":
+        site = "youtube"
+        if self.configured_cookie_browser_for_site(site) != "auto":
             return ""
-        return detect_browser_cookie_source()
+        return self.auto_cookie_browser_for_site(site)
 
     def auto_cookie_browser_for_site(self, site: str) -> str:
         """自动模式下该站点应使用的浏览器 Cookie 源。
@@ -343,10 +388,9 @@ class ConfigService:
         优先用启动探测出的「登录过该站点」的浏览器；没有探测结果时回退到
         探测到的第一个浏览器（旧行为），保证功能不因探测失败而完全不可用。
         """
-        browser = str(self.get("youtube.cookie_browser", "") or "").strip()
-        if browser != "auto":
-            return ""
         normalized_site = self._normalize_cookie_site(site)
+        if self.configured_cookie_browser_for_site(normalized_site) != "auto":
+            return ""
         probed = str(self.get(f"cookies.{normalized_site}.auto_browser", "") or "").strip()
         if probed:
             return probed
@@ -358,8 +402,11 @@ class ConfigService:
             spec = str(mapping.get(site, "") or "").strip()
             self.set(f"cookies.{site}.auto_browser", spec)
 
-    def cookie_auto_probe_enabled(self) -> bool:
-        return str(self.get("youtube.cookie_browser", "") or "").strip() == "auto"
+    def cookie_auto_probe_enabled(self, site: str = "") -> bool:
+        if not str(site or "").strip():
+            return any(self.configured_cookie_browser_for_site(item) == "auto" for item in ("bilibili", "youtube"))
+        normalized_site = self._normalize_cookie_site(site)
+        return self.configured_cookie_browser_for_site(normalized_site) == "auto"
 
     def js_runtime(self) -> str:
         runtime = str(self.get("youtube.js_runtime", "auto") or "").strip()

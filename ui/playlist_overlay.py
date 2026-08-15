@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
+from resolver.models import PlaylistEntry, PlaylistInfo, PlaylistSection, SavedPlaylist
 from ui.text_elision import elide_multiline_text, format_seconds, format_upload_date
 from ui.thumbnail_cache import ThumbnailCache
 from ui.widgets import NoScrollComboBox
@@ -180,6 +180,9 @@ class PlaylistOverlay(QFrame):
         # 左右两侧面板互斥显示：两份 PANEL_WIDTH 要 ≥884px，窄窗口下必然遮挡视频。
         self._sibling_overlay: PlaylistOverlay | None = None
         self._context_available = False
+        self._section_mode = False
+        self._active_section_id = ""
+        self._display_indices: list[int] = []
         self._network = QNetworkAccessManager(self)
         self._thumbnail_cache = ThumbnailCache(self)
 
@@ -202,6 +205,9 @@ class PlaylistOverlay(QFrame):
         self.save_button = QPushButton("保存")
         self.delete_button = QPushButton("删除")
         self.auto_play_checkbox = QCheckBox("自动连播")
+        self.back_button = QPushButton("返回合集")
+        self.back_button.clicked.connect(self._show_sections)
+        self.back_button.hide()
 
         combo_row = QHBoxLayout()
         combo_row.setSpacing(6)
@@ -236,6 +242,7 @@ class PlaylistOverlay(QFrame):
         layout.setSpacing(8)
         layout.addWidget(self.title_label)
         layout.addWidget(self.meta_label)
+        layout.addWidget(self.back_button)
         layout.addLayout(combo_row)
         layout.addWidget(self.auto_play_checkbox)
         layout.addWidget(self.list_widget, 1)
@@ -267,6 +274,11 @@ class PlaylistOverlay(QFrame):
 
         signature = self._signature_for(playlist)
         if signature is None:
+            self._section_mode = False
+            self._active_section_id = ""
+            self._display_indices = []
+            self.back_button.hide()
+            self.play_selected_button.setText("播放选中")
             self._playlist_signature = None
             self._current_index = current_index
             self._active_row = -1
@@ -280,7 +292,10 @@ class PlaylistOverlay(QFrame):
             return
 
         self.title_label.setText(playlist.title)
-        self.meta_label.setText(f"{playlist.uploader or 'Unknown'} - {len(playlist.entries)} 条")
+        if playlist.sections:
+            self.meta_label.setText(f"{playlist.uploader or 'Unknown'} - {len(playlist.sections)} 个专辑")
+        else:
+            self.meta_label.setText(f"{playlist.uploader or 'Unknown'} - {len(playlist.entries)} 条")
 
         if signature == self._playlist_signature:
             self.set_current_index(current_index)
@@ -288,18 +303,44 @@ class PlaylistOverlay(QFrame):
             return
 
         self._playlist_signature = signature
+        self._section_mode = False
+        self._active_section_id = ""
+        self._display_indices = []
+        self.back_button.hide()
         self._selected_rows = set()
         # 列表整体重建后旧的行号已失效，活动行必须一并复位。
         self._active_row = -1
         self.list_widget.blockSignals(True)
         try:
             self.list_widget.clear()
-            for index, entry in enumerate(playlist.entries):
+            if playlist.sections:
+                self._section_mode = False
+                self.play_selected_button.setText("打开专辑")
+                rows = [
+                    PlaylistEntry(
+                        playlist_id=playlist.playlist_id,
+                        video_id=f"__section__:{section.section_id}",
+                        title=section.title,
+                        webpage_url="",
+                        source_site=playlist.source_site,
+                        uploader=f"专辑 · {len(section.entries)} 集",
+                        thumbnail=section.thumbnail,
+                        position=section.position,
+                    )
+                    for section in playlist.sections
+                ]
+                self._display_indices = list(range(len(rows)))
+            else:
+                self.play_selected_button.setText("播放选中")
+                rows = list(playlist.entries)
+                self._display_indices = list(range(len(rows)))
+            for row_index, entry in enumerate(rows):
                 item = QListWidgetItem()
-                item.setData(Qt.ItemDataRole.UserRole, index)
+                item.setData(Qt.ItemDataRole.UserRole, row_index)
+                item.setData(Qt.ItemDataRole.UserRole + 1, bool(playlist.sections))
                 item.setSizeHint(self._item_size_hint())
                 self.list_widget.addItem(item)
-                widget = PlaylistItemWidget(entry, index, self._network, self._thumbnail_cache, self.list_widget)
+                widget = PlaylistItemWidget(entry, row_index, self._network, self._thumbnail_cache, self.list_widget)
                 self.list_widget.setItemWidget(item, widget)
         finally:
             self.list_widget.blockSignals(False)
@@ -312,9 +353,15 @@ class PlaylistOverlay(QFrame):
     def _signature_for(playlist: PlaylistInfo | None) -> tuple | None:
         if playlist is None or not playlist.entries:
             return None
-        return tuple(
-            (entry.video_id, entry.title, entry.thumbnail, entry.duration, entry.uploader)
-            for entry in playlist.entries
+        return (
+            tuple(
+                (entry.video_id, entry.title, entry.thumbnail, entry.duration, entry.uploader)
+                for entry in playlist.entries
+            ),
+            tuple(
+                (section.section_id, section.title, section.thumbnail, len(section.entries))
+                for section in playlist.sections
+            ),
         )
 
     def set_saved_playlists(self, playlists: list[SavedPlaylist], current_key: str = "") -> None:
@@ -342,17 +389,35 @@ class PlaylistOverlay(QFrame):
 
     def set_current_index(self, index: int) -> None:
         self._current_index = index
+        display_index = index
+        if self._playlist and self._playlist.sections and not self._section_mode:
+            if 0 <= index < len(self._playlist.entries):
+                section_id = self._playlist.entries[index].section_id
+                section_index = next(
+                    (row for row, section in enumerate(self._playlist.sections) if section.section_id == section_id),
+                    -1,
+                )
+                if section_index >= 0:
+                    self._open_section(section_index)
+                    self.set_current_index(index)
+                    return
+            display_index = -1
+        elif self._section_mode:
+            try:
+                display_index = self._display_indices.index(index)
+            except ValueError:
+                display_index = -1
         # 只动"上一个活动行"和"新活动行"两行，避免整表 unpolish/polish。
-        if self._active_row != index:
+        if self._active_row != display_index:
             previous = self._row_widget(self._active_row)
             if previous is not None:
                 previous.set_active(False)
-            self._active_row = index
-        current = self._row_widget(index)
+            self._active_row = display_index
+        current = self._row_widget(display_index)
         if current is not None:
             current.set_active(True)
-        if 0 <= index < self.list_widget.count():
-            item = self.list_widget.item(index)
+        if 0 <= display_index < self.list_widget.count():
+            item = self.list_widget.item(display_index)
             item.setSelected(True)
             self.list_widget.scrollToItem(item)
         self._sync_selection_visuals()
@@ -484,12 +549,88 @@ class PlaylistOverlay(QFrame):
         if not items:
             QMessageBox.information(self, "提示", "请先选择一个视频。")
             return
-        self.entry_activated.emit(int(items[0].data(Qt.ItemDataRole.UserRole)))
+        item = items[0]
+        if bool(item.data(Qt.ItemDataRole.UserRole + 1)):
+            self._open_section(int(item.data(Qt.ItemDataRole.UserRole)))
+            return
+        self.entry_activated.emit(self._display_indices[int(item.data(Qt.ItemDataRole.UserRole))])
         self.hide_overlay()
 
     def _double_clicked(self, item: QListWidgetItem) -> None:
-        self.entry_activated.emit(int(item.data(Qt.ItemDataRole.UserRole)))
+        if bool(item.data(Qt.ItemDataRole.UserRole + 1)):
+            self._open_section(int(item.data(Qt.ItemDataRole.UserRole)))
+            return
+        self.entry_activated.emit(self._display_indices[int(item.data(Qt.ItemDataRole.UserRole))])
         self.hide_overlay()
+
+    def _open_section(self, index: int) -> None:
+        playlist = self._playlist
+        if playlist is None or not (0 <= index < len(playlist.sections)):
+            return
+        section = playlist.sections[index]
+        self._section_mode = True
+        self._active_section_id = section.section_id
+        self.back_button.show()
+        self.play_selected_button.setText("播放选中")
+        self.title_label.setText(section.title)
+        self.meta_label.setText(f"{len(section.entries)} 集")
+        self._render_entries(section.entries)
+
+    def _show_sections(self) -> None:
+        playlist = self._playlist
+        if playlist is None or not playlist.sections:
+            return
+        self._section_mode = False
+        self._active_section_id = ""
+        self.back_button.hide()
+        self.play_selected_button.setText("打开专辑")
+        self.title_label.setText(playlist.title)
+        self.meta_label.setText(
+            f"{playlist.uploader or 'Unknown'} - {len(playlist.sections)} 个专辑"
+        )
+        self._render_entries(
+            [
+                PlaylistEntry(
+                    playlist_id=playlist.playlist_id,
+                    video_id=f"__section__:{section.section_id}",
+                    title=section.title,
+                    webpage_url="",
+                    source_site=playlist.source_site,
+                    uploader=f"专辑 · {len(section.entries)} 集",
+                    thumbnail=section.thumbnail,
+                    position=section.position,
+                )
+                for section in playlist.sections
+            ],
+            section_rows=True,
+        )
+
+    def _render_entries(self, entries: list[PlaylistEntry], *, section_rows: bool = False) -> None:
+        playlist = self._playlist
+        if playlist is None:
+            return
+        self._display_indices = []
+        for entry in entries:
+            try:
+                self._display_indices.append(next(i for i, item in enumerate(playlist.entries) if item is entry or item.video_id == entry.video_id))
+            except StopIteration:
+                self._display_indices.append(-1)
+        self._selected_rows = set()
+        self._active_row = -1
+        self.list_widget.blockSignals(True)
+        try:
+            self.list_widget.clear()
+            for row_index, entry in enumerate(entries):
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, row_index)
+                item.setData(Qt.ItemDataRole.UserRole + 1, section_rows)
+                item.setSizeHint(self._item_size_hint())
+                self.list_widget.addItem(item)
+                self.list_widget.setItemWidget(item, PlaylistItemWidget(entry, row_index, self._network, self._thumbnail_cache, self.list_widget))
+        finally:
+            self.list_widget.blockSignals(False)
+        self._update_button_state()
+        self._schedule_visible_thumbnail_load()
 
     def _download_selected(self) -> None:
         entries = self._selected_entries()
@@ -506,7 +647,8 @@ class PlaylistOverlay(QFrame):
             return []
         result: list[PlaylistEntry] = []
         for item in self.list_widget.selectedItems():
-            index = int(item.data(Qt.ItemDataRole.UserRole))
+            row = int(item.data(Qt.ItemDataRole.UserRole))
+            index = self._display_indices[row] if 0 <= row < len(self._display_indices) else -1
             if 0 <= index < len(playlist.entries):
                 result.append(playlist.entries[index])
         return result
@@ -536,8 +678,12 @@ class PlaylistOverlay(QFrame):
         has_playlist = self.has_playlist()
         has_available = self.has_available_content()
         has_selection = bool(self.list_widget.selectedItems())
+        selecting_section = bool(
+            has_selection
+            and self.list_widget.selectedItems()[0].data(Qt.ItemDataRole.UserRole + 1)
+        )
         self.play_selected_button.setEnabled(has_selection)
-        self.download_selected_button.setEnabled(has_selection)
+        self.download_selected_button.setEnabled(has_selection and not selecting_section)
         self.download_all_button.setEnabled(has_playlist)
         self.cancel_button.setEnabled(has_available or self._open)
         self.save_button.setEnabled(has_playlist)
@@ -568,5 +714,3 @@ class PlaylistOverlay(QFrame):
             if widget is not None:
                 widget.set_selected(row in current)
         self._selected_rows = current
-
-

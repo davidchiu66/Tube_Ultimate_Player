@@ -121,7 +121,7 @@ class DefaultQualitySettingsTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_combo_lists_three_tiers_and_persists_selection(self) -> None:
+    def test_combo_lists_smart_and_three_tiers_and_persists_site_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             defaults = json.loads(Path("config/default_config.json").read_text(encoding="utf-8"))
@@ -142,15 +142,17 @@ class DefaultQualitySettingsTests(unittest.TestCase):
                 page.default_quality_combo.itemData(index)
                 for index in range(page.default_quality_combo.count())
             ]
-            self.assertEqual(values, ["high", "medium", "low"])
+            self.assertEqual(values, ["smart", "high", "medium", "low"])
             self.assertEqual(page.default_quality_combo.currentData(), "high")
 
             page.default_quality_combo.setCurrentIndex(page.default_quality_combo.findData("low"))
             page.save()
 
             self.assertEqual(config.get("player.default_quality"), "low")
+            self.assertEqual(config.get("player.default_quality_by_site.bilibili"), "low")
             persisted = json.loads((root / "user.json").read_text(encoding="utf-8"))
             self.assertEqual(persisted["player"]["default_quality"], "low")
+            self.assertEqual(persisted["player"]["default_quality_by_site"]["bilibili"], "low")
 
     def test_unrelated_save_preserves_legacy_exact_quality_label(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

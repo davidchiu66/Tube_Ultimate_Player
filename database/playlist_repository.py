@@ -51,7 +51,8 @@ class PlaylistRepository:
 
             entry_rows = conn.execute(
                 """
-                SELECT playlist_id, video_id, title, webpage_url, uploader, duration, thumbnail, position, availability, upload_date
+                SELECT playlist_id, video_id, title, webpage_url, uploader, duration, thumbnail, position,
+                       availability, upload_date, section_id, section_title, section_position, section_thumbnail
                 FROM playlist_item
                 WHERE playlist_key = ?
                 ORDER BY position ASC, id ASC
@@ -122,8 +123,9 @@ class PlaylistRepository:
                 """
                 INSERT INTO playlist_item (
                     playlist_key, playlist_id, video_id, title, webpage_url, uploader, duration,
-                    thumbnail, position, availability, upload_date, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    thumbnail, position, availability, upload_date, section_id, section_title,
+                    section_position, section_thumbnail, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -138,6 +140,10 @@ class PlaylistRepository:
                         int(entry.position),
                         entry.availability,
                         entry.upload_date,
+                        entry.section_id,
+                        entry.section_title,
+                        int(entry.section_position or 0),
+                        entry.section_thumbnail,
                         now,
                     )
                     for entry in playlist_entries
@@ -184,6 +190,10 @@ class PlaylistRepository:
             position=int(entry.position or 0),
             availability=str(entry.availability or ""),
             upload_date=str(entry.upload_date or ""),
+            section_id=str(entry.section_id or ""),
+            section_title=str(entry.section_title or ""),
+            section_position=int(entry.section_position or 0),
+            section_thumbnail=str(entry.section_thumbnail or ""),
         )
 
     @staticmethod
@@ -200,6 +210,10 @@ class PlaylistRepository:
             position=int(row["position"] or 0),
             availability=str(row["availability"] or ""),
             upload_date=str(_row_value(row, "upload_date") or ""),
+            section_id=str(_row_value(row, "section_id") or ""),
+            section_title=str(_row_value(row, "section_title") or ""),
+            section_position=int(_row_value(row, "section_position") or 0),
+            section_thumbnail=str(_row_value(row, "section_thumbnail") or ""),
         )
 
 

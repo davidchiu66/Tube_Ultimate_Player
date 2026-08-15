@@ -31,6 +31,7 @@ from services.config_service import (
     PROXY_MODE_AUTO,
     PROXY_MODE_LABELS,
     PROXY_MODES,
+    QUALITY_MODES,
     QUALITY_TIER_LABELS,
     QUALITY_TIERS,
     ConfigService,
@@ -68,6 +69,11 @@ class SettingsPage(QWidget):
         self.config = config
         self._cookie_texts = {"youtube": "", "bilibili": ""}
         self._cookie_site = "bilibili"
+        self._quality_drafts = {"youtube": "high", "bilibili": "high"}
+        self._browser_drafts = {"youtube": "auto", "bilibili": "auto"}
+        self._profile_drafts = {"youtube": "", "bilibili": ""}
+        self._quality_changed_sites: set[str] = set()
+        self._browser_changed_sites: set[str] = set()
         self._loading_settings = True
         self._default_quality_changed = False
 
@@ -90,22 +96,33 @@ class SettingsPage(QWidget):
         self.default_home_youtube = QRadioButton("YouTube")
         self.default_home_group.addButton(self.default_home_bilibili)
         self.default_home_group.addButton(self.default_home_youtube)
-        self.default_home_bilibili.toggled.connect(
-            lambda checked: self._switch_cookie_site("bilibili") if checked else None
-        )
-        self.default_home_youtube.toggled.connect(
-            lambda checked: self._switch_cookie_site("youtube") if checked else None
-        )
         default_home_row = QHBoxLayout()
         default_home_row.setContentsMargins(0, 0, 0, 0)
         default_home_row.setSpacing(16)
         default_home_row.addWidget(self.default_home_bilibili)
         default_home_row.addWidget(self.default_home_youtube)
-        # 这个选项同时决定首页站点与下面 Cookie 编辑框的目标站点，备注就是为了说明这层关联。
-        self.default_home_hint = QLabel("涉及网站 Cookie 选择")
+        self.default_home_hint = QLabel("仅决定启动后默认打开的网站")
         self.default_home_hint.setObjectName("MetaLabel")
         default_home_row.addWidget(self.default_home_hint)
         default_home_row.addStretch(1)
+
+        self.site_config_group = QButtonGroup(self)
+        self.site_config_bilibili = QRadioButton("Bilibili")
+        self.site_config_youtube = QRadioButton("YouTube")
+        self.site_config_group.addButton(self.site_config_bilibili)
+        self.site_config_group.addButton(self.site_config_youtube)
+        self.site_config_bilibili.toggled.connect(
+            lambda checked: self._switch_cookie_site("bilibili") if checked else None
+        )
+        self.site_config_youtube.toggled.connect(
+            lambda checked: self._switch_cookie_site("youtube") if checked else None
+        )
+        site_config_row = QHBoxLayout()
+        site_config_row.setContentsMargins(0, 0, 0, 0)
+        site_config_row.setSpacing(16)
+        site_config_row.addWidget(self.site_config_bilibili)
+        site_config_row.addWidget(self.site_config_youtube)
+        site_config_row.addStretch(1)
 
         self.playback_window_group = QButtonGroup(self)
         self.playback_window_windowed = QRadioButton("窗口")
@@ -124,8 +141,8 @@ class SettingsPage(QWidget):
         self._playback_window_row = playback_window_row
 
         self.default_quality_combo = QComboBox()
-        for tier in QUALITY_TIERS:
-            self.default_quality_combo.addItem(QUALITY_TIER_LABELS[tier], tier)
+        for mode in QUALITY_MODES:
+            self.default_quality_combo.addItem(QUALITY_TIER_LABELS[mode], mode)
         self.default_quality_combo.currentIndexChanged.connect(self._mark_default_quality_changed)
         default_quality_row = QHBoxLayout()
         default_quality_row.setContentsMargins(0, 0, 0, 0)
@@ -167,6 +184,7 @@ class SettingsPage(QWidget):
         self.cookie_content_label = QLabel()
 
         self.cookie_browser_combo = QComboBox()
+        self.cookie_browser_combo.currentIndexChanged.connect(self._mark_cookie_browser_changed)
 
         self.cookie_probe_label = QLabel()
         self.cookie_probe_label.setObjectName("MetaLabel")
@@ -182,6 +200,7 @@ class SettingsPage(QWidget):
 
         self.cookie_profile_edit = QLineEdit()
         self.cookie_profile_edit.setPlaceholderText("Default / Profile 1")
+        self.cookie_profile_edit.textChanged.connect(self._mark_cookie_browser_changed)
 
         self.js_runtime_combo = QComboBox()
         self.js_runtime_combo.addItem("自动检测", "auto")
@@ -238,7 +257,8 @@ class SettingsPage(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(12)
         form.setVerticalSpacing(10)
-        form.addRow("网站选择", default_home_row)
+        form.addRow("默认首页", default_home_row)
+        form.addRow("网站配置", site_config_row)
         form.addRow("进入播放", self._playback_window_row)
         form.addRow("默认画质", self._default_quality_row)
         form.addRow("默认音轨语言", self._audio_language_row)
@@ -346,14 +366,25 @@ class SettingsPage(QWidget):
             "youtube": self._read_cookie_text("youtube"),
             "bilibili": self._read_cookie_text("bilibili"),
         }
+        self._quality_drafts = {
+            site: self.config.default_quality_mode(site) for site in ("youtube", "bilibili")
+        }
+        self._browser_drafts = {
+            site: self.config.configured_cookie_browser_for_site(site)
+            for site in ("youtube", "bilibili")
+        }
+        self._profile_drafts = {
+            site: self.config.cookie_browser_profile_for_site(site)
+            for site in ("youtube", "bilibili")
+        }
         self._cookie_site = default_home
         self.default_home_bilibili.setChecked(default_home != "youtube")
         self.default_home_youtube.setChecked(default_home == "youtube")
         starts_fullscreen = self.config.playback_starts_fullscreen()
         self.playback_window_windowed.setChecked(not starts_fullscreen)
         self.playback_window_fullscreen.setChecked(starts_fullscreen)
-        quality_index = self.default_quality_combo.findData(self.config.default_quality_tier())
-        self.default_quality_combo.setCurrentIndex(quality_index if quality_index >= 0 else 0)
+        self.site_config_bilibili.setChecked(default_home != "youtube")
+        self.site_config_youtube.setChecked(default_home == "youtube")
         audio_language = str(self.config.get("player.default_audio_language", "auto") or "auto")
         audio_language_index = self.default_audio_language_combo.findData(audio_language)
         self.default_audio_language_combo.setCurrentIndex(
@@ -362,13 +393,7 @@ class SettingsPage(QWidget):
         self.proxy_edit.setText(str(self.config.get("youtube.proxy", "") or ""))
         proxy_mode_index = self.proxy_mode_combo.findData(self.config.proxy_mode())
         self.proxy_mode_combo.setCurrentIndex(proxy_mode_index if proxy_mode_index >= 0 else 0)
-        self.cookie_edit.setPlainText(self._cookie_texts[default_home])
-        self._update_cookie_content_label()
-        browser = str(self.config.get("youtube.cookie_browser", "") or "")
-        self._populate_cookie_browser_combo(browser)
-        index = self.cookie_browser_combo.findData(browser)
-        self.cookie_browser_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.cookie_profile_edit.setText(str(self.config.get("youtube.cookie_browser_profile", "") or ""))
+        self._load_site_draft(default_home)
         self.refresh_cookie_probe_from_config()
         runtime = str(self.config.get("youtube.js_runtime", "auto") or "")
         runtime_index = self.js_runtime_combo.findData(runtime)
@@ -387,12 +412,14 @@ class SettingsPage(QWidget):
         self.js_runtime_progress_label.clear()
         self._loading_settings = False
         self._default_quality_changed = False
+        self._quality_changed_sites.clear()
+        self._browser_changed_sites.clear()
 
     def save(self) -> None:
         shortcuts = self._shortcut_values()
         if shortcuts is None:
             return
-        self._store_cookie_draft()
+        self._store_site_draft()
         cookie_paths: dict[str, Path] = {}
         cookie_errors: list[str] = []
         for site, text in self._cookie_texts.items():
@@ -416,21 +443,28 @@ class SettingsPage(QWidget):
             "player.playback_window_mode",
             "fullscreen" if self.playback_window_fullscreen.isChecked() else "window",
         )
-        if self._default_quality_changed:
+        for site in self._quality_changed_sites:
+            mode = self._quality_drafts.get(site) or QUALITY_MODES[0]
+            self.config.set(f"player.default_quality_by_site.{site}", mode)
+        if self._quality_changed_sites:
+            # 旧调用方和旧版本只能看到全局值；固定跟随保存后的默认首页，避免同时修改
+            # 两站时由 set 的无序迭代决定结果。新版本始终优先使用上面的分站键。
+            legacy_site = "youtube" if self.default_home_youtube.isChecked() else "bilibili"
             self.config.set(
                 "player.default_quality",
-                self.default_quality_combo.currentData() or QUALITY_TIERS[0],
+                self._quality_drafts.get(legacy_site) or QUALITY_MODES[0],
             )
         self.config.set(
             "player.default_audio_language",
             self.default_audio_language_combo.currentData() or "auto",
         )
-        cookie_browser = self.cookie_browser_combo.currentData() or ""
-        self.config.set("youtube.cookie_browser", cookie_browser)
-        self.config.set(
-            "youtube.cookie_browser_profile",
-            "" if ":" in cookie_browser else self.cookie_profile_edit.text().strip(),
-        )
+        for site in self._browser_changed_sites:
+            cookie_browser = self._browser_drafts.get(site, "")
+            self.config.set(f"cookies.{site}.browser", cookie_browser)
+            self.config.set(
+                f"cookies.{site}.browser_profile",
+                "" if ":" in cookie_browser else self._profile_drafts.get(site, "").strip(),
+            )
         for site, cookie_path in cookie_paths.items():
             self.config.set(f"cookies.{site}.file", str(cookie_path))
         self.config.set("youtube.js_runtime", self.js_runtime_combo.currentData() or "")
@@ -447,6 +481,8 @@ class SettingsPage(QWidget):
         self.js_runtime_progress_label.clear()
         self.settings_saved.emit()
         self._default_quality_changed = False
+        self._quality_changed_sites.clear()
+        self._browser_changed_sites.clear()
         if cookie_errors:
             QMessageBox.warning(
                 self,
@@ -457,6 +493,16 @@ class SettingsPage(QWidget):
     def _mark_default_quality_changed(self, _index: int) -> None:
         if not self._loading_settings:
             self._default_quality_changed = True
+            self._quality_changed_sites.add(self._cookie_site)
+
+    def _mark_cookie_browser_changed(self, *_args) -> None:
+        self._update_cookie_profile_enabled()
+        if not self._loading_settings:
+            self._browser_changed_sites.add(self._cookie_site)
+
+    def _update_cookie_profile_enabled(self) -> None:
+        browser = str(self.cookie_browser_combo.currentData() or "")
+        self.cookie_profile_edit.setEnabled(bool(browser and browser != "auto" and ":" not in browser))
 
     def set_backup_busy(self, busy: bool, text: str = "") -> None:
         self.backup_tab.set_busy(busy, text)
@@ -552,7 +598,7 @@ class SettingsPage(QWidget):
             for site in ("bilibili", "youtube")
         }
         missing = [site for site, spec in result.items() if not spec]
-        if not self.config.cookie_auto_probe_enabled():
+        if not any(self.config.cookie_auto_probe_enabled(site) for site in ("bilibili", "youtube")):
             self.cookie_probe_label.setText("仅在「自动检测」模式下生效")
             self.reprobe_cookie_button.setEnabled(False)
             return
@@ -562,10 +608,33 @@ class SettingsPage(QWidget):
     def _switch_cookie_site(self, site: str) -> None:
         if self._loading_settings or site == self._cookie_site:
             return
-        self._store_cookie_draft()
+        self._store_site_draft()
         self._cookie_site = site
-        self.cookie_edit.setPlainText(self._cookie_texts.get(site, ""))
-        self._update_cookie_content_label()
+        self._load_site_draft(site)
+
+    def _load_site_draft(self, site: str) -> None:
+        was_loading = self._loading_settings
+        self._loading_settings = True
+        try:
+            quality_index = self.default_quality_combo.findData(self._quality_drafts.get(site, "high"))
+            self.default_quality_combo.setCurrentIndex(quality_index if quality_index >= 0 else 0)
+            browser = self._browser_drafts.get(site, "auto")
+            self._populate_cookie_browser_combo(browser)
+            browser_index = self.cookie_browser_combo.findData(browser)
+            self.cookie_browser_combo.setCurrentIndex(browser_index if browser_index >= 0 else 0)
+            self.cookie_profile_edit.setText(self._profile_drafts.get(site, ""))
+            self._update_cookie_profile_enabled()
+            self.cookie_edit.setPlainText(self._cookie_texts.get(site, ""))
+            self._update_cookie_content_label()
+        finally:
+            self._loading_settings = was_loading
+
+    def _store_site_draft(self) -> None:
+        self._quality_drafts[self._cookie_site] = self.default_quality_combo.currentData() or "high"
+        browser = self.cookie_browser_combo.currentData() or ""
+        self._browser_drafts[self._cookie_site] = browser
+        self._profile_drafts[self._cookie_site] = "" if ":" in browser else self.cookie_profile_edit.text()
+        self._store_cookie_draft()
 
     def _store_cookie_draft(self) -> None:
         self._cookie_texts[self._cookie_site] = self.cookie_edit.toPlainText()

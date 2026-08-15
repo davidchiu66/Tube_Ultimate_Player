@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
-from resolver.models import AudioTrack, VideoQuality
+from resolver.models import AudioTrack, PlaybackQualityHint, VideoQuality
 from services.locale_service import match_audio_language
 
 
@@ -32,16 +32,30 @@ def select_quality_by_tier(
     if normalized != "medium":
         return ordered[0]
 
-    heights = sorted(
-        {_quality_number(getattr(quality, "height", 0)) for quality in ordered},
-        reverse=True,
-    )
-    target_height = heights[len(heights) // 2]
-    return next(
-        quality
-        for quality in ordered
-        if _quality_number(getattr(quality, "height", 0)) == target_height
-    )
+    # 按实际可选项计数：奇数取正中，偶数取“半数 + 1”项。ordered 为高到低，
+    # 两种情况的零基索引都正好是 len(ordered) // 2。
+    return ordered[len(ordered) // 2]
+
+
+def select_quality_by_hint(
+    qualities: dict[str, VideoQuality], hint: PlaybackQualityHint | None
+) -> VideoQuality | None:
+    """Match an inherited quality, preferring lower height on an equal distance tie."""
+    if not qualities or hint is None:
+        return None
+    exact = qualities.get(hint.label)
+    if exact is not None:
+        return exact
+    indexed = list(enumerate(qualities.values()))
+    return min(
+        indexed,
+        key=lambda item: (
+            abs(_quality_number(item[1].height) - _quality_number(hint.height)),
+            1 if _quality_number(item[1].height) > _quality_number(hint.height) else 0,
+            abs(_quality_number(item[1].fps) - _quality_number(hint.fps)),
+            item[0],
+        ),
+    )[1]
 
 
 def _quality_number(value: object) -> int:
