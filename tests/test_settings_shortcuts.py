@@ -28,8 +28,9 @@ class ShortcutSettingsTests(unittest.TestCase):
             )
             page = SettingsPage(config)
 
-            self.assertEqual(page.tabs.count(), 2)
+            self.assertEqual(page.tabs.count(), 3)
             self.assertEqual(page.tabs.tabText(1), "快捷键")
+            self.assertEqual(page.tabs.tabText(2), "备份/恢复")
             self.assertEqual(set(page.shortcut_edits), {item.action for item in SHORTCUT_DEFINITIONS})
             self.assertEqual(page.shortcut_edits["cast"].keySequence().toString(), "Ctrl+C")
             page.close()

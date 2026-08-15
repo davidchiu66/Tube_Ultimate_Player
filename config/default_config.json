@@ -1,6 +1,6 @@
 {
   "player": {
-    "default_quality": "Auto",
+    "default_quality": "high",
     "hardware_decode": "auto-safe",
     "volume": 80,
     "speed": 1.0,
@@ -43,6 +43,11 @@
   "dlna": {
     "media_server_port": 8899,
     "discovery_timeout": 3.0
+  },
+  "backup": {
+    "include_cookies": false,
+    "last_backup_at": "",
+    "last_backup_name": ""
   },
   "shortcuts": {
     "play_pause": "Space",

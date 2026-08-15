@@ -52,6 +52,7 @@ def _state() -> _HomeCacheState:
         _home_page=1,
         _home_has_next=False,
         _home_state={},
+        _browse_mode="home",
         _browse_source="bilibili",
         _browse_generation=0,
         _search_keyword="",
@@ -74,15 +75,14 @@ def _state() -> _HomeCacheState:
         setattr(state, name, MethodType(getattr(MainWindow, name), state))
     # 真实 _start_home_load 会构造 HomeWorker 并提交线程池，这里只记录调用参数。
     state._start_home_load = MethodType(_recording_start_home_load, state)
-    state._start_search = lambda keyword, page, **kwargs: started.append(
-        {"kind": "search", "keyword": keyword, "page": page}
-    )
+    state._start_search = MethodType(_recording_start_search, state)
     return state
 
 
 def _recording_start_home_load(self, page: int, *, force_refresh: bool = False) -> None:
     source = self._browse_source
     target_page = max(1, page)
+    self._browse_mode = "home"
     if force_refresh:
         self._home_state.pop(source, None)
     else:
@@ -94,6 +94,11 @@ def _recording_start_home_load(self, page: int, *, force_refresh: bool = False) 
     self._home_page = target_page
     self._browse_generation += 1
     self.started.append({"kind": "home", "page": target_page, "source": source})
+
+
+def _recording_start_search(self, keyword: str, page: int, **_kwargs) -> None:
+    self._browse_mode = "search"
+    self.started.append({"kind": "search", "keyword": keyword, "page": page})
 
 
 class HomeCacheTests(unittest.TestCase):
@@ -120,6 +125,7 @@ class HomeCacheTests(unittest.TestCase):
 
     def test_cache_hit_advances_generation_so_stale_results_are_dropped(self) -> None:
         state = _state()
+        state._browse_mode = "search"
         state._home_cache = [_video("b1")]
         state._store_home_state("bilibili")
         before = state._browse_generation
@@ -127,6 +133,7 @@ class HomeCacheTests(unittest.TestCase):
         state._apply_home_cache([_video("b1")], 1, False, reason="page")
 
         self.assertGreater(state._browse_generation, before)
+        self.assertEqual(state._browse_mode, "home")
 
     def test_expired_cache_falls_back_to_a_fresh_load(self) -> None:
         state = _state()
@@ -151,8 +158,9 @@ class HomeCacheTests(unittest.TestCase):
         self.assertIsNotNone(state._take_home_state("bilibili", 2))
         self.assertIsNotNone(state._take_home_state("bilibili"))
 
-    def test_switching_with_a_keyword_still_searches_instead_of_using_the_cache(self) -> None:
+    def test_switching_after_search_still_searches_instead_of_using_the_cache(self) -> None:
         state = _state()
+        state._browse_mode = "search"
         state._home_cache = [_video("b1")]
         state._store_home_state("bilibili")
         state.url_edit = SimpleNamespace(text=lambda: "  辣椒炒肉  ")

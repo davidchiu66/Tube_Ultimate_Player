@@ -9,7 +9,7 @@ from functools import partial, wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Slot
+from PySide6.QtCore import QCoreApplication, QThreadPool, QTimer, QUrl, Qt, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -44,10 +44,12 @@ from resolver.models import (
     VideoInfo,
     VideoQuality,
 )
+from resolver.quality_selector import select_quality_by_tier
 from resolver.site_resolver import SiteResolver
 from services.config_service import ConfigService
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
 from services.runtime_install_service import NODE_TRUSTED_HOSTS, RuntimeInstallService
+from services.restart_service import RestartError, restart_application
 from services.update_service import REPO_URL, UpdateCheckResult, UpdateService, detect_platform_info
 from ui.about_page import AboutPage
 from ui.cast_dialog import DlnaCastDialog
@@ -62,6 +64,7 @@ from ui.toolbar import PlayerToolbar
 from ui.toast import Toast
 from ui.url_dialog import UrlPlayDialog
 from workers.archive_extract_worker import ArchiveExtractWorker
+from workers.backup_worker import BackupListWorker, BackupRestoreWorker, BackupUploadWorker, WebdavTestWorker
 from workers.collection_worker import CollectionWorker
 from workers.cookie_probe_worker import CookieProbeWorker
 from workers.creator_videos_worker import CreatorVideosWorker
@@ -104,6 +107,48 @@ def _task_created_at(task) -> float:
     """下载任务的创建时间，缺失时视为最早（排在列表最下方）。"""
     created_at = getattr(task, "created_at", None)
     return created_at.timestamp() if created_at is not None else 0.0
+
+
+def _records_to_video_infos(records: list) -> list[VideoInfo]:
+    """把收藏/历史记录转换为批量下载需要的 VideoInfo，忽略无地址记录。"""
+    videos: list[VideoInfo] = []
+    for record in list(records or []):
+        url = str(record.get("webpage_url") or "").strip()
+        if not url:
+            continue
+        try:
+            duration = int(record.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        videos.append(
+            VideoInfo(
+                video_id=str(record.get("video_id") or ""),
+                title=str(record.get("title") or ""),
+                source_site=str(record.get("source_site") or ""),
+                uploader=str(record.get("uploader") or ""),
+                duration=duration,
+                webpage_url=url,
+                thumbnail=str(record.get("thumbnail") or ""),
+            )
+        )
+    return videos
+
+
+def _enqueue_library_records(owner, records: list, *, empty_message: str, log_name: str) -> None:
+    videos = _records_to_video_infos(records)
+    if not videos:
+        owner.toast.show_message(empty_message)
+        return
+    try:
+        created, skipped = owner.download_manager.enqueue_many(videos, "Auto")
+    except Exception:
+        logger.exception("%s batch download failed count=%s", log_name, len(videos))
+        owner.toast.show_message("批量下载失败")
+        return
+    message = f"已加入下载队列 {created} 个"
+    if skipped:
+        message += f"，跳过 {skipped} 个（已在队列或已完成）"
+    owner.toast.show_message(message)
 
 
 class MainWindow(QMainWindow):
@@ -189,6 +234,9 @@ class MainWindow(QMainWindow):
         self._home_state: dict[str, tuple[float, list[HomeVideo], int, bool]] = {}
         self._search_keyword = ""
         self._search_page = 1
+        # 记录上一次浏览动作是「首页」还是「搜索」。切换站点时只据此取向：
+        # 搜索框里的残留文本不该把首页浏览劫持成又一次搜索。
+        self._browse_mode = "home"
         # 首页/搜索使用的站点由工具栏单选框决定，默认 BiliBili，与「默认首页」配置项无关。
         self._browse_source = "bilibili"
         # 每发起一轮首页/搜索加载就自增，用来丢弃切换站点后才回来的旧结果。
@@ -339,6 +387,9 @@ class MainWindow(QMainWindow):
     def _create_history_page(self) -> HistoryPage:
         page = HistoryPage(self.history)
         page.play_requested.connect(self.play_url)
+        page.remove_requested.connect(self._remove_history_record)
+        page.download_videos_requested.connect(self._download_history_records)
+        page.remove_videos_requested.connect(self._remove_history_records)
         return page
 
     def _create_settings_page(self) -> SettingsPage:
@@ -347,6 +398,10 @@ class MainWindow(QMainWindow):
         page.install_node_requested.connect(self._install_node_runtime)
         page.open_node_site_requested.connect(self._open_node_official_site)
         page.reprobe_cookies_requested.connect(self._reprobe_cookies)
+        page.backup_test_requested.connect(self._test_webdav_account)
+        page.backup_requested.connect(self._start_backup_upload)
+        page.backup_restore_list_requested.connect(self._load_remote_backups)
+        page.backup_restore_requested.connect(self._start_backup_restore)
         page.set_runtime_status(self.runtime_install_service.detect_runtime_status())
         return page
 
@@ -635,6 +690,7 @@ class MainWindow(QMainWindow):
         )
         # 命中缓存同样要推进代次：在途的旧请求回来后不能再覆盖当前画面。
         self._browse_generation += 1
+        self._browse_mode = "home"
         self._home_cache = list(videos)
         self._home_page = page
         self._home_has_next = has_next
@@ -645,6 +701,7 @@ class MainWindow(QMainWindow):
     def _start_home_load(self, page: int, *, force_refresh: bool = False) -> None:
         source = self._browse_source
         target_page = max(1, page)
+        self._browse_mode = "home"
         if force_refresh:
             self._home_state.pop(source, None)
         else:
@@ -694,6 +751,7 @@ class MainWindow(QMainWindow):
     def _start_search(self, keyword: str, page: int, *, force_refresh: bool = False) -> None:
         source = self._browse_source
         logger.info("search requested keyword=%s page=%s source=%s", keyword, page, source)
+        self._browse_mode = "search"
         self._browse_generation += 1
         generation = self._browse_generation
         self.stack.setCurrentWidget(self.home_page)
@@ -717,10 +775,11 @@ class MainWindow(QMainWindow):
         self._start_worker(worker)
 
     def _set_browse_source(self, source: str) -> None:
-        """工具栏切换站点：首页/搜索立刻按新站点重新拉取。
+        """工具栏切换站点：按上一次的浏览动作，在新站点重做同一件事。
 
-        只影响本次会话的浏览行为，不写回「默认首页」配置项。搜索框里还留着关键词时
-        直接重搜，否则回到该站点首页；首页结果按站点留档，切回来能直接复用。
+        只影响本次会话的浏览行为，不写回「默认首页」配置项。上一次是搜索、且搜索框里
+        还留着关键词时才重搜；上一次是首页浏览就一律回首页——搜索框里的残留文本不算
+        搜索意图（文本本身保留，用户随时可以再点搜索）。首页结果按站点留档，切回来能直接复用。
         """
         normalized = SiteResolver.normalize_source(source)
         if not normalized or normalized == self._browse_source:
@@ -728,13 +787,13 @@ class MainWindow(QMainWindow):
         # 先把旧站点的首页结果留档，再切换。
         self._store_home_state(self._browse_source)
         self._browse_source = normalized
-        logger.info("browse source switched to %s", normalized)
+        logger.info("browse source switched to %s mode=%s", normalized, self._browse_mode)
         self._home_cache = []
         self._home_page = 1
         self._home_has_next = False
 
         keyword = self.url_edit.text().strip()
-        if keyword:
+        if self._browse_mode == "search" and keyword:
             self._search_keyword = keyword
             self._search_page = 1
             self._start_search(keyword, 1)
@@ -1348,11 +1407,10 @@ class MainWindow(QMainWindow):
         )
 
     def _select_default_quality(self, video: VideoInfo) -> VideoQuality | None:
-        preferred = str(self.config.get("player.default_quality", "Auto") or "Auto")
-        if preferred != "Auto" and preferred in video.qualities:
-            return video.qualities[preferred]
-        # 解析成功但没有任何清晰度时返回 None，由调用方给出提示，避免 StopIteration 逃逸。
-        return next(iter(video.qualities.values()), None)
+        override = self.config.default_quality_label_override()
+        if override and override in video.qualities:
+            return video.qualities[override]
+        return select_quality_by_tier(video.qualities, self.config.default_quality_tier())
 
     def _select_default_audio_track(self, video: VideoInfo) -> str:
         """按 D 裁定挑默认音轨，返回 track_id；没有可选音轨时返回空串。
@@ -1586,10 +1644,21 @@ class MainWindow(QMainWindow):
 
     def _remove_favorites(self, video_ids: list) -> None:
         """收藏页批量删除：一条语句删完再统一刷新视图。"""
-        ids = [str(video_id) for video_id in list(video_ids or []) if str(video_id or "").strip()]
+        ids = list(
+            dict.fromkeys(
+                str(video_id or "").strip()
+                for video_id in list(video_ids or [])
+                if str(video_id or "").strip()
+            )
+        )
         if not ids:
             return
-        removed = self.favorites.remove_many(ids)
+        try:
+            removed = self.favorites.remove_many(ids)
+        except Exception:
+            logger.exception("favorite batch remove failed count=%s", len(ids))
+            self.toast.show_message("批量删除收藏失败")
+            return
         self._refresh_favorite_views()
         if self.current_video and self.current_video.video_id in set(ids):
             self.player_page.set_favorite_state(False, available=True)
@@ -1597,35 +1666,52 @@ class MainWindow(QMainWindow):
 
     def _download_favorite_records(self, records: list) -> None:
         """收藏页批量下载。收藏表里没有清晰度信息，统一按 Auto 入队。"""
-        videos = []
-        for record in list(records or []):
-            url = str(record.get("webpage_url") or "").strip()
-            if not url:
-                continue
-            videos.append(
-                VideoInfo(
-                    video_id=str(record.get("video_id") or ""),
-                    title=str(record.get("title") or ""),
-                    source_site=str(record.get("source_site") or ""),
-                    uploader=str(record.get("uploader") or ""),
-                    duration=int(record.get("duration") or 0),
-                    webpage_url=url,
-                    thumbnail=str(record.get("thumbnail") or ""),
-                )
-            )
-        if not videos:
-            self.toast.show_message("下载失败：收藏记录里没有可用的视频地址")
+        _enqueue_library_records(
+            self,
+            records,
+            empty_message="下载失败：收藏记录里没有可用的视频地址",
+            log_name="favorite",
+        )
+
+    def _download_history_records(self, records: list) -> None:
+        """历史页批量下载；历史记录没有清晰度信息，统一按 Auto 入队。"""
+        _enqueue_library_records(
+            self,
+            records,
+            empty_message="下载失败：播放历史里没有可用的视频地址",
+            log_name="history",
+        )
+
+    def _remove_history_record(self, video_id: str) -> None:
+        clean_id = str(video_id or "").strip()
+        if not clean_id:
             return
         try:
-            created, skipped = self.download_manager.enqueue_many(videos, "Auto")
+            removed = self.history.remove(clean_id)
         except Exception:
-            logger.exception("favorite batch download failed count=%s", len(videos))
-            self.toast.show_message("批量下载失败")
+            logger.exception("history remove failed video_id=%s", clean_id)
+            self.toast.show_message("删除播放历史失败")
             return
-        message = f"已加入下载队列 {created} 个"
-        if skipped:
-            message += f"，跳过 {skipped} 个（已在队列或已完成）"
-        self.toast.show_message(message)
+        page = self._created_page("history")
+        if page is not None:
+            page.refresh()
+        self.toast.show_message(f"已从播放历史中移除 {removed} 条")
+
+    def _remove_history_records(self, video_ids: list) -> None:
+        ids = [str(video_id or "").strip() for video_id in list(video_ids or [])]
+        ids = [video_id for video_id in ids if video_id]
+        if not ids:
+            return
+        try:
+            removed = self.history.remove_many(ids)
+        except Exception:
+            logger.exception("history batch remove failed count=%s", len(ids))
+            self.toast.show_message("批量删除播放历史失败")
+            return
+        page = self._created_page("history")
+        if page is not None:
+            page.refresh()
+        self.toast.show_message(f"已从播放历史中移除 {removed} 条")
 
     def _refresh_favorite_views(self) -> None:
         favorite_ids = self.favorites.favorite_ids()
@@ -2208,12 +2294,133 @@ class MainWindow(QMainWindow):
         self._home_state.clear()
         self._search_keyword = ""
         self._search_page = 1
+        # 设置保存会重建解析器并作废当前浏览结果；清除搜索上下文时也要同步
+        # 重置浏览动作，否则切站点仍可能被工具栏残留文本误判为搜索。
+        self._browse_mode = "home"
         self._refresh_runtime_status()
         self._sync_about_page()
         if self.stack.currentWidget() is self.home_page:
             self.load_home()
 
+    def _test_webdav_account(self, account) -> None:
+        page = self.settings_page
+        page.set_backup_busy(True, "正在测试 WebDAV 连接...")
+        worker = WebdavTestWorker(account, self.config)
+        worker.signals.progress.connect(page.set_backup_progress)
+        worker.signals.success.connect(lambda message: self._backup_operation_succeeded(str(message)))
+        worker.signals.error.connect(self._backup_operation_failed)
+        self._start_worker(worker)
+
+    def _start_backup_upload(self, account, include_cookies: bool) -> None:
+        page = self.settings_page
+        page.set_backup_busy(True, "正在创建备份包...")
+        self.config.set("backup.include_cookies", bool(include_cookies))
+        self.config.save()
+        self.download_manager.flush()
+        worker = BackupUploadWorker(account, self.config, bool(include_cookies))
+        worker.signals.progress.connect(page.set_backup_progress)
+        worker.signals.success.connect(self._backup_upload_succeeded)
+        worker.signals.error.connect(self._backup_operation_failed)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _backup_upload_succeeded(self, result: dict) -> None:
+        page = self.settings_page
+        warnings = list(result.get("warnings") or [])
+        message = f"备份已上传：{result.get('name', '')}"
+        if warnings:
+            message += "；" + "；".join(warnings)
+        self.config.set("backup.last_backup_at", result.get("created_at", ""))
+        self.config.set("backup.last_backup_name", result.get("name", ""))
+        self.config.save()
+        page.set_backup_busy(False)
+        page.report_backup_result(True, message)
+        page.backup_tab.refresh_status()
+
+    def _load_remote_backups(self, account) -> None:
+        page = self.settings_page
+        page.set_backup_busy(True, "正在读取远端备份清单...")
+        worker = BackupListWorker(account, self.config)
+        worker.signals.progress.connect(page.set_backup_progress)
+        worker.signals.success.connect(self._remote_backups_loaded)
+        worker.signals.error.connect(self._backup_operation_failed)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _remote_backups_loaded(self, backups: list) -> None:
+        page = self.settings_page
+        page.set_backup_busy(False)
+        page.set_backup_progress("")
+        page.show_remote_backups(backups)
+
+    def _start_backup_restore(self, account, remote_name: str, allow_newer: bool = False) -> None:
+        page = self.settings_page
+        page.set_backup_busy(True, "正在下载备份...")
+        self.download_manager.flush()
+        worker = BackupRestoreWorker(account, self.config, remote_name, allow_newer=allow_newer)
+        worker.signals.progress.connect(page.set_backup_progress)
+        worker.signals.success.connect(partial(self._backup_restore_succeeded, account, remote_name))
+        worker.signals.error.connect(self._backup_operation_failed)
+        self._start_worker(worker)
+
+    @_skip_after_shutdown
+    def _backup_restore_succeeded(self, account, remote_name: str, result: dict) -> None:
+        if result.get("needs_confirmation"):
+            answer = QMessageBox.question(
+                self,
+                "备份版本较新",
+                f"该备份来自版本 {result.get('backup_version')}，当前版本为 {result.get('current_version')}。\n"
+                "继续恢复可能出现兼容问题，确定继续吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._start_backup_restore(account, remote_name, True)
+            else:
+                self.settings_page.set_backup_busy(False)
+                self.settings_page.set_backup_progress("已取消恢复")
+            return
+
+        self.settings_page.set_backup_busy(False)
+        self.settings_page.set_backup_progress("已恢复，重启后生效")
+        # 当前进程仍持有恢复前的内存配置和任务队列。暂停后续落盘，避免关闭时
+        # ConfigService / DownloadManager 把旧状态覆盖回刚恢复的文件。
+        self.config.suspend_persistence()
+        self.download_manager.suspend_persistence()
+        self.settings_page.save_button.setEnabled(False)
+        self.settings_page.reload_button.setEnabled(False)
+        message = QMessageBox(self)
+        message.setWindowTitle("恢复完成")
+        message.setText("恢复完成，需要重启应用才能生效。")
+        message.setInformativeText(f"恢复前的本地快照：\n{result.get('snapshot', '')}")
+        restart_button = message.addButton("立即重启", QMessageBox.ButtonRole.AcceptRole)
+        message.addButton("稍后重启", QMessageBox.ButtonRole.RejectRole)
+        message.exec()
+        if message.clickedButton() is restart_button:
+            self.close()
+            try:
+                restart_application()
+            except RestartError as exc:
+                QMessageBox.critical(None, "自动重启失败", str(exc))
+                return
+            QCoreApplication.exit(0)
+
+    @_skip_after_shutdown
+    def _backup_operation_succeeded(self, message: str) -> None:
+        page = self.settings_page
+        page.set_backup_busy(False)
+        page.report_backup_result(True, message)
+
+    @_skip_after_shutdown
+    def _backup_operation_failed(self, message: str) -> None:
+        page = self.settings_page
+        page.set_backup_busy(False)
+        page.report_backup_result(False, message)
+        QMessageBox.warning(self, "备份/恢复失败", message)
+
     def _show_home(self) -> None:
+        # 点「首页」即把浏览动作切回首页：之后切换站点不再受搜索框残留文本影响。
+        self._browse_mode = "home"
         self.stack.setCurrentWidget(self.home_page)
         if self._home_cache:
             self._render_home(self._home_cache, self._home_page, self._home_has_next)

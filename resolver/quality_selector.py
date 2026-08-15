@@ -6,6 +6,51 @@ from resolver.models import AudioTrack, VideoQuality
 from services.locale_service import match_audio_language
 
 
+def select_quality_by_tier(
+    qualities: dict[str, VideoQuality],
+    tier: str,
+) -> VideoQuality | None:
+    """按分辨率档位选清晰度；未知档位按 high 处理。"""
+    ordered = sorted(
+        (
+            quality
+            for quality in qualities.values()
+            if _quality_number(getattr(quality, "height", 0)) > 0
+        ),
+        key=lambda quality: (
+            _quality_number(getattr(quality, "height", 0)),
+            _quality_number(getattr(quality, "fps", 0)),
+        ),
+        reverse=True,
+    )
+    if not ordered:
+        return None
+
+    normalized = str(tier or "").strip().lower()
+    if normalized == "low":
+        return ordered[-1]
+    if normalized != "medium":
+        return ordered[0]
+
+    heights = sorted(
+        {_quality_number(getattr(quality, "height", 0)) for quality in ordered},
+        reverse=True,
+    )
+    target_height = heights[len(heights) // 2]
+    return next(
+        quality
+        for quality in ordered
+        if _quality_number(getattr(quality, "height", 0)) == target_height
+    )
+
+
+def _quality_number(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class QualitySelector:
     # format_note 在单语言视频上只有码率档位，不是语言名，不能拿来当轨道名。
     _QUALITY_NOTES = {"ultralow", "low", "medium", "high", "default"}

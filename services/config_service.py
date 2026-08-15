@@ -36,6 +36,13 @@ PROXY_MODE_LABELS = {
     PROXY_MODE_OFF: "强制直连（忽略系统代理）",
 }
 
+QUALITY_TIERS = ("high", "medium", "low")
+QUALITY_TIER_LABELS = {
+    "high": "高（最高分辨率）",
+    "medium": "中（中间分辨率）",
+    "low": "低（最低分辨率）",
+}
+
 # 「播放 URL」面板保留的历史条数上限。
 RECENT_URL_LIMIT = 20
 RECENT_URL_KEY = "player.recent_urls"
@@ -58,11 +65,17 @@ class ConfigService:
         self._config = self._merge(defaults, user)
 
     def save(self) -> None:
+        if getattr(self, "_persistence_suspended", False):
+            return
         self.user_path.parent.mkdir(parents=True, exist_ok=True)
         self.user_path.write_text(
             json.dumps(self._config, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def suspend_persistence(self) -> None:
+        """恢复完成后阻止旧进程把内存配置覆盖回磁盘。"""
+        self._persistence_suspended = True
 
     def get(self, key: str, default: Any = None) -> Any:
         node: Any = self._config
@@ -269,6 +282,19 @@ class ConfigService:
 
     def default_home_label(self) -> str:
         return "Bilibili" if self.default_home_source() == "bilibili" else "YouTube"
+
+    def default_quality_tier(self) -> str:
+        """返回 high/medium/low；旧值和非法值按 high 处理。"""
+        value = str(self.get("player.default_quality", "high") or "").strip().lower()
+        return value if value in QUALITY_TIERS else "high"
+
+    def default_quality_label_override(self) -> str:
+        """返回旧配置里的精确清晰度标签；档位、Auto 和空值返回空串。"""
+        value = str(self.get("player.default_quality", "") or "").strip()
+        normalized = value.lower()
+        if not value or normalized == "auto" or normalized in QUALITY_TIERS:
+            return ""
+        return value
 
     def playback_window_mode(self) -> str:
         """进入播放时用窗口还是全屏。未知取值一律回落到窗口，避免配置手改后卡在全屏。"""

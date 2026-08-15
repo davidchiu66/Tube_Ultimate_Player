@@ -31,6 +31,8 @@ from services.config_service import (
     PROXY_MODE_AUTO,
     PROXY_MODE_LABELS,
     PROXY_MODES,
+    QUALITY_TIER_LABELS,
+    QUALITY_TIERS,
     ConfigService,
     detect_browser_cookie_sources,
 )
@@ -38,6 +40,7 @@ from services.cookie_service import secure_cookie_file
 from services.locale_service import system_language_tag
 from services.runtime_install_service import RuntimeStatus
 from services.shortcut_service import SHORTCUT_DEFINITIONS
+from ui.backup_tab import BackupTab
 
 
 logger = logging.getLogger("tube_player.ui")
@@ -55,6 +58,10 @@ class SettingsPage(QWidget):
     install_node_requested = Signal()
     open_node_site_requested = Signal()
     reprobe_cookies_requested = Signal()
+    backup_test_requested = Signal(object)
+    backup_requested = Signal(object, bool)
+    backup_restore_list_requested = Signal(object)
+    backup_restore_requested = Signal(object, str)
 
     def __init__(self, config: ConfigService) -> None:
         super().__init__()
@@ -62,6 +69,7 @@ class SettingsPage(QWidget):
         self._cookie_texts = {"youtube": "", "bilibili": ""}
         self._cookie_site = "bilibili"
         self._loading_settings = True
+        self._default_quality_changed = False
 
         self.active_proxy_label = QLabel()
         self.system_hint_label = QLabel(
@@ -114,6 +122,22 @@ class SettingsPage(QWidget):
         playback_window_row.addWidget(self.playback_window_hint)
         playback_window_row.addStretch(1)
         self._playback_window_row = playback_window_row
+
+        self.default_quality_combo = QComboBox()
+        for tier in QUALITY_TIERS:
+            self.default_quality_combo.addItem(QUALITY_TIER_LABELS[tier], tier)
+        self.default_quality_combo.currentIndexChanged.connect(self._mark_default_quality_changed)
+        default_quality_row = QHBoxLayout()
+        default_quality_row.setContentsMargins(0, 0, 0, 0)
+        default_quality_row.setSpacing(16)
+        default_quality_row.addWidget(self.default_quality_combo)
+        self.default_quality_hint = QLabel(
+            "打开视频时自动选择的清晰度档位；该档位不存在时按最接近的一档"
+        )
+        self.default_quality_hint.setObjectName("MetaLabel")
+        default_quality_row.addWidget(self.default_quality_hint)
+        default_quality_row.addStretch(1)
+        self._default_quality_row = default_quality_row
 
         self.default_audio_language_combo = QComboBox()
         # 首项把探测到的系统语言写进文案，用户不必猜"跟随系统"到底跟到了哪一种。
@@ -216,6 +240,7 @@ class SettingsPage(QWidget):
         form.setVerticalSpacing(10)
         form.addRow("网站选择", default_home_row)
         form.addRow("进入播放", self._playback_window_row)
+        form.addRow("默认画质", self._default_quality_row)
         form.addRow("默认音轨语言", self._audio_language_row)
         form.addRow("当前有效代理", self.active_proxy_label)
         form.addRow("代理模式", self.proxy_mode_combo)
@@ -281,9 +306,16 @@ class SettingsPage(QWidget):
         shortcut_actions.addStretch(1)
         shortcut_layout.addLayout(shortcut_actions)
 
+        self.backup_tab = BackupTab(self.config)
+        self.backup_tab.test_requested.connect(self.backup_test_requested.emit)
+        self.backup_tab.backup_requested.connect(self.backup_requested.emit)
+        self.backup_tab.restore_list_requested.connect(self.backup_restore_list_requested.emit)
+        self.backup_tab.restore_requested.connect(self.backup_restore_requested.emit)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(general_tab, "常规")
         self.tabs.addTab(self.shortcut_tab, "快捷键")
+        self.tabs.addTab(self.backup_tab, "备份/恢复")
 
         self.save_button = QPushButton("保存设置")
         self.reload_button = QPushButton("重新读取")
@@ -320,6 +352,8 @@ class SettingsPage(QWidget):
         starts_fullscreen = self.config.playback_starts_fullscreen()
         self.playback_window_windowed.setChecked(not starts_fullscreen)
         self.playback_window_fullscreen.setChecked(starts_fullscreen)
+        quality_index = self.default_quality_combo.findData(self.config.default_quality_tier())
+        self.default_quality_combo.setCurrentIndex(quality_index if quality_index >= 0 else 0)
         audio_language = str(self.config.get("player.default_audio_language", "auto") or "auto")
         audio_language_index = self.default_audio_language_combo.findData(audio_language)
         self.default_audio_language_combo.setCurrentIndex(
@@ -345,12 +379,14 @@ class SettingsPage(QWidget):
         self.ffmpeg_dir_edit.setText(str(self.config.get("download.ffmpeg_dir", "") or ""))
         self.max_downloads_spin.setValue(self.config.download_max_concurrent())
         self.dlna_media_server_port_spin.setValue(self.config.dlna_media_server_port())
+        self.backup_tab.reload()
         for definition in SHORTCUT_DEFINITIONS:
             sequence = self.config.shortcut_sequence(definition.action)
             self.shortcut_edits[definition.action].setKeySequence(QKeySequence(sequence))
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
         self._loading_settings = False
+        self._default_quality_changed = False
 
     def save(self) -> None:
         shortcuts = self._shortcut_values()
@@ -380,6 +416,11 @@ class SettingsPage(QWidget):
             "player.playback_window_mode",
             "fullscreen" if self.playback_window_fullscreen.isChecked() else "window",
         )
+        if self._default_quality_changed:
+            self.config.set(
+                "player.default_quality",
+                self.default_quality_combo.currentData() or QUALITY_TIERS[0],
+            )
         self.config.set(
             "player.default_audio_language",
             self.default_audio_language_combo.currentData() or "auto",
@@ -397,6 +438,7 @@ class SettingsPage(QWidget):
         self.config.set("download.ffmpeg_dir", self.ffmpeg_dir_edit.text().strip())
         self.config.set("download.max_concurrent", self.max_downloads_spin.value())
         self.config.set("dlna.media_server_port", self.dlna_media_server_port_spin.value())
+        self.config.set("backup.include_cookies", self.backup_tab.include_cookies.isChecked())
         for action, sequence in shortcuts.items():
             self.config.set(f"shortcuts.{action}", sequence)
         self.config.save()
@@ -404,12 +446,29 @@ class SettingsPage(QWidget):
         self.refresh_active_proxy()
         self.js_runtime_progress_label.clear()
         self.settings_saved.emit()
+        self._default_quality_changed = False
         if cookie_errors:
             QMessageBox.warning(
                 self,
                 "Cookie 保存失败",
                 "其余设置已保存，但以下站点的 Cookie 文件写入失败：\n" + "\n".join(cookie_errors),
             )
+
+    def _mark_default_quality_changed(self, _index: int) -> None:
+        if not self._loading_settings:
+            self._default_quality_changed = True
+
+    def set_backup_busy(self, busy: bool, text: str = "") -> None:
+        self.backup_tab.set_busy(busy, text)
+
+    def set_backup_progress(self, text: str) -> None:
+        self.backup_tab.set_progress(text)
+
+    def report_backup_result(self, ok: bool, message: str) -> None:
+        self.backup_tab.report_result(ok, message)
+
+    def show_remote_backups(self, backups: list) -> None:
+        self.backup_tab.show_backups(backups)
 
     def _shortcut_values(self) -> dict[str, str] | None:
         values: dict[str, str] = {}

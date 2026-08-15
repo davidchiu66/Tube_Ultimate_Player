@@ -15,6 +15,8 @@ downloads/
 cache/
 data/
 config/user_config.json
+config/backup_targets.json
+config/.backup_key
 cookie.txt
 
 # Windows / packaging

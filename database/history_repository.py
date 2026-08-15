@@ -62,7 +62,38 @@ class HistoryRepository:
                     ),
                 )
 
+    def remove(self, video_id: str) -> int:
+        """删除某个视频的全部历史行，返回实际删除数。"""
+        clean_id = str(video_id or "").strip()
+        if not clean_id:
+            return 0
+        with self.db.connection() as conn:
+            cursor = conn.execute("DELETE FROM history WHERE video_id = ?", (clean_id,))
+            return int(cursor.rowcount or 0)
+
+    def remove_many(self, video_ids: list[str]) -> int:
+        """用一条语句批量删除，返回实际删除的历史行数。"""
+        ids = list(
+            dict.fromkeys(
+                str(video_id or "").strip()
+                for video_id in list(video_ids or [])
+                if str(video_id or "").strip()
+            )
+        )
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self.db.connection() as conn:
+            cursor = conn.execute(f"DELETE FROM history WHERE video_id IN ({placeholders})", ids)
+            return int(cursor.rowcount or 0)
+
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        try:
+            normalized_limit = max(0, int(limit))
+        except (TypeError, ValueError):
+            normalized_limit = 50
+        if normalized_limit == 0:
+            return []
         with self.db.connection() as conn:
             rows = conn.execute(
                 """
@@ -72,7 +103,7 @@ class HistoryRepository:
                 ORDER BY last_played_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (normalized_limit,),
             ).fetchall()
         result = []
         for row in rows:

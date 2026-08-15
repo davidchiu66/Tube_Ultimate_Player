@@ -40,7 +40,13 @@ class FavoriteRepository:
 
     def remove_many(self, video_ids: list[str]) -> int:
         """批量删除，返回实际删除的行数。"""
-        ids = [str(video_id) for video_id in video_ids if str(video_id or "").strip()]
+        ids = list(
+            dict.fromkeys(
+                str(video_id or "").strip()
+                for video_id in list(video_ids or [])
+                if str(video_id or "").strip()
+            )
+        )
         if not ids:
             return 0
         # 一条语句一次事务，避免上千行时反复开关连接。

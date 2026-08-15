@@ -499,6 +499,8 @@ class DownloadManager(QObject):
             self._save_tasks()
 
     def _save_tasks(self) -> None:
+        if getattr(self, "_persistence_suspended", False):
+            return
         try:
             self._save_timer.stop()
             TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -511,6 +513,11 @@ class DownloadManager(QObject):
             temp_path.replace(TASKS_FILE)
         except OSError:
             logger.exception("failed to save download tasks file=%s", TASKS_FILE)
+
+    def suspend_persistence(self) -> None:
+        """恢复完成后阻止旧进程把内存任务队列覆盖回磁盘。"""
+        self._save_timer.stop()
+        self._persistence_suspended = True
 
     def _schedule_save(self) -> None:
         self._save_timer.start()

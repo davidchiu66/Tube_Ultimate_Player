@@ -51,7 +51,7 @@ class FavoriteRepositoryBatchTests(unittest.TestCase):
         self.assertEqual(len(self.favorites.favorite_ids()), 3)
 
     def test_remove_many_ignores_blank_and_unknown_ids(self) -> None:
-        removed = self.favorites.remove_many(["", "  ", "vid-1", "not-there"])
+        removed = self.favorites.remove_many(["", "  ", " vid-1 ", "vid-1", "not-there"])
 
         self.assertEqual(removed, 1)
         self.assertEqual(self.favorites.favorite_ids(), {"vid-0", "vid-2"})
@@ -169,11 +169,16 @@ class FavoriteBatchWiringTests(unittest.TestCase):
                 raise enqueue_result
             return enqueue_result
 
+        def remove_many(_ids):
+            if isinstance(removed, Exception):
+                raise removed
+            return removed
+
         return SimpleNamespace(
             current_video=None,
             toast=SimpleNamespace(show_message=messages.append),
             download_manager=SimpleNamespace(enqueue_many=enqueue_many),
-            favorites=SimpleNamespace(remove_many=lambda ids: removed),
+            favorites=SimpleNamespace(remove_many=remove_many),
             player_page=SimpleNamespace(set_favorite_state=lambda *a, **k: None),
             _refresh_favorite_views=lambda: None,
             _messages=messages,
@@ -232,6 +237,14 @@ class FavoriteBatchWiringTests(unittest.TestCase):
         MainWindow._remove_favorites(state, ["", "   "])
 
         self.assertEqual(state._messages, [])
+
+    def test_batch_remove_failure_is_reported_not_raised(self) -> None:
+        state = self._state(removed=RuntimeError("boom"))
+
+        MainWindow._remove_favorites(state, ["vid-0"])
+
+        self.assertEqual(state._messages, ["批量删除收藏失败"])
+        self.assertEqual(state._calls, [])
 
 
 if __name__ == "__main__":

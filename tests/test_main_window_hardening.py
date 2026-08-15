@@ -25,12 +25,12 @@ LAZY_PAGE_NAMES = (
 )
 
 
-def make_quality(label: str = "1080p") -> VideoQuality:
+def make_quality(label: str = "1080p", *, height: int = 1080, fps: int = 30) -> VideoQuality:
     return VideoQuality(
         label=label,
-        height=1080,
-        width=1920,
-        fps=30,
+        height=height,
+        width=max(1, height * 16 // 9),
+        fps=fps,
         vcodec="avc1",
         acodec="mp4a.40.2",
         ext="mp4",
@@ -74,7 +74,15 @@ class DefaultQualityTests(unittest.TestCase):
     """F3：没有任何清晰度时返回 None，而不是让 StopIteration 逃逸。"""
 
     def _state(self, preferred: str = "Auto"):
-        return SimpleNamespace(config=SimpleNamespace(get=lambda _key, _default=None: preferred))
+        normalized = str(preferred or "").strip().lower()
+        tier = normalized if normalized in {"high", "medium", "low"} else "high"
+        override = "" if not preferred or normalized == "auto" or normalized in {"high", "medium", "low"} else preferred
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                default_quality_tier=lambda: tier,
+                default_quality_label_override=lambda: override,
+            )
+        )
 
     def test_empty_qualities_returns_none(self) -> None:
         video = VideoInfo(video_id="abc", title="无清晰度")
@@ -87,21 +95,42 @@ class DefaultQualityTests(unittest.TestCase):
         video = VideoInfo(
             video_id="abc",
             title="有清晰度",
-            qualities={"720p": make_quality("720p"), "1080p": make_quality("1080p")},
+            qualities={
+                "720p": make_quality("720p", height=720),
+                "1080p": make_quality("1080p", height=1080),
+            },
         )
 
         result = MainWindow._select_default_quality(self._state("1080p"), video)
 
         self.assertEqual(result.label, "1080p")
 
-    def test_auto_falls_back_to_first_quality(self) -> None:
+    def test_auto_falls_back_to_highest_quality(self) -> None:
         video = VideoInfo(
             video_id="abc",
             title="自动",
-            qualities={"720p": make_quality("720p"), "1080p": make_quality("1080p")},
+            qualities={
+                "720p": make_quality("720p", height=720),
+                "1080p": make_quality("1080p", height=1080),
+            },
         )
 
         result = MainWindow._select_default_quality(self._state("Auto"), video)
+
+        self.assertEqual(result.label, "1080p")
+
+    def test_medium_selects_the_middle_resolution(self) -> None:
+        video = VideoInfo(
+            video_id="abc",
+            title="中档",
+            qualities={
+                "480p": make_quality("480p", height=480),
+                "1080p": make_quality("1080p", height=1080),
+                "720p": make_quality("720p", height=720),
+            },
+        )
+
+        result = MainWindow._select_default_quality(self._state("medium"), video)
 
         self.assertEqual(result.label, "720p")
 
