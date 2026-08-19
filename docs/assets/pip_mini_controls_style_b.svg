@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="156" viewBox="0 0 980 156">
+  <rect width="980" height="156" fill="#111418"/>
+  <text x="24" y="22" fill="#a6b2bf" font-family="Segoe UI,Arial" font-size="13">Style B - Solid contrast</text>
+  <g transform="translate(24 42)" stroke="#f4f7fa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(0 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M14 12v14M24 12v14"/></g>
+    <g transform="translate(46 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M25 11l-9 8 9 8z" fill="#f4f7fa" stroke="none"/></g>
+    <g transform="translate(92 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M13 11l9 8-9 8zM25 11l-9 8 9 8z" fill="#f4f7fa" stroke="none"/></g>
+    <g transform="translate(138 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M11 15h5l7-5v18l-7-5h-5z" fill="#f4f7fa" stroke="none"/><path d="M28 13l-7 12"/></g>
+    <g transform="translate(184 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M11 15h5l7-5v18l-7-5h-5z" fill="#f4f7fa" stroke="none"/><path d="M27 13c3 3 3 9 0 12"/></g>
+    <g transform="translate(230 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M15 11l12 8-12 8z" fill="#f4f7fa" stroke="none"/></g>
+    <g transform="translate(276 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M11 12h16v14H11zM15 9v7M23 9v7"/></g>
+    <g transform="translate(322 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M11 19l6 6 11-12"/></g>
+    <g transform="translate(368 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M11 13l8-5 8 5v13H11zM15 26v-7h8v7"/></g>
+    <g transform="translate(414 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M12 12h14v14H12zM16 16h6v6h-6z"/></g>
+    <g transform="translate(460 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M12 12h14v14H12zM16 16h6v6h-6z" fill="#f4f7fa"/></g>
+    <g transform="translate(506 0)"><rect width="38" height="38" rx="6" fill="#26313b" stroke="#4a5966"/><path d="M13 13l12 12M25 13L13 25"/></g>
+  </g>
+  <g transform="translate(24 102)" fill="#8f9ba7" font-family="Segoe UI,Arial" font-size="11">
+    <text x="0" y="0">pause</text><text x="46" y="0">prev</text><text x="92" y="0">next</text><text x="138" y="0">mute</text><text x="184" y="0">volume</text><text x="230" y="0">play</text><text x="276" y="0">fullscreen</text><text x="368" y="0">restore</text><text x="414" y="0">lock</text><text x="460" y="0">unlock</text><text x="506" y="0">close</text>
+  </g>
+</svg>

@@ -14,7 +14,7 @@
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.23-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.27-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
@@ -31,7 +31,7 @@
 - 顶部工具栏新增明确的“播放列表”入口，可直接查看当前列表和已保存列表
 - “播放 URL”面板保留最近播放地址，可直接点选重播
 - 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放
-- 使用 `libmpv` 播放，支持暂停、停止、全屏、清晰度切换、倍速、字幕与自动隐藏控制面板
+- 使用 `libmpv` 播放，支持暂停、停止、全屏、小窗播放、清晰度切换、倍速、字幕与自动隐藏控制面板
 - 支持 `Esc` 退出全屏、`Z/X` 调整倍速、鼠标滚轮调节音量，并在屏幕中央显示音量/倍速提示
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
 - 投屏链路针对长视频做了加固：上游断流自动重连、协议头补全、令牌滑动续期
@@ -70,7 +70,7 @@
 | 首页 | YouTube / Bilibili 推荐内容、分页浏览、卡片独立播放/收藏/下载、更新时间、长标题三行省略 |
 | 搜索 | 双站点关键词搜索、分页、卡片独立播放/收藏/下载、更新时间、等待动画与长标题三行省略 |
 | URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 列表类链接，保留最近播放历史 |
-| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、浏览器播放、全屏、快进/后退、静音、滚轮与快捷键调音量、音量/倍速中屏提示、自动隐藏控制器 |
+| 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、浏览器播放、全屏、小窗拖动/等比缩放/置顶、快进/后退、静音、滚轮与快捷键调音量、音量/倍速中屏提示、自动隐藏控制器 |
 | 字幕 | Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举、常用轨直选、完整列表搜索、下载后本地加载 |
 | 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表面板、已保存列表加载/删除、命名保存、自动连播、批量下载、更新时间列 |
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制、上游断流重连 |
@@ -263,7 +263,8 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 | `C` | 收藏当前视频 |
 | `Ctrl+C` | 投屏 / 停止投屏 |
 | `Enter / Return` | 全屏 / 退出全屏 |
-| `Esc` | 退出全屏 |
+| `W` | 进入 / 退出小窗 |
+| `Esc` | 小窗中退出小窗；普通模式退出全屏 |
 | `← / →` | 后退 / 前进 10 秒 |
 | `Ctrl+← / Ctrl+→` | 后退 / 前进 60 秒 |
 | `↑ / ↓` | 音量增加 / 降低 5 |

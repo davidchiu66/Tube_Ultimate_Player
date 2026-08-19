@@ -5,12 +5,13 @@ import os
 import sys
 import threading
 import time
-from functools import partial, wraps
+from dataclasses import dataclass
+from functools import lru_cache, partial, wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QCoreApplication, QThreadPool, QTimer, QUrl, Qt, Slot
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
+from PySide6.QtCore import QCoreApplication, QPoint, QRect, QSize, QThreadPool, QTimer, QUrl, Qt, Slot
+from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
@@ -62,6 +63,19 @@ from ui.favorite_page import FavoritePage
 from ui.history_page import HistoryPage
 from ui.home_page import HomePage
 from ui.player_page import PlayerPage
+from ui.picture_in_picture import (
+    PictureInPictureResizeEdge,
+    clamp_geometry_to_screen,
+    constrain_size,
+    cursor_shape_for_resize_edge,
+    initial_geometry,
+    maximum_size_for_screen,
+    minimum_size_for_aspect,
+    normalized_aspect,
+    resize_edge_at,
+    resize_geometry,
+    snap_geometry_to_edges,
+)
 from ui.playlist_page import PlaylistPage
 from ui.settings_page import SettingsPage
 from ui.toolbar import PlayerToolbar
@@ -91,6 +105,57 @@ SHUTDOWN_WAIT_MS = 3000
 HOME_CACHE_TTL_SECONDS = 300.0
 _COOKIE_PROBE_STATE_LOCK = threading.Lock()
 _COOKIE_PROBE_INFLIGHT = False
+
+
+@lru_cache(maxsize=1)
+def _windows_user32_api():
+    """Return 64-bit-safe Win32 functions used by PIP style transitions."""
+    if not sys.platform.startswith("win"):
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    user32.SetWindowLongW.restype = ctypes.c_long
+    user32.SetWindowPos.argtypes = [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    user32.RedrawWindow.restype = wintypes.BOOL
+    return ctypes, wintypes, user32
+
+
+@dataclass(slots=True)
+class PictureInPictureSnapshot:
+    geometry: QRect
+    normal_geometry: QRect
+    window_flags: Qt.WindowType
+    was_fullscreen: bool
+    was_maximized: bool
+    was_topmost: bool
+    top_bar_visible: bool
+    stack_widget: QWidget
+    player_fullscreen: bool
+    playlist_overlay_visible: bool
+    collection_overlay_visible: bool
+    minimum_size: QSize
+    maximum_size: QSize
+    native_style: int | None
+    native_ex_style: int | None
+    native_window_id: int
+    video_window_id: int
 
 
 def _skip_after_shutdown(method):
@@ -195,6 +260,23 @@ class MainWindow(QMainWindow):
         self._playback_return_widget: QWidget | None = None
         self._playback_finished = False
         self._was_maximized_before_fullscreen: bool | None = None
+        self._player_fullscreen_restore_geometry = QRect()
+        self._pending_normal_window_geometry_restore = QRect()
+        self._picture_in_picture = False
+        self._picture_in_picture_snapshot: PictureInPictureSnapshot | None = None
+        self._picture_in_picture_aspect = 16 / 9
+        self._picture_in_picture_locked = False
+        self._picture_in_picture_press_position: QPoint | None = None
+        self._picture_in_picture_start_geometry = QRect()
+        self._picture_in_picture_resize_edge = PictureInPictureResizeEdge.NONE
+        self._picture_in_picture_gesture_moved = False
+        self._picture_in_picture_press_allows_click = False
+        self._picture_in_picture_leave_pending = False
+        self._picture_in_picture_restore_top_bar_visible = True
+        self._picture_in_picture_frame_restore_timer = QTimer(self)
+        self._picture_in_picture_frame_restore_timer.setSingleShot(True)
+        self._picture_in_picture_frame_restore_timer.setInterval(200)
+        self._picture_in_picture_frame_restore_timer.timeout.connect(self._ensure_windows_normal_frame)
         # "进入播放默认全屏"只在一次播放动作的开头生效一次：用户之后手动退出全屏，
         # 不能因为播放列表自动连播、切清晰度等内部重载又被拉回全屏。
         self._pending_playback_fullscreen = False
@@ -473,6 +555,9 @@ class MainWindow(QMainWindow):
         self.player_page.cast_requested.connect(self._show_cast_dialog)
         self.player_page.browser_play_requested.connect(self._open_current_video_in_browser)
         self.player_page.fullscreen_requested.connect(self._toggle_fullscreen)
+        self.player_page.picture_in_picture_requested.connect(self._toggle_picture_in_picture)
+        self.player_page.picture_in_picture_mouse_event.connect(self._handle_picture_in_picture_mouse_event)
+        self.player_page.picture_in_picture_lock_changed.connect(self._set_picture_in_picture_locked)
         self.player_page.download_requested.connect(self._download_current_video)
         self.player_page.favorite_requested.connect(self._favorite_current_video)
         self.player_page.playlist_entry_requested.connect(self._play_playlist_index)
@@ -497,6 +582,7 @@ class MainWindow(QMainWindow):
         self.mpv.position_changed.connect(self._handle_mpv_position_changed)
         self.mpv.duration_changed.connect(self._handle_mpv_duration_changed)
         self.mpv.pause_changed.connect(self._handle_mpv_pause_changed)
+        self.mpv.video_aspect_changed.connect(self._handle_video_aspect_changed)
         self.mpv.playback_finished.connect(self._handle_playback_finished)
 
     def _apply_window_icon(self) -> None:
@@ -1416,6 +1502,8 @@ class MainWindow(QMainWindow):
             self.player_page.set_loading(False)
             self.player_page.set_playback_available(False)
             self.player_page.set_cast_available(False)
+            if getattr(self, "_picture_in_picture", False):
+                self._leave_picture_in_picture()
             QMessageBox.critical(
                 self,
                 "解析失败",
@@ -1477,12 +1565,16 @@ class MainWindow(QMainWindow):
             self._apply_playback_window_mode()
         except Exception as exc:
             self._pending_playback_fullscreen = False
+            if getattr(self, "_picture_in_picture", False):
+                self._leave_picture_in_picture()
             logger.exception("playback load failed")
             QMessageBox.critical(self, "播放失败", str(exc))
 
     @_skip_after_shutdown
     def _resolve_failed(self, message: str) -> None:
         self._pending_playback_fullscreen = False
+        if getattr(self, "_picture_in_picture", False):
+            self._leave_picture_in_picture()
         logger.error("resolve failed: %s", message)
         QMessageBox.critical(
             self,
@@ -1946,11 +2038,15 @@ class MainWindow(QMainWindow):
             self._apply_playback_window_mode()
         except Exception as exc:
             self._pending_playback_fullscreen = False
+            if getattr(self, "_picture_in_picture", False):
+                self._leave_picture_in_picture()
             logger.exception("local playback load failed path=%s", path)
             QMessageBox.critical(self, "播放失败", str(exc))
 
     def _stop_playback(self) -> None:
         logger.info("stop playback requested")
+        if getattr(self, "_picture_in_picture", False):
+            self._leave_picture_in_picture()
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         self._invalidate_creator_playlist_request()
@@ -1960,6 +2056,22 @@ class MainWindow(QMainWindow):
         if self.isFullScreen():
             self._leave_player_fullscreen()
         self._return_after_stop()
+        self._restore_main_toolbar_after_stop()
+        QTimer.singleShot(0, self._restore_main_toolbar_after_stop)
+
+    def _restore_main_toolbar_after_stop(self) -> None:
+        """停止播放返回窗口界面后，覆盖小窗/全屏留下的延迟可见性状态。"""
+        self._picture_in_picture_restore_top_bar_visible = True
+        if getattr(self, "_picture_in_picture", False) or self.isFullScreen():
+            return
+        self.top_bar_widget.setVisible(True)
+        self.top_bar_widget.setEnabled(True)
+        layout = self.centralWidget().layout() if self.centralWidget() is not None else None
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        self.stack.raise_()
+        self.top_bar_widget.raise_()
 
     def _handle_playback_finished(self) -> None:
         # 谁最后驱动了当前播放，谁优先负责连播；另一侧作为兜底。
@@ -2054,6 +2166,8 @@ class MainWindow(QMainWindow):
         self.player_page.set_playback_finished(finished)
 
     def _show_cast_dialog(self) -> None:
+        if getattr(self, "_picture_in_picture", False):
+            self._leave_picture_in_picture()
         if self._dlna_device is not None:
             self._stop_dlna_cast(resume_local=True, notify=True)
             return
@@ -2131,6 +2245,7 @@ class MainWindow(QMainWindow):
         )
         remote_seek = 0.0 if source.requires_mux else position
         self._dlna_cast_pending = True
+        self.player_page.set_cast_pending(True)
         self._dlna_pending_cast_request_id = self._dlna_action_sequence + 1
         self._dlna_pending_position_offset = position if source.requires_mux else 0.0
         self._dlna_pending_seek_supported = not source.requires_mux
@@ -2177,6 +2292,7 @@ class MainWindow(QMainWindow):
             seekable=True,
         )
         self._dlna_cast_pending = True
+        self.player_page.set_cast_pending(True)
         self._dlna_pending_cast_request_id = self._dlna_action_sequence + 1
         self._dlna_pending_position_offset = 0.0
         self._dlna_pending_seek_supported = True
@@ -2260,6 +2376,7 @@ class MainWindow(QMainWindow):
                 self.dlna_media_server.stop_streams()
                 return
             self._dlna_cast_pending = False
+            self.player_page.set_cast_pending(False)
             self._dlna_pending_cast_request_id = 0
             self._dlna_device = device
             self._dlna_remote_paused = False
@@ -2307,6 +2424,7 @@ class MainWindow(QMainWindow):
             if context is not None:
                 self._forget_cached_dlna_device(context[1])
             self._dlna_cast_pending = False
+            self.player_page.set_cast_pending(False)
             self._dlna_pending_cast_request_id = 0
             self._dlna_pending_position_offset = 0.0
             self.dlna_media_server.stop_streams()
@@ -2326,6 +2444,7 @@ class MainWindow(QMainWindow):
 
     def _stop_dlna_cast(self, *, resume_local: bool, notify: bool) -> None:
         self._dlna_cast_pending = False
+        self.player_page.set_cast_pending(False)
         self._dlna_pending_cast_request_id = 0
         device = self._dlna_device
         self._dlna_device = None
@@ -2468,6 +2587,10 @@ class MainWindow(QMainWindow):
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
         self.download_manager.reload_settings()
         self.player_page.reload_shortcuts()
+        set_pip_style = getattr(self.player_page, "set_picture_in_picture_style", None)
+        get_pip_style = getattr(self.config, "picture_in_picture_style", None)
+        if callable(set_pip_style):
+            set_pip_style(get_pip_style() if callable(get_pip_style) else "random")
         self._home_cache = []
         self._home_page = 1
         self._home_has_next = False
@@ -2677,16 +2800,465 @@ class MainWindow(QMainWindow):
         logger.info("applying playback window mode: fullscreen")
         self._enter_player_fullscreen()
 
+    def _toggle_picture_in_picture(self) -> None:
+        if self._picture_in_picture:
+            # Double-click/按钮点击可能仍处于 Qt 的鼠标捕获周期；顶层窗口在该事件
+            # 中立刻重建会把捕获留在旧 native 窗口，导致恢复后的工具栏收不到点击。
+            if QApplication.mouseButtons() != Qt.MouseButton.NoButton or QWidget.mouseGrabber() is not None:
+                if self._picture_in_picture_leave_pending:
+                    return
+                self._picture_in_picture_leave_pending = True
+                QTimer.singleShot(50, self._deferred_leave_picture_in_picture)
+            else:
+                self._leave_picture_in_picture()
+        else:
+            self._enter_picture_in_picture()
+
+    def _deferred_leave_picture_in_picture(self) -> None:
+        self._picture_in_picture_leave_pending = False
+        if self._picture_in_picture:
+            self._leave_picture_in_picture()
+
+    def _picture_in_picture_screen(self, point: QPoint | None = None):
+        target = point or self.frameGeometry().center()
+        screen = QGuiApplication.screenAt(target)
+        return screen or self.screen() or QGuiApplication.primaryScreen()
+
+    def _enter_picture_in_picture(self) -> None:
+        if self._picture_in_picture:
+            return
+        if not self.player_page._has_media or self.player_page._loading:
+            self.toast.show_message("当前没有可用的播放画面")
+            return
+        if self._casting_to_dlna():
+            self.toast.show_message("投屏期间不能进入小窗")
+            return
+
+        native_styles = self._read_windows_window_styles()
+        if sys.platform.startswith("win") and native_styles is None:
+            logger.error("PIP entry aborted because native window styles are unavailable")
+            self.toast.show_message("无法读取窗口状态，小窗模式未启动")
+            return
+        snapshot = PictureInPictureSnapshot(
+            geometry=QRect(self.geometry()),
+            normal_geometry=QRect(self.normalGeometry()),
+            window_flags=self.windowFlags(),
+            was_fullscreen=self.isFullScreen(),
+            was_maximized=self.isMaximized(),
+            was_topmost=self._is_topmost,
+            top_bar_visible=self.top_bar_widget.isVisible(),
+            stack_widget=self.stack.currentWidget(),
+            player_fullscreen=self.player_page._fullscreen,
+            playlist_overlay_visible=self.player_page.playlist_overlay.isVisible(),
+            collection_overlay_visible=self.player_page.collection_overlay.isVisible(),
+            minimum_size=QSize(self.minimumSize()),
+            maximum_size=QSize(self.maximumSize()),
+            native_style=native_styles[0] if native_styles is not None else None,
+            native_ex_style=native_styles[1] if native_styles is not None else None,
+            native_window_id=int(self.winId()),
+            video_window_id=int(self.player_page.video_widget.winId()),
+        )
+        self._picture_in_picture_snapshot = snapshot
+        self._picture_in_picture_aspect = normalized_aspect(self.mpv.video_aspect_ratio())
+        screen = self._picture_in_picture_screen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        saved = self.config.picture_in_picture_settings()
+        saved_geometry = None
+        if saved["width"] > 0 and saved["height"] > 0:
+            saved_geometry = QRect(saved["x"], saved["y"], saved["width"], saved["height"])
+
+        self._picture_in_picture = True
+        self._picture_in_picture_locked = False
+        self.stack.setCurrentWidget(self.player_page)
+        self.top_bar_widget.hide()
+        self.player_page.set_picture_in_picture(True)
+        if native_styles is not None:
+            # setWindowFlags() recreates the HWND hierarchy on Windows. libmpv is
+            # bound to video_widget's original HWND, so PIP must alter styles in place.
+            if snapshot.was_fullscreen or snapshot.was_maximized:
+                self.showNormal()
+            native_applied = self._apply_windows_window_styles(
+                native_styles[0] & ~0x21C40000,  # WS_CAPTION | WS_THICKFRAME | min/max state
+                native_styles[1] | 0x00000008,  # WS_EX_TOPMOST
+                topmost=True,
+            )
+            if not native_applied:
+                logger.error("PIP entry aborted because native frameless style could not be applied")
+                self._apply_windows_window_styles(
+                    native_styles[0] | 0x00CF0000,
+                    native_styles[1],
+                    topmost=snapshot.was_topmost,
+                )
+                self._picture_in_picture = False
+                self.player_page.set_picture_in_picture(False)
+                self.top_bar_widget.show()
+                self.stack.setCurrentWidget(snapshot.stack_widget)
+                self._picture_in_picture_snapshot = None
+                self.toast.show_message("无法切换窗口样式，小窗模式未启动")
+                return
+        else:
+            persisted_flags = snapshot.window_flags | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(persisted_flags)
+            self.show()
+        self.setMinimumSize(QSize(1, 1))
+        max_size = maximum_size_for_screen(available, self._picture_in_picture_aspect)
+        min_size = minimum_size_for_aspect(self._picture_in_picture_aspect)
+        if min_size.width() > max_size.width() or min_size.height() > max_size.height():
+            min_size = QSize(max_size)
+        self.setMinimumSize(min_size)
+        self.setMaximumSize(max_size)
+        geometry = initial_geometry(available, self._picture_in_picture_aspect, saved_geometry)
+        self.setGeometry(geometry)
+        if saved.get("muted") and self.player_page.volume_slider.value() > 0:
+            self.player_page.set_volume(0)
+        self.raise_()
+        self.activateWindow()
+        self.player_page.set_picture_in_picture_locked(False)
+        self._check_picture_in_picture_window_ids(snapshot, "enter")
+        logger.info("entered picture-in-picture geometry=%s aspect=%.3f", geometry, self._picture_in_picture_aspect)
+
+    def _leave_picture_in_picture(self) -> None:
+        if not self._picture_in_picture:
+            return
+        grabber = QWidget.mouseGrabber()
+        if grabber is not None:
+            grabber.releaseMouse()
+        self.releaseMouse()
+        snapshot = self._picture_in_picture_snapshot
+        if snapshot is None:
+            self._picture_in_picture = False
+            self.player_page.set_picture_in_picture(False)
+            return
+        self._persist_picture_in_picture_state()
+        self._picture_in_picture = False
+        self._picture_in_picture_locked = False
+        self._picture_in_picture_press_position = None
+        self.player_page.set_picture_in_picture_locked(False)
+        self.player_page.set_picture_in_picture(False)
+        # The normal window always owns the main toolbar.  Do not reuse a stale
+        # QWidget visibility snapshot: it can be false when PIP was entered
+        # during a pending fullscreen transition.
+        self._picture_in_picture_restore_top_bar_visible = not snapshot.was_fullscreen
+        if snapshot.native_style is None or snapshot.native_ex_style is None:
+            restored_flags = snapshot.window_flags
+            if snapshot.was_topmost:
+                restored_flags |= Qt.WindowType.WindowStaysOnTopHint
+            else:
+                restored_flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(restored_flags)
+        self._is_topmost = snapshot.was_topmost
+        self.top_bar_widget.set_topmost_state(self._is_topmost)
+        self.setMinimumSize(snapshot.minimum_size)
+        self.setMaximumSize(snapshot.maximum_size)
+        self.top_bar_widget.setVisible(not snapshot.was_fullscreen)
+        self.stack.setCurrentWidget(snapshot.stack_widget)
+        self.show()
+        if snapshot.was_fullscreen:
+            self.showFullScreen()
+        elif snapshot.was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+            geometry = snapshot.normal_geometry if snapshot.normal_geometry.isValid() else snapshot.geometry
+            self.setGeometry(geometry)
+        if snapshot.native_style is not None and snapshot.native_ex_style is not None:
+            # showNormal/showMaximized may adjust style bits; restore the exact
+            # pre-PIP style after the final window state is selected.  A stale
+            # snapshot from an earlier frameless transition must not leave the
+            # normal window without its native title bar.
+            restored_style = snapshot.native_style
+            if not snapshot.was_fullscreen:
+                restored_style |= 0x00CF0000  # WS_OVERLAPPEDWINDOW
+            if not self._apply_windows_window_styles(
+                restored_style,
+                snapshot.native_ex_style,
+                topmost=snapshot.was_topmost,
+            ):
+                logger.warning("native PIP style restore failed; HWND retained but style may differ")
+        self.player_page.set_fullscreen(snapshot.player_fullscreen)
+        self.player_page.playlist_overlay.setVisible(snapshot.playlist_overlay_visible)
+        self.player_page.collection_overlay.setVisible(snapshot.collection_overlay_visible)
+        self._check_picture_in_picture_window_ids(snapshot, "leave")
+        self._picture_in_picture_snapshot = None
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(0, self._finalize_picture_in_picture_restore)
+        logger.info("left picture-in-picture")
+
+    def _finalize_picture_in_picture_restore(self) -> None:
+        if self._picture_in_picture:
+            return
+        layout = self.centralWidget().layout() if self.centralWidget() is not None else None
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        show_top_bar = self._picture_in_picture_restore_top_bar_visible and not self.isFullScreen()
+        self.top_bar_widget.setVisible(show_top_bar)
+        if show_top_bar:
+            self.top_bar_widget.raise_()
+        self.top_bar_widget.setEnabled(True)
+        self.stack.raise_()
+        if show_top_bar:
+            self.top_bar_widget.raise_()
+        self.player_page.video_widget.updateGeometry()
+        self._refresh_native_window_frame()
+        self._ensure_windows_normal_frame()
+        self._picture_in_picture_frame_restore_timer.start()
+        self.unsetCursor()
+        self.player_page._set_cursor_hidden(False)
+        self.raise_()
+        self.activateWindow()
+
+    def _refresh_native_window_frame(self) -> None:
+        """Force Windows to recalculate the non-client hit-test area after flags restore."""
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            api = _windows_user32_api()
+            if api is None:
+                return
+            ctypes, wintypes, user32 = api
+            hwnd = int(self.winId())
+            swp_frame_changed = 0x0020
+            swp_no_activate = 0x0010
+            swp_no_move = 0x0002
+            swp_no_size = 0x0001
+            swp_no_zorder = 0x0004
+            user32.SetWindowPos(
+                wintypes.HWND(hwnd),
+                wintypes.HWND(),
+                0,
+                0,
+                0,
+                0,
+                swp_no_move | swp_no_size | swp_no_zorder | swp_no_activate | swp_frame_changed,
+            )
+            rdw_frame = 0x0400
+            rdw_invalidate = 0x0001
+            rdw_update_now = 0x0100
+            user32.RedrawWindow(wintypes.HWND(hwnd), None, None, rdw_frame | rdw_invalidate | rdw_update_now)
+        except (AttributeError, OSError, TypeError, ValueError):
+            logger.debug("unable to refresh native window frame", exc_info=True)
+
+    def _read_windows_window_styles(self) -> tuple[int, int] | None:
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            api = _windows_user32_api()
+            if api is None:
+                return None
+            _ctypes, wintypes, user32 = api
+            hwnd = int(self.winId())
+            native_hwnd = wintypes.HWND(hwnd)
+            if not user32.IsWindow(native_hwnd):
+                return None
+            style = int(user32.GetWindowLongW(native_hwnd, -16)) & 0xFFFFFFFF
+            ex_style = int(user32.GetWindowLongW(native_hwnd, -20)) & 0xFFFFFFFF
+            return style, ex_style
+        except (AttributeError, OSError, TypeError, ValueError):
+            logger.warning("unable to read native window styles; falling back to Qt flags", exc_info=True)
+            return None
+
+    def _apply_windows_window_styles(self, style: int, ex_style: int, *, topmost: bool) -> bool:
+        """Apply Win32 frame/topmost styles without recreating this window or mpv's child HWND."""
+        try:
+            api = _windows_user32_api()
+            if api is None:
+                return False
+            ctypes, wintypes, user32 = api
+            hwnd = int(self.winId())
+            native_hwnd = wintypes.HWND(hwnd)
+            if not user32.IsWindow(native_hwnd):
+                return False
+            user32.SetWindowLongW(native_hwnd, -16, ctypes.c_long(style).value)
+            user32.SetWindowLongW(native_hwnd, -20, ctypes.c_long(ex_style).value)
+            insert_after = -1 if topmost else -2  # HWND_TOPMOST / HWND_NOTOPMOST
+            flags = 0x0001 | 0x0002 | 0x0010 | 0x0020  # NOSIZE | NOMOVE | NOACTIVATE | FRAMECHANGED
+            result = user32.SetWindowPos(native_hwnd, ctypes.c_void_p(insert_after), 0, 0, 0, 0, flags)
+            if not result:
+                logger.warning("SetWindowPos failed while applying native PIP style hwnd=%s topmost=%s", hwnd, topmost)
+                return False
+            user32.RedrawWindow(native_hwnd, None, None, 0x0001 | 0x0100 | 0x0400)
+            return True
+        except (AttributeError, OSError, TypeError, ValueError):
+            logger.warning("unable to apply native PIP window styles", exc_info=True)
+            return False
+
+    def _ensure_windows_normal_frame(self) -> None:
+        """Converge the post-PIP normal window to a visible native frame."""
+        if self._picture_in_picture or self.isFullScreen() or not sys.platform.startswith("win"):
+            return
+        styles = self._read_windows_window_styles()
+        if styles is None:
+            logger.debug("unable to enforce the normal window frame after leaving PIP")
+            return
+        style, ex_style = styles
+        if style & 0x00CF0000 == 0x00CF0000:
+            return
+        self._apply_windows_window_styles(style | 0x00CF0000, ex_style, topmost=self._is_topmost)
+
+    def _check_picture_in_picture_window_ids(self, snapshot: PictureInPictureSnapshot, stage: str) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        current_window_id = int(self.winId())
+        current_video_id = int(self.player_page.video_widget.winId())
+        if current_window_id != snapshot.native_window_id or current_video_id != snapshot.video_window_id:
+            logger.error(
+                "PIP %s unexpectedly recreated HWNDs main=%s->%s video=%s->%s",
+                stage,
+                snapshot.native_window_id,
+                current_window_id,
+                snapshot.video_window_id,
+                current_video_id,
+            )
+
+    def _persist_picture_in_picture_state(self) -> None:
+        geometry = self.frameGeometry()
+        self.config.set_picture_in_picture_settings(
+            x=geometry.x(),
+            y=geometry.y(),
+            width=geometry.width(),
+            height=geometry.height(),
+            muted=self.player_page.volume_slider.value() == 0,
+        )
+        self.config.save()
+
+    def _set_picture_in_picture_locked(self, locked: bool) -> None:
+        self._picture_in_picture_locked = bool(locked)
+        if self._picture_in_picture_locked:
+            self._picture_in_picture_press_position = None
+            self._picture_in_picture_resize_edge = PictureInPictureResizeEdge.NONE
+            self.unsetCursor()
+            self.player_page.set_picture_in_picture_cursor(Qt.CursorShape.ArrowCursor)
+
+    def _handle_picture_in_picture_mouse_event(self, kind: str, position: QPoint) -> None:
+        if not self._picture_in_picture:
+            return
+        position = QPoint(position)
+        if kind == "press":
+            self._picture_in_picture_press_position = position
+            self._picture_in_picture_start_geometry = QRect(self.frameGeometry())
+            self._picture_in_picture_resize_edge = PictureInPictureResizeEdge.NONE
+            if not self._picture_in_picture_locked:
+                self._picture_in_picture_resize_edge = resize_edge_at(self.frameGeometry(), position)
+            title_bar = self.player_page.picture_in_picture_title_bar
+            title_hit = (
+                title_bar.isVisible()
+                and title_bar.rect().contains(title_bar.mapFromGlobal(position))
+            )
+            self._picture_in_picture_press_allows_click = (
+                not title_hit and self._picture_in_picture_resize_edge == PictureInPictureResizeEdge.NONE
+            )
+            self._picture_in_picture_gesture_moved = False
+            return
+        if kind == "move":
+            if self._picture_in_picture_press_position is None:
+                self._update_picture_in_picture_cursor(position)
+                return
+            if self._picture_in_picture_locked:
+                return
+            delta = position - self._picture_in_picture_press_position
+            if not self._picture_in_picture_gesture_moved:
+                if delta.manhattanLength() < QApplication.startDragDistance():
+                    return
+                self._picture_in_picture_gesture_moved = True
+            screen = self._picture_in_picture_screen(position)
+            if screen is None:
+                return
+            available = screen.availableGeometry()
+            if self._picture_in_picture_resize_edge != PictureInPictureResizeEdge.NONE:
+                geometry = resize_geometry(
+                    self._picture_in_picture_start_geometry,
+                    self._picture_in_picture_resize_edge,
+                    position,
+                    self._picture_in_picture_aspect,
+                    available,
+                )
+            else:
+                geometry = QRect(self._picture_in_picture_start_geometry)
+                geometry.moveTopLeft(geometry.topLeft() + delta)
+            self.setGeometry(geometry)
+            return
+        if kind == "release":
+            if self._picture_in_picture_press_position is None:
+                return
+            if self._picture_in_picture_gesture_moved:
+                screen = self._picture_in_picture_screen(position)
+                if screen is not None:
+                    available = screen.availableGeometry()
+                    geometry = snap_geometry_to_edges(clamp_geometry_to_screen(self.frameGeometry(), available), available)
+                    self.setGeometry(geometry)
+                self._persist_picture_in_picture_state()
+            elif self._picture_in_picture_press_allows_click:
+                self.player_page.trigger_picture_in_picture_click()
+            self._picture_in_picture_press_position = None
+            self._picture_in_picture_resize_edge = PictureInPictureResizeEdge.NONE
+            self._picture_in_picture_gesture_moved = False
+            self._picture_in_picture_press_allows_click = False
+            return
+        if kind == "double":
+            self._leave_picture_in_picture()
+
+    def _update_picture_in_picture_cursor(self, position: QPoint) -> None:
+        if self._picture_in_picture_locked:
+            self.unsetCursor()
+            self.player_page.set_picture_in_picture_cursor(Qt.CursorShape.ArrowCursor)
+            return
+        edge = resize_edge_at(self.frameGeometry(), position)
+        shape = cursor_shape_for_resize_edge(edge)
+        self.setCursor(shape)
+        self.player_page.set_picture_in_picture_cursor(shape)
+
+    def _handle_video_aspect_changed(self, aspect: float) -> None:
+        self._picture_in_picture_aspect = normalized_aspect(aspect)
+        if not self._picture_in_picture:
+            return
+        screen = self._picture_in_picture_screen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        current = self.frameGeometry()
+        size = constrain_size(current.size(), self._picture_in_picture_aspect, available)
+        center = current.center()
+        geometry = QRect(QPoint(center.x() - size.width() // 2, center.y() - size.height() // 2), size)
+        self.setGeometry(clamp_geometry_to_screen(geometry, available))
+
     def _toggle_fullscreen(self) -> None:
+        if getattr(self, "_picture_in_picture", False):
+            if QApplication.mouseButtons() != Qt.MouseButton.NoButton or QWidget.mouseGrabber() is not None:
+                QTimer.singleShot(50, self._leave_picture_in_picture_then_fullscreen)
+                return
+            self._leave_picture_in_picture()
+            if not self.isFullScreen():
+                self._enter_player_fullscreen()
+            return
         if self.isFullScreen():
             self._leave_player_fullscreen()
         else:
             self._enter_player_fullscreen()
 
+    def _leave_picture_in_picture_then_fullscreen(self) -> None:
+        if not self._picture_in_picture:
+            return
+        self._leave_picture_in_picture()
+        if not self.isFullScreen():
+            self._enter_player_fullscreen()
+
     def _enter_player_fullscreen(self) -> None:
+        if getattr(self, "_picture_in_picture", False):
+            self._leave_picture_in_picture()
         if self.isFullScreen():
             return
         self._was_maximized_before_fullscreen = self.isMaximized()
+        if not self._was_maximized_before_fullscreen:
+            normal_geometry = self.normalGeometry()
+            self._player_fullscreen_restore_geometry = QRect(
+                normal_geometry if normal_geometry.isValid() else self.geometry()
+            )
+        else:
+            self._player_fullscreen_restore_geometry = QRect()
         logger.info("entering fullscreen previous_maximized=%s", self._was_maximized_before_fullscreen)
         self.stack.setCurrentWidget(self.player_page)
         self.top_bar_widget.hide()
@@ -2698,13 +3270,42 @@ class MainWindow(QMainWindow):
             return
         restore_maximized = bool(self._was_maximized_before_fullscreen)
         logger.info("leaving fullscreen restore_maximized=%s", restore_maximized)
+        # 退出全屏意味着窗口界面重新接管工具栏。若之前从全屏进入过小窗，
+        # 其延迟恢复回调不能再依据旧的 fullscreen 快照把工具栏隐藏。
+        self._picture_in_picture_restore_top_bar_visible = True
         self.top_bar_widget.show()
         self.player_page.set_fullscreen(False)
         if restore_maximized:
             self.showMaximized()
         else:
             self.showNormal()
+        # Qt does not consistently restore the Windows non-client frame after
+        # a fullscreen -> PIP -> fullscreen -> normal sequence.  Enforce the
+        # normal frame here as the final state transition, not only on PIP exit.
+        self._ensure_windows_normal_frame()
+        self._picture_in_picture_frame_restore_timer.start()
+        restore_geometry = QRect(self._player_fullscreen_restore_geometry)
+        if not restore_maximized and restore_geometry.isValid():
+            self._pending_normal_window_geometry_restore = QRect(restore_geometry)
+            self.setGeometry(restore_geometry)
+            # Windows may apply the PIP normal geometry after showNormal() has
+            # returned. Reapply the pre-fullscreen geometry once that queued
+            # native state transition has completed.
+            QTimer.singleShot(0, self._restore_pending_normal_window_geometry)
+        else:
+            self._pending_normal_window_geometry_restore = QRect()
+        self._player_fullscreen_restore_geometry = QRect()
         self._was_maximized_before_fullscreen = None
+
+    def _restore_pending_normal_window_geometry(self) -> None:
+        geometry = QRect(self._pending_normal_window_geometry_restore)
+        self._pending_normal_window_geometry_restore = QRect()
+        self._restore_normal_window_geometry(geometry)
+
+    def _restore_normal_window_geometry(self, geometry: QRect) -> None:
+        if self._picture_in_picture or self.isFullScreen() or self.isMaximized() or not geometry.isValid():
+            return
+        self.setGeometry(geometry)
 
     def _toggle_topmost(self) -> None:
         self._set_topmost(not self._is_topmost)
@@ -3171,6 +3772,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
             logger.info("main window closing")
+            if self._picture_in_picture:
+                self._persist_picture_in_picture_state()
             self._shutting_down = True
             self._invalidate_creator_playlist_request()
             self._dlna_position_timer.stop()

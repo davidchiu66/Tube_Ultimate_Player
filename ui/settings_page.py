@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 
 from resolver.models import LANGUAGE_NAMES
 from services.config_service import (
+    PICTURE_IN_PICTURE_STYLE_LABELS,
+    PICTURE_IN_PICTURE_STYLES,
     PROXY_MODE_AUTO,
     PROXY_MODE_LABELS,
     PROXY_MODES,
@@ -139,6 +141,21 @@ class SettingsPage(QWidget):
         playback_window_row.addWidget(self.playback_window_hint)
         playback_window_row.addStretch(1)
         self._playback_window_row = playback_window_row
+
+        self.picture_in_picture_style_combo = QComboBox()
+        for style in PICTURE_IN_PICTURE_STYLES:
+            self.picture_in_picture_style_combo.addItem(PICTURE_IN_PICTURE_STYLE_LABELS[style], style)
+        picture_in_picture_style_row = QHBoxLayout()
+        picture_in_picture_style_row.setContentsMargins(0, 0, 0, 0)
+        picture_in_picture_style_row.setSpacing(16)
+        picture_in_picture_style_row.addWidget(self.picture_in_picture_style_combo)
+        self.picture_in_picture_style_hint = QLabel(
+            "随机模式会为每个新视频重新选择，并避免连续重复；切换后立即应用"
+        )
+        self.picture_in_picture_style_hint.setObjectName("MetaLabel")
+        picture_in_picture_style_row.addWidget(self.picture_in_picture_style_hint)
+        picture_in_picture_style_row.addStretch(1)
+        self._picture_in_picture_style_row = picture_in_picture_style_row
 
         self.default_quality_combo = QComboBox()
         for mode in QUALITY_MODES:
@@ -260,6 +277,7 @@ class SettingsPage(QWidget):
         form.addRow("默认首页", default_home_row)
         form.addRow("网站配置", site_config_row)
         form.addRow("进入播放", self._playback_window_row)
+        form.addRow("迷你窗口播放器风格", self._picture_in_picture_style_row)
         form.addRow("默认画质", self._default_quality_row)
         form.addRow("默认音轨语言", self._audio_language_row)
         form.addRow("当前有效代理", self.active_proxy_label)
@@ -383,6 +401,13 @@ class SettingsPage(QWidget):
         starts_fullscreen = self.config.playback_starts_fullscreen()
         self.playback_window_windowed.setChecked(not starts_fullscreen)
         self.playback_window_fullscreen.setChecked(starts_fullscreen)
+        picture_in_picture_style = self.config.picture_in_picture_style()
+        picture_in_picture_style_index = self.picture_in_picture_style_combo.findData(
+            picture_in_picture_style
+        )
+        self.picture_in_picture_style_combo.setCurrentIndex(
+            picture_in_picture_style_index if picture_in_picture_style_index >= 0 else 0
+        )
         self.site_config_bilibili.setChecked(default_home != "youtube")
         self.site_config_youtube.setChecked(default_home == "youtube")
         audio_language = str(self.config.get("player.default_audio_language", "auto") or "auto")
@@ -442,6 +467,10 @@ class SettingsPage(QWidget):
         self.config.set(
             "player.playback_window_mode",
             "fullscreen" if self.playback_window_fullscreen.isChecked() else "window",
+        )
+        self.config.set(
+            "player.picture_in_picture_style",
+            self.picture_in_picture_style_combo.currentData() or "random",
         )
         for site in self._quality_changed_sites:
             mode = self._quality_drafts.get(site) or QUALITY_MODES[0]

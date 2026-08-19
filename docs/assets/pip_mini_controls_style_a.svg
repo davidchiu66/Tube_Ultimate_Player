@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="156" viewBox="0 0 980 156">
+  <rect width="980" height="156" fill="#0d1116"/>
+  <text x="24" y="22" fill="#9eabb8" font-family="Segoe UI,Arial" font-size="13">Style A - Quiet line</text>
+  <g transform="translate(24 42)" fill="none" stroke="#e7edf4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <g transform="translate(0 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M14 12v14M24 12v14M11 27h16"/></g>
+    <g transform="translate(46 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M25 12l-8 7 8 7M17 19h11"/></g>
+    <g transform="translate(92 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M13 12l8 7-8 7M25 12l-8 7 8 7"/></g>
+    <g transform="translate(138 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M12 15h4l6-5v18l-6-5h-4zM26 15l3 3-3 3"/></g>
+    <g transform="translate(184 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M12 15h4l6-5v18l-6-5h-4zM27 14c2 2 2 8 0 10M30 11c4 4 4 12 0 16"/></g>
+    <g transform="translate(230 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M15 12l11 7-11 7z"/></g>
+    <g transform="translate(276 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M12 13h14v12H12zM15 10v6M23 10v6M15 28h8"/></g>
+    <g transform="translate(322 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M12 19l5 5 10-11"/></g>
+    <g transform="translate(368 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M12 15l7-5 7 5v11H12zM16 26v-6h6v6"/></g>
+    <g transform="translate(414 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M13 13h12v12H13zM17 10h8M17 28h8M10 17v8M28 17v8"/></g>
+    <g transform="translate(460 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M12 12h14v14H12zM16 16h6v6h-6z"/></g>
+    <g transform="translate(506 0)"><rect width="38" height="38" rx="7" fill="#1b222a" stroke="#38434e"/><path d="M13 13l12 12M25 13L13 25"/></g>
+  </g>
+  <g transform="translate(24 102)" fill="#8f9ba7" font-family="Segoe UI,Arial" font-size="11">
+    <text x="0" y="0">pause</text><text x="46" y="0">prev</text><text x="92" y="0">next</text><text x="138" y="0">mute</text><text x="184" y="0">volume</text><text x="230" y="0">play</text><text x="276" y="0">fullscreen</text><text x="368" y="0">restore</text><text x="414" y="0">lock</text><text x="460" y="0">unlock</text><text x="506" y="0">close</text>
+  </g>
+</svg>

@@ -45,6 +45,15 @@ QUALITY_TIER_LABELS = {
     "low": "低（最低分辨率）",
 }
 
+PICTURE_IN_PICTURE_FIXED_STYLES = ("style_a", "style_b", "style_c")
+PICTURE_IN_PICTURE_STYLES = (*PICTURE_IN_PICTURE_FIXED_STYLES, "random")
+PICTURE_IN_PICTURE_STYLE_LABELS = {
+    "style_a": "静谧线描",
+    "style_b": "实心高对比",
+    "style_c": "紧凑胶囊",
+    "random": "随机",
+}
+
 # 「播放 URL」面板保留的历史条数上限。
 RECENT_URL_LIMIT = 20
 RECENT_URL_KEY = "player.recent_urls"
@@ -324,6 +333,56 @@ class ConfigService:
 
     def playback_starts_fullscreen(self) -> bool:
         return self.playback_window_mode() == "fullscreen"
+
+    def picture_in_picture_style(self) -> str:
+        """返回迷你窗口播放器风格偏好；非法或缺失值统一回退到随机。"""
+        value = str(self.get("player.picture_in_picture_style", "random") or "").strip().lower()
+        return value if value in PICTURE_IN_PICTURE_STYLES else "random"
+
+    def picture_in_picture_settings(self) -> dict[str, Any]:
+        raw = self.get("player.picture_in_picture", {})
+        raw = raw if isinstance(raw, dict) else {}
+
+        def integer(name: str, default: int = 0) -> int:
+            try:
+                return int(raw.get(name, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        width = max(0, integer("width"))
+        height = max(0, integer("height"))
+        muted_value = raw.get("muted", False)
+        if isinstance(muted_value, str):
+            muted = muted_value.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            muted = bool(muted_value)
+        return {
+            "x": integer("x"),
+            "y": integer("y"),
+            "width": width,
+            "height": height,
+            "muted": muted,
+        }
+
+    def set_picture_in_picture_settings(
+        self,
+        *,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        muted: bool,
+    ) -> None:
+        self.set(
+            "player.picture_in_picture",
+            {
+                "x": int(x),
+                "y": int(y),
+                "width": max(0, int(width)),
+                "height": max(0, int(height)),
+                "muted": bool(muted),
+            },
+        )
 
     def shortcut_sequence(self, action: str) -> str:
         default = DEFAULT_SHORTCUTS.get(action, "")

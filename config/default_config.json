@@ -6,7 +6,15 @@
     "volume": 80,
     "speed": 1.0,
     "playback_window_mode": "window",
-    "default_audio_language": "auto"
+    "picture_in_picture_style": "random",
+    "default_audio_language": "auto",
+    "picture_in_picture": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "muted": false
+    }
   },
   "network": {
     "proxy_mode": "auto"
@@ -58,6 +66,8 @@
     "cast": "Ctrl+C",
     "fullscreen": "Return",
     "fullscreen_keypad": "Enter",
+    "picture_in_picture": "W",
+    "fullscreen_exit": "Esc",
     "seek_backward_10": "Left",
     "seek_forward_10": "Right",
     "seek_backward_60": "Ctrl+Left",

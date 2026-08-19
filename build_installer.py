@@ -46,6 +46,8 @@ def run_pyinstaller() -> None:
             f"{ROOT / 'config'};config",
             "--add-data",
             f"{ROOT / 'docs' / 'assets' / 'icons'};docs/assets/icons",
+            "--add-data",
+            f"{ROOT / 'docs' / 'assets' / 'pip'};docs/assets/pip",
             str(ROOT / "main.py"),
         ],
         check=True,

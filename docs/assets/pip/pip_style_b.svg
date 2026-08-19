@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <g fill="#f4f7fa" stroke="#f4f7fa" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <g id="play"><rect width="24" height="24" fill="none" stroke="none"/><path d="M8 4.5L20 12 8 19.5z" stroke="none"/></g>
+    <g id="pause"><rect width="24" height="24" fill="none" stroke="none"/><rect x="6" y="4.5" width="4" height="15" rx="1" stroke="none"/><rect x="14" y="4.5" width="4" height="15" rx="1" stroke="none"/></g>
+    <g id="previous"><rect width="24" height="24" fill="none" stroke="none"/><rect x="4" y="5" width="3" height="14" rx="1" stroke="none"/><path d="M19 5L8 12l11 7z" stroke="none"/></g>
+    <g id="next"><rect width="24" height="24" fill="none" stroke="none"/><rect x="17" y="5" width="3" height="14" rx="1" stroke="none"/><path d="M5 5l11 7-11 7z" stroke="none"/></g>
+    <g id="mute"><rect width="24" height="24" fill="none" stroke="none"/><path d="M3 9h5l6-5v16l-6-5H3z" stroke="none"/><path d="M17 8l5 8M22 8l-5 8" fill="none" stroke-width="2"/></g>
+    <g id="volume"><rect width="24" height="24" fill="none" stroke="none"/><path d="M3 9h5l6-5v16l-6-5H3z" stroke="none"/><path d="M18 8c3 3 3 5 0 8M20 5c5 5 5 9 0 14" fill="none"/></g>
+    <g id="fullscreen"><rect width="24" height="24" fill="none" stroke="none"/><path d="M3 10V3h7v3H6v4zM14 3h7v7h-3V6h-4zM21 14v7h-7v-3h4v-4zM10 21H3v-7h3v4h4z" stroke="none"/></g>
+    <g id="restore"><rect width="24" height="24" fill="none" stroke="none"/><path d="M3 4h7v3H7v4H4z" stroke="none"/><path d="M6 8a8 8 0 1 1-1 8" fill="none" stroke-width="2.2"/></g>
+    <g id="lock"><rect width="24" height="24" fill="none" stroke="none"/><rect x="4" y="9" width="16" height="12" rx="2" stroke="none"/><path d="M7 10V7a5 5 0 0 1 10 0v3" fill="none" stroke-width="2.2"/><circle cx="12" cy="15" r="1.5" fill="#26313b" stroke="none"/></g>
+    <g id="unlock"><rect width="24" height="24" fill="none" stroke="none"/><rect x="4" y="9" width="16" height="12" rx="2" stroke="none"/><path d="M7 10V7a5 5 0 0 1 9-3" fill="none" stroke-width="2.2"/><circle cx="12" cy="15" r="1.5" fill="#26313b" stroke="none"/></g>
+    <g id="close"><rect width="24" height="24" fill="none" stroke="none"/><path d="M5 5l14 14M19 5L5 19" fill="none" stroke-width="2.6"/></g>
+  </g>
+</svg>

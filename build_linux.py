@@ -70,6 +70,8 @@ def run_pyinstaller() -> None:
         "--add-data",
         f"{ROOT / 'docs' / 'assets' / 'icons'}:docs/assets/icons",
         "--add-data",
+        f"{ROOT / 'docs' / 'assets' / 'pip'}:docs/assets/pip",
+        "--add-data",
         f"{ROOT / 'app_version.txt'}:.",
         "--add-data",
         f"{ROOT / 'THIRD_PARTY_NOTICES.md'}:.",

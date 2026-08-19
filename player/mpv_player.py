@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -31,6 +32,7 @@ class MpvPlayer(QObject):
     position_changed = Signal(float)
     duration_changed = Signal(float)
     pause_changed = Signal(bool)
+    video_aspect_changed = Signal(float)
     playback_finished = Signal()
     error = Signal(str)
 
@@ -50,6 +52,7 @@ class MpvPlayer(QObject):
         self._duration = 0.0
         self._last_pause: bool | None = None
         self._last_eof = False
+        self._video_aspect = 16 / 9
         self._last_load_request: tuple[str, str | None, dict[str, str]] | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -133,6 +136,9 @@ class MpvPlayer(QObject):
 
     def duration(self) -> float:
         return self.get_double("duration") or 0.0
+
+    def video_aspect_ratio(self) -> float:
+        return self._video_aspect
 
     def apply_network_options(self, headers: dict[str, str] | None = None) -> None:
         _, proxy = self.config.effective_proxy()
@@ -260,6 +266,14 @@ class MpvPlayer(QObject):
         if paused != self._last_pause:
             self._last_pause = paused
             self.pause_changed.emit(paused)
+
+        aspect = self.get_double("video-params/aspect")
+        if aspect is None:
+            aspect = self.get_double("video-out-params/aspect")
+        if aspect is not None and math.isfinite(aspect) and 0.1 < aspect <= 10:
+            if abs(aspect - self._video_aspect) > 0.001:
+                self._video_aspect = aspect
+                self.video_aspect_changed.emit(aspect)
 
         eof_reached = self.get_bool("eof-reached")
         if eof_reached and not self._last_eof:

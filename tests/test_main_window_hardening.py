@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QRect  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from resolver.models import VideoInfo, VideoQuality  # noqa: E402
@@ -150,10 +152,12 @@ class LazyPageTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self) -> None:
-        # 构造函数会 singleShot 一次真实的首页加载，测试里不需要联网。
-        patcher = patch.object(MainWindow, "load_home", lambda _self: None)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # 构造函数会安排首页加载、Cookie 探测和运行时安装提示；硬化测试
+        # 不需要这些真实后台任务，尤其不能让浏览器数据库探测线程越过用例边界。
+        for method_name in ("load_home", "_start_cookie_probe", "_maybe_prompt_ffmpeg_install"):
+            patcher = patch.object(MainWindow, method_name, lambda _self: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         # MainWindow 用的是真实 ConfigService / DownloadManager，关闭时会把配置与
         # 下载任务写回**真实**运行目录。单测不许碰用户数据，这里把两处落盘掐掉。
         for target, attribute in (
@@ -185,6 +189,59 @@ class LazyPageTests(unittest.TestCase):
     def test_created_page_lookup_does_not_build(self) -> None:
         self.assertIsNone(self.window._created_page("settings"))
         self.assertEqual(self.window._lazy_pages, {})
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows HWND regression")
+    def test_picture_in_picture_round_trip_preserves_native_window_ids(self) -> None:
+        self.window.show()
+        self.window.player_page.set_playback_available(True)
+        QApplication.processEvents()
+        main_id = int(self.window.winId())
+        video_id = int(self.window.player_page.video_widget.winId())
+
+        with (
+            patch.object(self.window, "_read_windows_window_styles", return_value=(0, 0)),
+            patch.object(self.window, "_apply_windows_window_styles") as apply_styles,
+            patch.object(self.window, "setWindowFlags") as set_window_flags,
+            patch.object(self.window.mpv, "video_aspect_ratio", return_value=16 / 9),
+        ):
+            self.window._enter_picture_in_picture()
+            self.window._leave_picture_in_picture()
+            QApplication.processEvents()
+
+        self.assertGreaterEqual(apply_styles.call_count, 2)
+        set_window_flags.assert_not_called()
+        self.assertTrue(self.window.top_bar_widget.isVisible())
+        restored_style = apply_styles.call_args_list[-1].args[0]
+        self.assertTrue(restored_style & 0x00C00000)  # WS_CAPTION
+        self.assertTrue(restored_style & 0x00080000)  # WS_SYSMENU
+        self.assertEqual(int(self.window.winId()), main_id)
+        self.assertEqual(int(self.window.player_page.video_widget.winId()), video_id)
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows fullscreen/PIP regression")
+    def test_stop_after_fullscreen_picture_in_picture_restores_main_toolbar(self) -> None:
+        self.window.show()
+        self.window.player_page.set_playback_available(True)
+        self.window._playback_return_widget = self.window.home_page
+        normal_geometry = QRect(140, 110, 960, 640)
+        self.window.setGeometry(normal_geometry)
+        QApplication.processEvents()
+
+        with (
+            patch.object(self.window, "_read_windows_window_styles", return_value=(0x00CF0000, 0)),
+            patch.object(self.window, "_apply_windows_window_styles", return_value=True),
+            patch.object(self.window.mpv, "video_aspect_ratio", return_value=16 / 9),
+            patch.object(self.window.mpv, "stop"),
+        ):
+            self.window._enter_player_fullscreen()
+            self.window._enter_picture_in_picture()
+            self.window.setGeometry(QRect(1570, 860, 320, 180))
+            self.window._stop_playback()
+            QApplication.processEvents()
+
+        self.assertFalse(self.window.isFullScreen())
+        self.assertIs(self.window.stack.currentWidget(), self.window.home_page)
+        self.assertTrue(self.window.top_bar_widget.isVisible())
+        self.assertEqual(self.window.geometry(), normal_geometry)
 
 
 if __name__ == "__main__":

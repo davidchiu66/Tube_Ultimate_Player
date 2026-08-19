@@ -18,6 +18,7 @@ SHORTCUT_DEFINITIONS = (
     ShortcutDefinition("cast", "投屏 / 停止投屏", "Ctrl+C"),
     ShortcutDefinition("fullscreen", "全屏 / 退出全屏", "Return"),
     ShortcutDefinition("fullscreen_keypad", "全屏（小键盘）", "Enter"),
+    ShortcutDefinition("picture_in_picture", "小窗播放 / 退出小窗", "W"),
     ShortcutDefinition("fullscreen_exit", "退出全屏", "Esc"),
     ShortcutDefinition("seek_backward_10", "后退 10 秒", "Left"),
     ShortcutDefinition("seek_forward_10", "前进 10 秒", "Right"),

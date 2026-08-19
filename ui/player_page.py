@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QCursor, QKeySequence, QPixmap, QShortcut
+from random import choice as random_choice
+from pathlib import Path
+
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QCursor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -27,9 +31,15 @@ from download.models import (
     STATUS_QUEUED,
 )
 from resolver.models import MUXED_AUDIO_TRACK_ID, VideoInfo
-from services.config_service import ConfigService
+from app_paths import asset_path
+from services.config_service import (
+    PICTURE_IN_PICTURE_FIXED_STYLES,
+    PICTURE_IN_PICTURE_STYLES,
+    ConfigService,
+)
 from services.shortcut_service import SHORTCUT_DEFINITIONS
 from ui.playlist_overlay import PlaylistOverlay
+from ui.picture_in_picture import PictureInPictureResizeEdge, resize_edge_at
 from ui.text_elision import format_upload_date
 from ui.thumbnail_cache import build_image_request, read_image_reply
 from ui.widgets import NoScrollComboBox
@@ -56,6 +66,9 @@ class PlayerPage(QWidget):
     cast_requested = Signal()
     browser_play_requested = Signal()
     fullscreen_requested = Signal()
+    picture_in_picture_requested = Signal()
+    picture_in_picture_mouse_event = Signal(str, object)
+    picture_in_picture_lock_changed = Signal(bool)
     download_requested = Signal()
     favorite_requested = Signal()
     playlist_entry_requested = Signal(int)
@@ -95,11 +108,23 @@ class PlayerPage(QWidget):
         self._cast_available = False
         self._browser_play_available = False
         self._cast_active = False
+        self._cast_pending = False
         self._cast_seek_supported = True
         self._cast_volume_supported = True
         self._paused = True
         self._playback_finished = False
         self._fullscreen = False
+        self._picture_in_picture = False
+        self._picture_in_picture_style_preference = (
+            config.picture_in_picture_style() if config is not None else "random"
+        )
+        self._picture_in_picture_style = self._resolve_picture_in_picture_style(
+            self._picture_in_picture_style_preference
+        )
+        self._picture_in_picture_icons: dict[tuple[str, str], QIcon] = {}
+        self._picture_in_picture_locked = False
+        self._picture_in_picture_cursor_shape = Qt.CursorShape.ArrowCursor
+        self._picture_in_picture_resize_gesture = False
         self._controls_visible = True
         self._control_pointer_inside = False
         self._control_interaction_active = False
@@ -113,7 +138,7 @@ class PlayerPage(QWidget):
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(220)
-        self._click_timer.timeout.connect(self.play_pause_requested)
+        self._click_timer.timeout.connect(self._handle_video_single_click)
 
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
@@ -222,6 +247,9 @@ class PlayerPage(QWidget):
 
         self.fullscreen_button = QPushButton("全屏")
         self.fullscreen_button.setFixedWidth(84)
+        self.picture_in_picture_button = QPushButton("小窗")
+        self.picture_in_picture_button.setFixedWidth(84)
+        self.picture_in_picture_button.setToolTip("小窗播放（W）")
         self.cast_button = QPushButton("投屏")
         self.cast_button.setFixedWidth(92)
 
@@ -240,6 +268,7 @@ class PlayerPage(QWidget):
         controls.addLayout(self._control_group("字幕", self.subtitle_combo))
         controls.addWidget(self.cast_button)
         controls.addWidget(self.fullscreen_button)
+        controls.addWidget(self.picture_in_picture_button)
         controls.addStretch(1)
 
         self.control_panel = QWidget(self)
@@ -297,6 +326,8 @@ class PlayerPage(QWidget):
         self._shortcut_hint_timer.setInterval(1600)
         self._shortcut_hint_timer.timeout.connect(self.shortcut_hint.hide)
 
+        self._build_picture_in_picture_controls()
+
         self.play_button.clicked.connect(self.play_pause_requested)
         self.stop_button.clicked.connect(self.stop_requested)
         self.download_button.clicked.connect(self.download_requested)
@@ -309,6 +340,7 @@ class PlayerPage(QWidget):
         self.subtitle_combo.currentIndexChanged.connect(self._emit_subtitle)
         self.cast_button.clicked.connect(self.cast_requested)
         self.fullscreen_button.clicked.connect(self.fullscreen_requested)
+        self.picture_in_picture_button.clicked.connect(self.picture_in_picture_requested)
         self.playlist_overlay.entry_activated.connect(self.playlist_entry_requested)
         self.playlist_overlay.download_entries_requested.connect(self.playlist_download_requested)
         self.playlist_overlay.save_requested.connect(self.playlist_save_requested)
@@ -325,6 +357,9 @@ class PlayerPage(QWidget):
         self._install_mouse_tracking(self.control_panel)
         self._install_mouse_tracking(self.playlist_overlay)
         self._install_mouse_tracking(self.collection_overlay)
+        self._install_mouse_tracking(self.picture_in_picture_title_bar)
+        self._install_mouse_tracking(self.picture_in_picture_control_bar)
+        self._install_mouse_tracking(self.picture_in_picture_end_overlay)
         self._setup_keyboard_shortcuts()
         app = QApplication.instance()
         if app is not None:
@@ -332,12 +367,304 @@ class PlayerPage(QWidget):
         self._update_playback_buttons()
         self._position_control_panel(animated=False)
 
+    def _build_picture_in_picture_controls(self) -> None:
+        self._picture_in_picture_controls_visible = False
+        self._picture_in_picture_seeking = False
+
+        self.picture_in_picture_title_bar = QFrame(self)
+        self.picture_in_picture_title_bar.setObjectName("PictureInPictureTitleBar")
+        self.picture_in_picture_title_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        title_layout = QHBoxLayout(self.picture_in_picture_title_bar)
+        title_layout.setContentsMargins(10, 0, 6, 0)
+        title_layout.setSpacing(6)
+        self.picture_in_picture_title_label = QLabel("正在播放")
+        self.picture_in_picture_title_label.setObjectName("PictureInPictureTitle")
+        title_layout.addWidget(self.picture_in_picture_title_label, 1)
+        self.picture_in_picture_close_button = QPushButton()
+        self.picture_in_picture_close_button.setToolTip("退出小窗")
+        self.picture_in_picture_close_button.setFixedSize(30, 30)
+        title_layout.addWidget(self.picture_in_picture_close_button)
+
+        self.picture_in_picture_control_bar = QFrame(self)
+        self.picture_in_picture_control_bar.setObjectName("PictureInPictureControlBar")
+        self.picture_in_picture_control_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        controls = QHBoxLayout(self.picture_in_picture_control_bar)
+        controls.setContentsMargins(8, 5, 8, 5)
+        controls.setSpacing(5)
+        self.picture_in_picture_play_button = QPushButton()
+        self.picture_in_picture_play_button.setToolTip("播放 / 暂停")
+        self.picture_in_picture_previous_button = QPushButton()
+        self.picture_in_picture_previous_button.setToolTip("上一集")
+        self.picture_in_picture_next_button = QPushButton()
+        self.picture_in_picture_next_button.setToolTip("下一集")
+        self.picture_in_picture_position_label = QLabel("00:00 / 00:00")
+        self.picture_in_picture_progress_slider = QSlider(Qt.Orientation.Horizontal)
+        self.picture_in_picture_progress_slider.setRange(0, 1000)
+        self.picture_in_picture_mute_button = QPushButton()
+        self.picture_in_picture_mute_button.setToolTip("静音 / 恢复音量")
+        self.picture_in_picture_volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.picture_in_picture_volume_slider.setRange(0, 100)
+        self.picture_in_picture_volume_slider.setFixedWidth(72)
+        self.picture_in_picture_fullscreen_button = QPushButton()
+        self.picture_in_picture_fullscreen_button.setToolTip("退出小窗并进入全屏")
+        self.picture_in_picture_restore_button = QPushButton()
+        self.picture_in_picture_restore_button.setToolTip("返回播放器")
+        self.picture_in_picture_lock_button = QPushButton()
+        self.picture_in_picture_lock_button.setToolTip("锁定窗口位置和尺寸")
+        for button in (
+            self.picture_in_picture_play_button,
+            self.picture_in_picture_previous_button,
+            self.picture_in_picture_next_button,
+            self.picture_in_picture_mute_button,
+            self.picture_in_picture_fullscreen_button,
+            self.picture_in_picture_restore_button,
+            self.picture_in_picture_lock_button,
+        ):
+            button.setFixedSize(30, 30)
+        controls.addWidget(self.picture_in_picture_play_button)
+        controls.addWidget(self.picture_in_picture_previous_button)
+        controls.addWidget(self.picture_in_picture_next_button)
+        controls.addWidget(self.picture_in_picture_progress_slider, 1)
+        controls.addWidget(self.picture_in_picture_position_label)
+        controls.addWidget(self.picture_in_picture_mute_button)
+        controls.addWidget(self.picture_in_picture_volume_slider)
+        controls.addWidget(self.picture_in_picture_fullscreen_button)
+        controls.addWidget(self.picture_in_picture_restore_button)
+        controls.addWidget(self.picture_in_picture_lock_button)
+
+        self.picture_in_picture_hint = QFrame(self)
+        self.picture_in_picture_hint.setObjectName("PictureInPictureHint")
+        self.picture_in_picture_hint.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.picture_in_picture_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        hint_layout = QHBoxLayout(self.picture_in_picture_hint)
+        hint_layout.setContentsMargins(10, 8, 10, 8)
+        hint_layout.setSpacing(8)
+        self.picture_in_picture_hint_icon = QLabel()
+        self.picture_in_picture_hint_icon.setObjectName("PictureInPictureHintIcon")
+        self.picture_in_picture_hint_icon.setFixedSize(24, 24)
+        self.picture_in_picture_hint_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.picture_in_picture_hint_label = QLabel()
+        self.picture_in_picture_hint_label.setObjectName("PictureInPictureHintText")
+        self.picture_in_picture_hint_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        hint_layout.addWidget(self.picture_in_picture_hint_icon)
+        hint_layout.addWidget(self.picture_in_picture_hint_label)
+        self._picture_in_picture_hint_action = ""
+        self._picture_in_picture_hint_timer = QTimer(self)
+        self._picture_in_picture_hint_timer.setSingleShot(True)
+        self._picture_in_picture_hint_timer.setInterval(1000)
+        self._picture_in_picture_hint_timer.timeout.connect(self.picture_in_picture_hint.hide)
+
+        self.picture_in_picture_end_overlay = QFrame(self)
+        self.picture_in_picture_end_overlay.setObjectName("PictureInPictureEndOverlay")
+        self.picture_in_picture_end_overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        end_layout = QVBoxLayout(self.picture_in_picture_end_overlay)
+        end_layout.setContentsMargins(20, 16, 20, 16)
+        end_layout.setSpacing(10)
+        ended_label = QLabel("播放结束")
+        ended_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        end_layout.addWidget(ended_label)
+        end_actions = QHBoxLayout()
+        self.picture_in_picture_replay_button = QPushButton("重新播放")
+        self.picture_in_picture_return_button = QPushButton("返回播放器")
+        end_actions.addWidget(self.picture_in_picture_replay_button)
+        end_actions.addWidget(self.picture_in_picture_return_button)
+        end_layout.addLayout(end_actions)
+
+        overlay_style = """
+            QFrame#PictureInPictureTitleBar, QFrame#PictureInPictureControlBar,
+            QFrame#PictureInPictureEndOverlay {
+                background-color: rgba(18, 18, 18, 220);
+                color: white;
+            }
+            QLabel#PictureInPictureTitle, QLabel#PictureInPictureHintIcon,
+            QLabel#PictureInPictureHintText {
+                color: white;
+            }
+            QFrame#PictureInPictureHint {
+                background-color: rgba(0, 0, 0, 204);
+                border-radius: 8px;
+            }
+            QLabel#PictureInPictureHintText {
+                font-size: 18px;
+            }
+        """
+        self.picture_in_picture_title_bar.setStyleSheet(overlay_style)
+        self.picture_in_picture_control_bar.setStyleSheet(overlay_style)
+        self.picture_in_picture_end_overlay.setStyleSheet(overlay_style)
+        self.picture_in_picture_hint.setStyleSheet(overlay_style)
+
+        self._apply_picture_in_picture_style()
+
+        self.picture_in_picture_close_button.clicked.connect(self.picture_in_picture_requested)
+        self.picture_in_picture_restore_button.clicked.connect(self.picture_in_picture_requested)
+        self.picture_in_picture_return_button.clicked.connect(self.picture_in_picture_requested)
+        self.picture_in_picture_play_button.clicked.connect(self.play_pause_requested)
+        self.picture_in_picture_replay_button.clicked.connect(self.play_pause_requested)
+        self.picture_in_picture_previous_button.clicked.connect(lambda: self._shortcut_playlist_step(-1))
+        self.picture_in_picture_next_button.clicked.connect(lambda: self._shortcut_playlist_step(1))
+        self.picture_in_picture_mute_button.clicked.connect(self._shortcut_toggle_mute)
+        self.picture_in_picture_fullscreen_button.clicked.connect(self.fullscreen_requested)
+        self.picture_in_picture_lock_button.clicked.connect(self._toggle_picture_in_picture_lock)
+        self.picture_in_picture_progress_slider.sliderPressed.connect(self._on_picture_in_picture_seek_start)
+        self.picture_in_picture_progress_slider.sliderReleased.connect(self._on_picture_in_picture_seek_finish)
+        self.picture_in_picture_volume_slider.valueChanged.connect(self._handle_picture_in_picture_volume_changed)
+
+        self._picture_in_picture_idle_timer = QTimer(self)
+        self._picture_in_picture_idle_timer.setSingleShot(True)
+        self._picture_in_picture_idle_timer.setInterval(3000)
+        self._picture_in_picture_idle_timer.timeout.connect(self._hide_picture_in_picture_controls)
+        for widget in (
+            self.picture_in_picture_title_bar,
+            self.picture_in_picture_control_bar,
+            self.picture_in_picture_hint,
+            self.picture_in_picture_end_overlay,
+        ):
+            widget.hide()
+
+    def set_picture_in_picture_style(self, style: str) -> None:
+        """切换小窗控制器风格；随机偏好在应用设置时解析为一套固定风格。"""
+        normalized = str(style or "").strip().lower()
+        if normalized not in PICTURE_IN_PICTURE_STYLES:
+            normalized = "random"
+        resolved = self._resolve_picture_in_picture_style(
+            normalized,
+            previous=self._picture_in_picture_style,
+        )
+        if (
+            normalized == self._picture_in_picture_style_preference
+            and resolved == self._picture_in_picture_style
+            and normalized != "random"
+            and hasattr(self, "picture_in_picture_close_button")
+        ):
+            self._update_picture_in_picture_dynamic_icons()
+            return
+        self._picture_in_picture_style_preference = normalized
+        self._picture_in_picture_style = resolved
+        if hasattr(self, "picture_in_picture_close_button"):
+            self._apply_picture_in_picture_style()
+
+    @staticmethod
+    def _resolve_picture_in_picture_style(style: str, *, previous: str = "") -> str:
+        if style != "random":
+            return style
+        candidates = tuple(
+            candidate
+            for candidate in PICTURE_IN_PICTURE_FIXED_STYLES
+            if candidate != previous
+        )
+        return random_choice(candidates or PICTURE_IN_PICTURE_FIXED_STYLES)
+
+    @property
+    def picture_in_picture_style(self) -> str:
+        return self._picture_in_picture_style
+
+    @property
+    def picture_in_picture_style_preference(self) -> str:
+        return self._picture_in_picture_style_preference
+
+    def _picture_in_picture_icon(self, action: str) -> QIcon:
+        key = (self._picture_in_picture_style, action)
+        cached = self._picture_in_picture_icons.get(key)
+        if cached is not None:
+            return cached
+        renderer = QSvgRenderer(str(asset_path("pip", f"pip_{self._picture_in_picture_style}.svg")))
+        icon = QIcon()
+        if renderer.isValid() and renderer.elementExists(action):
+            pixmap = QPixmap(48, 48)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            renderer.render(painter, action, QRectF(0, 0, 48, 48))
+            painter.end()
+            icon = QIcon(pixmap)
+        self._picture_in_picture_icons[key] = icon
+        return icon
+
+    def _apply_picture_in_picture_style(self) -> None:
+        palette = {
+            "style_a": ("#1b222a", "#38434e", "#27323c", "7px"),
+            "style_b": ("#26313b", "#4a5966", "#344250", "6px"),
+            "style_c": ("#171c22", "#526170", "#24303b", "15px"),
+        }
+        background, border, hover, radius = palette[self._picture_in_picture_style]
+        button_style = f"""
+            QPushButton {{
+                background-color: {background};
+                border: 1px solid {border};
+                border-radius: {radius};
+                padding: 0px;
+            }}
+            QPushButton:hover {{ background-color: {hover}; }}
+            QPushButton:pressed {{ background-color: {border}; }}
+            QPushButton:disabled {{ opacity: 0.45; }}
+        """
+        buttons = (
+            self.picture_in_picture_close_button,
+            self.picture_in_picture_play_button,
+            self.picture_in_picture_previous_button,
+            self.picture_in_picture_next_button,
+            self.picture_in_picture_mute_button,
+            self.picture_in_picture_fullscreen_button,
+            self.picture_in_picture_restore_button,
+            self.picture_in_picture_lock_button,
+        )
+        for button in buttons:
+            button.setStyleSheet(button_style)
+            button.setIconSize(QSize(18, 18))
+        self._update_picture_in_picture_dynamic_icons()
+        if self._picture_in_picture_hint_action:
+            self._update_picture_in_picture_hint_icon()
+
+    def _update_picture_in_picture_dynamic_icons(self) -> None:
+        if not hasattr(self, "picture_in_picture_close_button"):
+            return
+        icon_actions = {
+            self.picture_in_picture_close_button: "close",
+            self.picture_in_picture_play_button: "play"
+            if self._paused or self._playback_finished
+            else "pause",
+            self.picture_in_picture_previous_button: "previous",
+            self.picture_in_picture_next_button: "next",
+            self.picture_in_picture_mute_button: "mute"
+            if self.picture_in_picture_volume_slider.value() == 0
+            else "volume",
+            self.picture_in_picture_fullscreen_button: "fullscreen",
+            self.picture_in_picture_restore_button: "restore",
+            self.picture_in_picture_lock_button: "unlock"
+            if self._picture_in_picture_locked
+            else "lock",
+        }
+        for button, action in icon_actions.items():
+            button.setText("")
+            button.setIcon(self._picture_in_picture_icon(action))
+
+    def _refresh_picture_in_picture_style_for_media(self) -> None:
+        if self._picture_in_picture_style_preference == "random":
+            self.set_picture_in_picture_style("random")
+
+    def _update_picture_in_picture_hint_icon(self) -> None:
+        action = self._picture_in_picture_hint_action
+        if action not in {"play", "pause"}:
+            return
+        pixmap = self._picture_in_picture_icon(action).pixmap(24, 24)
+        self.picture_in_picture_hint_icon.setPixmap(pixmap)
+
+    def _handle_video_single_click(self) -> None:
+        if self._picture_in_picture:
+            self._show_picture_in_picture_playback_hint("play" if self._paused else "pause")
+        self.play_pause_requested.emit()
+
+    def trigger_picture_in_picture_click(self) -> None:
+        if self._picture_in_picture and self._has_media and not self._loading:
+            self._click_timer.start()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_control_panel(animated=False)
         self.playlist_overlay.relayout(self.rect())
         self.collection_overlay.relayout(self.rect())
         self._position_shortcut_hint()
+        self._position_picture_in_picture_controls()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.MouseButtonRelease and self._control_interaction_active:
@@ -350,6 +677,47 @@ class PlayerPage(QWidget):
                 self._idle_timer.start()
             self._handle_volume_wheel(event)
             return True
+
+        if self._picture_in_picture and self._is_picture_in_picture_surface(watched):
+            if (
+                watched is self.video_widget
+                and event.type() == QEvent.Type.MouseButtonDblClick
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                self._click_timer.stop()
+                self._ignore_next_release = True
+                self.picture_in_picture_requested.emit()
+                return True
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                global_position = self._event_global_position(event)
+                local_position = self.mapFromGlobal(global_position)
+                edge = PictureInPictureResizeEdge.NONE
+                if not self._picture_in_picture_locked:
+                    edge = resize_edge_at(self.rect(), local_position)
+                if edge != PictureInPictureResizeEdge.NONE:
+                    self._picture_in_picture_resize_gesture = True
+                    self.picture_in_picture_mouse_event.emit("press", global_position)
+                    self._show_picture_in_picture_controls()
+                    return True
+                if self._is_picture_in_picture_drag_surface(watched):
+                    self.picture_in_picture_mouse_event.emit("press", global_position)
+                    self._show_picture_in_picture_controls()
+                    return True
+            if event.type() == QEvent.Type.MouseMove:
+                global_position = self._event_global_position(event)
+                self.picture_in_picture_mouse_event.emit("move", global_position)
+                self._show_picture_in_picture_controls()
+                if self._picture_in_picture_resize_gesture or self._is_picture_in_picture_drag_surface(watched):
+                    return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                global_position = self._event_global_position(event)
+                if self._picture_in_picture_resize_gesture:
+                    self._picture_in_picture_resize_gesture = False
+                    self.picture_in_picture_mouse_event.emit("release", global_position)
+                    return True
+                if self._is_picture_in_picture_drag_surface(watched):
+                    self.picture_in_picture_mouse_event.emit("release", global_position)
+                    return True
 
         if watched is self.video_widget:
             if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
@@ -374,6 +742,10 @@ class PlayerPage(QWidget):
             or self.playlist_overlay.isAncestorOf(watched)
             or watched is self.collection_overlay
             or self.collection_overlay.isAncestorOf(watched)
+            or watched is self.picture_in_picture_title_bar
+            or self.picture_in_picture_title_bar.isAncestorOf(watched)
+            or watched is self.picture_in_picture_control_bar
+            or self.picture_in_picture_control_bar.isAncestorOf(watched)
         ):
             if event.type() == QEvent.Type.MouseMove:
                 pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
@@ -384,10 +756,37 @@ class PlayerPage(QWidget):
                 self._show_cursor()
                 if self._auto_hide_enabled:
                     self._idle_timer.start()
+                if self._picture_in_picture:
+                    self._show_picture_in_picture_controls()
             elif watched is self and event.type() == QEvent.Type.Leave:
                 QTimer.singleShot(0, self._reevaluate_control_pointer)
 
         return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _event_global_position(event) -> QPoint:
+        if hasattr(event, "globalPosition"):
+            return event.globalPosition().toPoint()
+        return event.globalPos()
+
+    def _is_picture_in_picture_drag_surface(self, watched: QWidget) -> bool:
+        return watched in {
+            self.video_widget,
+            self.picture_in_picture_title_bar,
+            self.picture_in_picture_title_label,
+        }
+
+    def _is_picture_in_picture_surface(self, watched: QWidget) -> bool:
+        return (
+            watched is self
+            or watched is self.video_widget
+            or watched is self.picture_in_picture_title_bar
+            or self.picture_in_picture_title_bar.isAncestorOf(watched)
+            or watched is self.picture_in_picture_control_bar
+            or self.picture_in_picture_control_bar.isAncestorOf(watched)
+            or watched is self.picture_in_picture_end_overlay
+            or self.picture_in_picture_end_overlay.isAncestorOf(watched)
+        )
 
     def set_loading(self, loading: bool, message: str = "") -> None:
         self._loading = loading
@@ -397,6 +796,7 @@ class PlayerPage(QWidget):
             text = message or "正在解析视频，请稍等..."
             self.loading_label.setText(text)
             self.title_label.setText(text)
+            self.picture_in_picture_title_label.setText(text)
             # 开始解析下一个视频时立刻清掉上一个的收藏/下载标识，否则标题已经变成
             # 「正在解析…」，下面却还挂着上一个视频的「已收藏 · 已下载」。
             # 走 set_favorite_state 而不是直接改字段，收藏按钮的文字才不会留在「已收藏」。
@@ -418,6 +818,7 @@ class PlayerPage(QWidget):
             self._cast_available = False
             self._browser_play_available = False
             self._cast_active = False
+            self._cast_pending = False
             self._download_available = False
             self.set_favorite_state(False, available=False)
             self.set_download_state("")
@@ -491,19 +892,29 @@ class PlayerPage(QWidget):
 
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
+        self._update_picture_in_picture_dynamic_icons()
         self._sync_auto_hide_state()
+        self._update_playback_buttons()
+
+    def set_cast_pending(self, pending: bool) -> None:
+        self._cast_pending = bool(pending)
         self._update_playback_buttons()
 
     def set_playback_finished(self, finished: bool) -> None:
         self._playback_finished = finished
+        self.picture_in_picture_end_overlay.setVisible(self._picture_in_picture and finished)
+        if finished:
+            self._show_picture_in_picture_controls()
         self._sync_auto_hide_state()
         self._update_playback_buttons()
 
     def update_video_info(self, video: VideoInfo, selected_quality: str) -> None:
+        self._refresh_picture_in_picture_style_for_media()
         self._populating = True
         self._position = 0.0
         self.progress_slider.setValue(0)
         self.title_label.setText(video.title)
+        self.picture_in_picture_title_label.setText(video.title or "正在播放")
         meta_parts = [
             f"时长 {format_seconds(video.duration)}",
             f"清晰度 {selected_quality}",
@@ -601,6 +1012,7 @@ class PlayerPage(QWidget):
         return self.subtitle_combo.findData(SUBTITLE_MORE_SENTINEL) >= 0
 
     def update_local_file_info(self, path: str) -> None:
+        self._refresh_picture_in_picture_style_for_media()
         self._populating = True
         self._position = 0.0
         self._duration = 0.0
@@ -608,6 +1020,7 @@ class PlayerPage(QWidget):
         self.duration_label.setText("00:00")
         self.progress_slider.setValue(0)
         self.title_label.setText(path)
+        self.picture_in_picture_title_label.setText(Path(path).name or path)
         self.meta_label.setText("本地文件")
         self.thumbnail_label.setText("本地文件")
         self.thumbnail_label.setPixmap(QPixmap())
@@ -623,7 +1036,12 @@ class PlayerPage(QWidget):
         self._position_control_panel(animated=False)
 
     def set_volume(self, volume: int) -> None:
+        volume = max(0, min(100, int(volume)))
         self.volume_slider.setValue(volume)
+        blocked = self.picture_in_picture_volume_slider.blockSignals(True)
+        self.picture_in_picture_volume_slider.setValue(volume)
+        self.picture_in_picture_volume_slider.blockSignals(blocked)
+        self._update_picture_in_picture_dynamic_icons()
 
     def set_speed(self, speed: float) -> None:
         for index in range(self.speed_combo.count()):
@@ -648,6 +1066,180 @@ class PlayerPage(QWidget):
         else:
             self._position_control_panel(animated=False)
 
+    @property
+    def picture_in_picture(self) -> bool:
+        return self._picture_in_picture
+
+    @property
+    def picture_in_picture_locked(self) -> bool:
+        return self._picture_in_picture_locked
+
+    def set_picture_in_picture(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._picture_in_picture == enabled:
+            return
+        self._picture_in_picture = enabled
+        self._picture_in_picture_resize_gesture = False
+        self._picture_in_picture_cursor_shape = Qt.CursorShape.ArrowCursor
+        self._click_timer.stop()
+        if enabled:
+            self._idle_timer.stop()
+            self._auto_hide_enabled = False
+            self._set_cursor_hidden(False)
+            layout = self.layout()
+            if layout:
+                layout.setContentsMargins(0, 0, 0, 0)
+            self.video_widget.setMinimumHeight(0)
+            self.control_panel.hide()
+            self.playlist_overlay.hide_overlay(animated=False)
+            self.collection_overlay.hide_overlay(animated=False)
+            self.shortcut_hint.hide()
+            self.picture_in_picture_title_label.setText(self.title_label.text() or "正在播放")
+            self.picture_in_picture_title_bar.show()
+            self.picture_in_picture_control_bar.show()
+            self.picture_in_picture_end_overlay.setVisible(self._playback_finished)
+            self._show_picture_in_picture_controls()
+        else:
+            self._picture_in_picture_idle_timer.stop()
+            self._hide_picture_in_picture_controls()
+            self.picture_in_picture_end_overlay.hide()
+            self.picture_in_picture_title_bar.hide()
+            self.picture_in_picture_control_bar.hide()
+            self.video_widget.setMinimumHeight(360)
+            layout = self.layout()
+            if layout:
+                layout.setContentsMargins(0, 0, 0, 0) if self._fullscreen else layout.setContentsMargins(16, 16, 16, 16)
+            self.control_panel.show()
+            self._position_control_panel(animated=False)
+            self._set_cursor_hidden(False)
+            self._apply_picture_in_picture_cursor(Qt.CursorShape.ArrowCursor)
+            self._sync_auto_hide_state()
+        self._position_picture_in_picture_controls()
+        self._update_playback_buttons()
+
+    def _toggle_picture_in_picture_lock(self) -> None:
+        self._picture_in_picture_locked = not self._picture_in_picture_locked
+        self._update_picture_in_picture_dynamic_icons()
+        self.picture_in_picture_lock_button.setToolTip(
+            "解锁后允许移动和缩放" if self._picture_in_picture_locked else "锁定窗口位置和尺寸"
+        )
+        if self._picture_in_picture_locked:
+            self._picture_in_picture_resize_gesture = False
+            self.set_picture_in_picture_cursor(Qt.CursorShape.ArrowCursor)
+        self.picture_in_picture_lock_changed.emit(self._picture_in_picture_locked)
+
+    def set_picture_in_picture_cursor(self, shape: Qt.CursorShape) -> None:
+        if self._picture_in_picture_locked:
+            shape = Qt.CursorShape.ArrowCursor
+        self._picture_in_picture_cursor_shape = shape
+        if self._picture_in_picture:
+            self._apply_picture_in_picture_cursor(shape)
+
+    def _apply_picture_in_picture_cursor(self, shape: Qt.CursorShape) -> None:
+        cursor = QCursor(shape)
+        surfaces = (
+            self,
+            self.video_widget,
+            self.picture_in_picture_title_bar,
+            self.picture_in_picture_control_bar,
+            self.picture_in_picture_end_overlay,
+            self.picture_in_picture_hint,
+        )
+        for widget in surfaces:
+            widget.setCursor(cursor)
+            for child in widget.findChildren(QWidget):
+                child.setCursor(cursor)
+
+    def set_picture_in_picture_locked(self, locked: bool) -> None:
+        if bool(locked) != self._picture_in_picture_locked:
+            self._toggle_picture_in_picture_lock()
+
+    def _position_picture_in_picture_controls(self) -> None:
+        if not hasattr(self, "picture_in_picture_title_bar"):
+            return
+        width = self.width()
+        self.picture_in_picture_title_bar.setGeometry(0, 0, width, 34)
+        self.picture_in_picture_control_bar.adjustSize()
+        bar_height = max(46, self.picture_in_picture_control_bar.sizeHint().height())
+        self.picture_in_picture_control_bar.setGeometry(0, max(0, self.height() - bar_height), width, bar_height)
+        compact = width < 480
+        small = width < 380
+        self.picture_in_picture_position_label.setVisible(not compact)
+        self.picture_in_picture_volume_slider.setVisible(not compact)
+        for button in (
+            self.picture_in_picture_play_button,
+            self.picture_in_picture_previous_button,
+            self.picture_in_picture_next_button,
+            self.picture_in_picture_mute_button,
+            self.picture_in_picture_fullscreen_button,
+            self.picture_in_picture_restore_button,
+            self.picture_in_picture_lock_button,
+        ):
+            button.setFixedWidth(26 if small else 30)
+        self.picture_in_picture_end_overlay.adjustSize()
+        end_size = self.picture_in_picture_end_overlay.sizeHint()
+        self.picture_in_picture_end_overlay.setGeometry(
+            max(0, (width - end_size.width()) // 2),
+            max(0, (self.height() - end_size.height()) // 2),
+            end_size.width(),
+            end_size.height(),
+        )
+        self.picture_in_picture_hint.adjustSize()
+        self.picture_in_picture_hint.move(
+            max(0, (width - self.picture_in_picture_hint.width()) // 2),
+            max(0, (self.height() - self.picture_in_picture_hint.height()) // 2),
+        )
+        self.picture_in_picture_title_bar.raise_()
+        self.picture_in_picture_control_bar.raise_()
+        self.picture_in_picture_end_overlay.raise_()
+        self.picture_in_picture_hint.raise_()
+
+    def _show_picture_in_picture_controls(self) -> None:
+        if not self._picture_in_picture:
+            return
+        self._set_cursor_hidden(False)
+        self._picture_in_picture_controls_visible = True
+        self.picture_in_picture_title_bar.show()
+        self.picture_in_picture_control_bar.show()
+        self._position_picture_in_picture_controls()
+        self._picture_in_picture_idle_timer.start()
+
+    def _hide_picture_in_picture_controls(self) -> None:
+        if not self._picture_in_picture or self._control_interaction_active:
+            return
+        pointer = self.mapFromGlobal(QCursor.pos())
+        if self.picture_in_picture_title_bar.geometry().contains(pointer) or self.picture_in_picture_control_bar.geometry().contains(pointer):
+            self._picture_in_picture_idle_timer.start()
+            return
+        self._picture_in_picture_controls_visible = False
+        self.picture_in_picture_title_bar.hide()
+        self.picture_in_picture_control_bar.hide()
+
+    def _show_picture_in_picture_playback_hint(self, action: str) -> None:
+        if not self._picture_in_picture:
+            return
+        self._picture_in_picture_hint_action = "pause" if action in {"pause", "⏸ 暂停"} else "play"
+        self.picture_in_picture_hint_label.setText(
+            "暂停" if self._picture_in_picture_hint_action == "pause" else "播放"
+        )
+        self._update_picture_in_picture_hint_icon()
+        self._position_picture_in_picture_controls()
+        self.picture_in_picture_hint.show()
+        self.picture_in_picture_hint.raise_()
+        self._picture_in_picture_hint_timer.start()
+
+    def _on_picture_in_picture_seek_start(self) -> None:
+        self._picture_in_picture_seeking = True
+
+    def _on_picture_in_picture_seek_finish(self) -> None:
+        self._picture_in_picture_seeking = False
+        if self._duration > 0:
+            self.seek_requested.emit(self.picture_in_picture_progress_slider.value() / 1000 * self._duration)
+
+    def _handle_picture_in_picture_volume_changed(self, volume: int) -> None:
+        if self.volume_slider.value() != volume:
+            self.volume_slider.setValue(volume)
+
     def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = False) -> None:
         self._playlist_count = len(playlist.entries) if playlist is not None else 0
         self._playlist_index = current_index
@@ -657,11 +1249,13 @@ class PlayerPage(QWidget):
         # the panel resets the playback idle timer and keeps the panel open.
         self._install_mouse_tracking(self.playlist_overlay)
         self.playlist_overlay.relayout(self.rect())
+        self._update_picture_in_picture_queue_buttons()
 
     def clear_playlist_context(self) -> None:
         self._playlist_count = 0
         self._playlist_index = -1
         self.playlist_overlay.set_playlist(None)
+        self._update_picture_in_picture_queue_buttons()
 
     def set_playlist_saved_items(self, playlists, current_key: str = "") -> None:
         self.playlist_overlay.set_saved_playlists(playlists, current_key=current_key)
@@ -669,6 +1263,7 @@ class PlayerPage(QWidget):
     def set_playlist_current_index(self, index: int) -> None:
         self._playlist_index = index
         self.playlist_overlay.set_current_index(index)
+        self._update_picture_in_picture_queue_buttons()
 
     # ------------------------------------------------------------------
     # 左侧合集面板
@@ -681,11 +1276,13 @@ class PlayerPage(QWidget):
         # 条目控件是动态建的，建完要重新铺一遍鼠标跟踪，否则面板内移动不算"活动"。
         self._install_mouse_tracking(self.collection_overlay)
         self.collection_overlay.relayout(self.rect())
+        self._update_picture_in_picture_queue_buttons()
 
     def clear_collection_context(self) -> None:
         self._collection_count = 0
         self._collection_index = -1
         self.collection_overlay.set_playlist(None)
+        self._update_picture_in_picture_queue_buttons()
 
     def set_collection_saved_items(self, playlists, current_key: str = "") -> None:
         self.collection_overlay.set_saved_playlists(playlists, current_key=current_key)
@@ -693,6 +1290,7 @@ class PlayerPage(QWidget):
     def set_collection_current_index(self, index: int) -> None:
         self._collection_index = index
         self.collection_overlay.set_current_index(index)
+        self._update_picture_in_picture_queue_buttons()
 
     def set_collection_available(self, available: bool) -> None:
         """有视频在播就允许左侧滑出，即便探测结果是"不属于任何合集"（显示空态）。"""
@@ -704,10 +1302,18 @@ class PlayerPage(QWidget):
         if self._duration > 0 and not self._seeking:
             value = int(max(0, min(1000, seconds / self._duration * 1000)))
             self.progress_slider.setValue(value)
+            if not self._picture_in_picture_seeking:
+                self.picture_in_picture_progress_slider.setValue(value)
+        self.picture_in_picture_position_label.setText(
+            f"{format_seconds(self._position)} / {format_seconds(self._duration)}"
+        )
 
     def update_duration(self, seconds: float) -> None:
         self._duration = max(0.0, seconds)
         self.duration_label.setText(format_seconds(int(seconds)))
+        self.picture_in_picture_position_label.setText(
+            f"{format_seconds(self._position)} / {format_seconds(self._duration)}"
+        )
 
     def load_thumbnail(self, url: str) -> None:
         self.thumbnail_label.setText("封面")
@@ -804,6 +1410,10 @@ class PlayerPage(QWidget):
         if volume > 0:
             self._volume_before_mute = volume
         self.volume_changed.emit(volume)
+        blocked = self.picture_in_picture_volume_slider.blockSignals(True)
+        self.picture_in_picture_volume_slider.setValue(volume)
+        self.picture_in_picture_volume_slider.blockSignals(blocked)
+        self._update_picture_in_picture_dynamic_icons()
 
     def _emit_quality(self, label: str) -> None:
         if not self._populating:
@@ -851,6 +1461,7 @@ class PlayerPage(QWidget):
         self.favorite_button.setEnabled(enabled and self._favorite_available and not self._favorite_active)
         self.browser_play_button.setEnabled(enabled and self._browser_play_available)
         self.cast_button.setEnabled(enabled and (self._cast_available or self._cast_active))
+        self.picture_in_picture_button.setEnabled(enabled and not self._cast_active and not self._cast_pending)
         self.speed_combo.setEnabled(enabled and not self._cast_active)
         self.quality_combo.setEnabled(enabled and not self._cast_active)
         # 只有一条音轨时没得选，和字幕下拉同理保持禁用。
@@ -862,8 +1473,38 @@ class PlayerPage(QWidget):
         self.progress_slider.setEnabled(enabled and (not self._cast_active or self._cast_seek_supported))
         self.volume_slider.setEnabled(enabled and (not self._cast_active or self._cast_volume_supported))
         self.play_button.setText("播放" if self._paused or self._playback_finished else "暂停")
+        self.picture_in_picture_play_button.setEnabled(enabled)
+        self._update_picture_in_picture_dynamic_icons()
+        self.picture_in_picture_mute_button.setEnabled(
+            enabled and (not self._cast_active or self._cast_volume_supported)
+        )
+        self.picture_in_picture_volume_slider.setEnabled(
+            enabled and (not self._cast_active or self._cast_volume_supported)
+        )
+        self.picture_in_picture_progress_slider.setEnabled(
+            enabled and (not self._cast_active or self._cast_seek_supported)
+        )
+        self.picture_in_picture_fullscreen_button.setEnabled(enabled)
+        self._update_picture_in_picture_queue_buttons()
+
+    def _update_picture_in_picture_queue_buttons(self) -> None:
+        if self._playlist_count > 0:
+            previous_enabled = self._playlist_index > 0
+            next_enabled = 0 <= self._playlist_index < self._playlist_count - 1
+        elif self._collection_count > 0:
+            previous_enabled = self._collection_index > 0
+            next_enabled = 0 <= self._collection_index < self._collection_count - 1
+        else:
+            previous_enabled = next_enabled = False
+        self.picture_in_picture_previous_button.setEnabled(previous_enabled)
+        self.picture_in_picture_next_button.setEnabled(next_enabled)
 
     def _sync_auto_hide_state(self) -> None:
+        if self._picture_in_picture:
+            self._auto_hide_enabled = False
+            self._idle_timer.stop()
+            self._set_cursor_hidden(False)
+            return
         enabled = self._has_media and not self._loading and not self._playback_finished
         self._auto_hide_enabled = enabled
         if enabled:
@@ -875,6 +1516,9 @@ class PlayerPage(QWidget):
             self._show_controls()
 
     def _handle_mouse_move(self, watched: QWidget, local_pos: QPoint) -> None:
+        if self._picture_in_picture:
+            self._show_picture_in_picture_controls()
+            return
         pos_in_self = watched.mapTo(self, local_pos)
         in_control_zone = self._is_in_control_hot_zone(pos_in_self)
         was_in_control_zone = self._control_pointer_inside
@@ -893,7 +1537,7 @@ class PlayerPage(QWidget):
                 self._hide_controls()
 
     def _handle_idle_timeout(self) -> None:
-        if not self._auto_hide_enabled:
+        if self._picture_in_picture or not self._auto_hide_enabled:
             return
         if not self._can_hide_controls_for_pointer_exit():
             self._idle_timer.start()
@@ -942,14 +1586,36 @@ class PlayerPage(QWidget):
         return not self._control_interaction_active and QApplication.activePopupWidget() is None
 
     def _is_control_widget(self, widget: QWidget) -> bool:
-        return widget is self.control_panel or self.control_panel.isAncestorOf(widget)
+        return (
+            widget is self.control_panel
+            or self.control_panel.isAncestorOf(widget)
+            or widget is self.picture_in_picture_control_bar
+            or self.picture_in_picture_control_bar.isAncestorOf(widget)
+            or widget is self.picture_in_picture_end_overlay
+            or self.picture_in_picture_end_overlay.isAncestorOf(widget)
+            or (
+                widget is not self.picture_in_picture_title_label
+                and self.picture_in_picture_title_bar.isAncestorOf(widget)
+            )
+        )
 
     def _show_cursor(self) -> None:
         self._set_cursor_hidden(False)
 
     def _set_cursor_hidden(self, hidden: bool) -> None:
+        if self._picture_in_picture:
+            self._apply_picture_in_picture_cursor(self._picture_in_picture_cursor_shape)
+            return
         cursor = QCursor(Qt.CursorShape.BlankCursor if hidden else Qt.CursorShape.ArrowCursor)
-        for widget in (self, self.video_widget, self.control_panel, self.playlist_overlay, self.collection_overlay):
+        for widget in (
+            self,
+            self.video_widget,
+            self.control_panel,
+            self.playlist_overlay,
+            self.collection_overlay,
+            self.picture_in_picture_title_bar,
+            self.picture_in_picture_control_bar,
+        ):
             widget.setCursor(cursor)
 
     def _install_mouse_tracking(self, widget: QWidget) -> None:
@@ -973,6 +1639,7 @@ class PlayerPage(QWidget):
             "cast": self._shortcut_cast,
             "fullscreen": self._shortcut_fullscreen,
             "fullscreen_keypad": self._shortcut_fullscreen,
+            "picture_in_picture": self._shortcut_picture_in_picture,
             "fullscreen_exit": self._shortcut_exit_fullscreen,
             "seek_backward_10": lambda: self._shortcut_seek(-10.0),
             "seek_forward_10": lambda: self._shortcut_seek(10.0),
@@ -1043,8 +1710,16 @@ class PlayerPage(QWidget):
         if self._shortcut_context_active():
             self.fullscreen_requested.emit()
 
+    def _shortcut_picture_in_picture(self) -> None:
+        if self._shortcut_context_active() and not self._cast_active:
+            self.picture_in_picture_requested.emit()
+
     def _shortcut_exit_fullscreen(self) -> None:
-        if self._shortcut_context_active() and self._fullscreen:
+        if not self._shortcut_context_active():
+            return
+        if self._picture_in_picture:
+            self.picture_in_picture_requested.emit()
+        elif self._fullscreen:
             self.fullscreen_requested.emit()
 
     def _shortcut_seek(self, delta: float) -> None:

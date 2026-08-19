@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <g fill="none" stroke="#e7edf4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <g id="play"><rect width="24" height="24" fill="none" stroke="none"/><path d="M8 5l11 7-11 7z"/></g>
+    <g id="pause"><rect width="24" height="24" fill="none" stroke="none"/><path d="M8 5v14M16 5v14"/></g>
+    <g id="previous"><rect width="24" height="24" fill="none" stroke="none"/><path d="M7 5v14M18 6l-8 6 8 6z"/></g>
+    <g id="next"><rect width="24" height="24" fill="none" stroke="none"/><path d="M17 5v14M6 6l8 6-8 6z"/></g>
+    <g id="mute"><rect width="24" height="24" fill="none" stroke="none"/><path d="M4 9h4l5-4v14l-5-4H4zM16 9l5 6M21 9l-5 6"/></g>
+    <g id="volume"><rect width="24" height="24" fill="none" stroke="none"/><path d="M4 9h4l5-4v14l-5-4H4zM17 9c2 2 2 4 0 6M19.5 6.5c4 4 4 7 0 11"/></g>
+    <g id="fullscreen"><rect width="24" height="24" fill="none" stroke="none"/><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></g>
+    <g id="restore"><rect width="24" height="24" fill="none" stroke="none"/><path d="M9 5H5v4M5.5 8.5A8 8 0 1 1 5 15"/></g>
+    <g id="lock"><rect width="24" height="24" fill="none" stroke="none"/><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"/></g>
+    <g id="unlock"><rect width="24" height="24" fill="none" stroke="none"/><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 7-2.5M12 14v2"/></g>
+    <g id="close"><rect width="24" height="24" fill="none" stroke="none"/><path d="M6 6l12 12M18 6L6 18"/></g>
+  </g>
+</svg>
