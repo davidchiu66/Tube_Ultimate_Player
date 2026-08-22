@@ -4,10 +4,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app_paths import _pick_existing_with_child
+
 from services.config_service import ConfigService
 
 
 class PictureInPictureConfigTests(unittest.TestCase):
+    def test_resource_root_requires_packaged_pip_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            incomplete = root / "installed" / "docs" / "assets"
+            bundled = root / "bundle" / "docs" / "assets"
+            incomplete.mkdir(parents=True)
+            (bundled / "pip").mkdir(parents=True)
+            (bundled / "pip" / "pip_style_a.svg").write_text("<svg/>", encoding="utf-8")
+
+            selected = _pick_existing_with_child(incomplete, bundled, child="pip/pip_style_a.svg")
+
+            self.assertEqual(selected, bundled)
     def _config(self, temp_dir: str) -> ConfigService:
         return ConfigService(
             default_path=Path("config/default_config.json"),

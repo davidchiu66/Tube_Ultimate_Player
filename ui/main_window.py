@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+import re
 from dataclasses import dataclass
 from functools import lru_cache, partial, wraps
 from pathlib import Path
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 from app_paths import APP_NAME, UPDATE_DIR, asset_path
 from database.favorite_repository import FavoriteRepository
 from database.history_repository import HistoryRepository
+from database.playback_resume_repository import PlaybackResumeRepository
 from database.playlist_repository import PlaylistRepository
 from database.sqlite_manager import SQLiteManager
 from dlna.controller import DlnaController, build_didl_lite
@@ -62,7 +64,7 @@ from ui.download_page import DownloadPage
 from ui.favorite_page import FavoritePage
 from ui.history_page import HistoryPage
 from ui.home_page import HomePage
-from ui.player_page import PlayerPage
+from ui.player_page import PlayerPage, format_seconds
 from ui.picture_in_picture import (
     PictureInPictureResizeEdge,
     clamp_geometry_to_screen,
@@ -105,6 +107,9 @@ SHUTDOWN_WAIT_MS = 3000
 HOME_CACHE_TTL_SECONDS = 300.0
 _COOKIE_PROBE_STATE_LOCK = threading.Lock()
 _COOKIE_PROBE_INFLIGHT = False
+LOCAL_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".m4v", ".mov", ".avi", ".flv", ".wmv", ".ts", ".m2ts"}
+LOCAL_TEMP_SUFFIXES = {".part", ".ytdl", ".tmp", ".temp"}
+_NATURAL_SORT_RE = re.compile(r"(\d+)")
 
 
 @lru_cache(maxsize=1)
@@ -206,6 +211,32 @@ def _records_to_video_infos(records: list) -> list[VideoInfo]:
     return videos
 
 
+def _local_natural_sort_key(path: Path) -> tuple:
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in _NATURAL_SORT_RE.split(path.name)
+    )
+
+
+def _scan_local_video_files(path: str | Path) -> list[Path]:
+    current = Path(path)
+    try:
+        directory = current.expanduser().resolve().parent
+        files = [
+            item for item in directory.iterdir()
+            if item.is_file()
+            and item.suffix.casefold() in LOCAL_VIDEO_EXTENSIONS
+            and item.suffix.casefold() not in LOCAL_TEMP_SUFFIXES
+            and not item.name.startswith(".")
+        ]
+    except OSError:
+        files = []
+    current_resolved = current.expanduser().resolve()
+    if current_resolved.is_file() and current_resolved not in files:
+        files.append(current_resolved)
+    return sorted(files, key=_local_natural_sort_key)
+
+
 def _enqueue_library_records(owner, records: list, *, empty_message: str, log_name: str) -> None:
     videos = _records_to_video_infos(records)
     if not videos:
@@ -234,6 +265,7 @@ class MainWindow(QMainWindow):
         self.config = ConfigService()
         self.db = SQLiteManager()
         self.history = HistoryRepository(self.db)
+        self.playback_resume = PlaybackResumeRepository(self.db)
         self.favorites = FavoriteRepository(self.db)
         self.playlists = PlaylistRepository(self.db)
         self.resolver = SiteResolver(self.config)
@@ -298,6 +330,15 @@ class MainWindow(QMainWindow):
         self._collection_workers: dict[tuple[int, str], CollectionWorker] = {}
         # 谁最后驱动了当前播放，谁负责连播；空串表示单条播放，没有队列在驱动。
         self._active_queue = ""
+        self._resume_media_key = ""
+        self._resume_last_position = 0.0
+        self._resume_latest_position = 0.0
+        self._resume_last_write_at = 0.0
+        self._resume_write_interval = 5.0
+        self._resume_ignore_until = 0.0
+        self._resume_video_url = ""
+        self._resume_allow_regression = False
+        self._resume_position_source = ""
         # 线程池 worker 在结束前必须留有 Python 引用，详见 _start_worker 的说明。
         self._active_workers: dict[int, object] = {}
         self._worker_sequence = 0
@@ -702,6 +743,8 @@ class MainWindow(QMainWindow):
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
 
+        self._flush_playback_resume()
+        self._resume_media_key = ""
         kind = self.resolver.detect_url_kind(target)
         if kind in ("playlist", "video_with_playlist"):
             self._load_playlist(target, auto_play_current=(kind == "video_with_playlist"))
@@ -1288,6 +1331,25 @@ class MainWindow(QMainWindow):
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         entry = playlist.entries[index]
+        if entry.local_path:
+            flush_resume = getattr(self, "_flush_playback_resume", None)
+            if callable(flush_resume):
+                flush_resume()
+            self._resume_media_key = ""
+            self._remember_playback_return_widget()
+            self.current_playlist = playlist
+            self.current_playlist_index = index
+            self._active_queue = "local"
+            page = self._created_page("playlist")
+            if page is not None:
+                page.set_current_index(index)
+            self.player_page.set_playlist_current_index(index)
+            try:
+                self._load_local_media(entry.local_path, arm_window_mode=arm_window_mode)
+            except Exception as exc:
+                logger.exception("local playlist playback failed path=%s", entry.local_path)
+                QMessageBox.critical(self, "播放失败", str(exc))
+            return
         inherit = (
             self._active_queue == "playlist"
             and self.current_playlist is not None
@@ -1321,6 +1383,9 @@ class MainWindow(QMainWindow):
     def _download_playlist_entries(self, entries: list[PlaylistEntry]) -> None:
         if not entries:
             return
+        if any(entry.local_path for entry in entries):
+            self.toast.show_message("本地文件已在磁盘中，无需重复下载")
+            return
         for entry in entries:
             self._enqueue_download(
                 VideoInfo(
@@ -1340,6 +1405,9 @@ class MainWindow(QMainWindow):
         playlist = self.current_playlist
         if playlist is None or not playlist.entries:
             QMessageBox.information(self, "提示", "当前没有可保存的播放列表。")
+            return
+        if playlist.source_type == "local" or any(entry.local_path for entry in playlist.entries):
+            QMessageBox.information(self, "提示", "同目录本地播放列表仅在当前播放会话中使用，不能保存为站点播放列表。")
             return
         default_name = playlist.title or "我的播放列表"
         name, ok = QInputDialog.getText(self, "保存播放列表", "请输入播放列表名称：", text=default_name)
@@ -1548,13 +1616,19 @@ class MainWindow(QMainWindow):
 
         try:
             video_url, audio_url = self._current_stream_urls(quality)
-            self.mpv.load(video_url, audio_url, headers=video.http_headers)
+            resume = self._resume_position_for_video(video)
+            self._flush_playback_resume()
+            self.mpv.load(video_url, audio_url, start_position=resume, headers=video.http_headers)
+            self._begin_resume_tracking("video:" + video.video_id, resume)
+            self._resume_video_url = str(video.webpage_url or "").strip()
             self._set_playback_finished(False)
             self.player_page.set_loading(False)
             self.player_page.set_playback_available(True)
             self.player_page.set_cast_available(True)
             self.player_page.set_paused(False)
             self.history.record_play(video)
+            if resume > 0:
+                self.toast.show_message(f"从 {format_seconds(resume)} 继续播放")
             # 历史页未构建时，其构造函数会读取最新数据，无需在这里刷新。
             history_page = self._created_page("history")
             if history_page is not None:
@@ -2013,29 +2087,148 @@ class MainWindow(QMainWindow):
     def _handle_download_task_removed(self, _task_id: str) -> None:
         self._sync_current_download_state()
 
+    def _build_local_playlist(self, path: str | Path) -> PlaylistInfo:
+        files = _scan_local_video_files(path)
+        entries = [
+            PlaylistEntry(
+                playlist_id="local:" + str(Path(path).expanduser().resolve().parent),
+                video_id="local:" + str(item),
+                title=item.name,
+                webpage_url="",
+                source_site="local",
+                position=index,
+                local_path=str(item),
+            )
+            for index, item in enumerate(files)
+        ]
+        return PlaylistInfo(
+            playlist_id=entries[0].playlist_id if entries else "local:empty",
+            title=Path(path).expanduser().resolve().parent.name or "本地文件夹",
+            webpage_url="",
+            source_site="local",
+            source_type="local",
+            entry_count=len(entries),
+            entries=entries,
+        )
+
+    def _local_resume_position(self, path: str | Path) -> float:
+        record = self.playback_resume.get_local(path)
+        if not record:
+            return 0.0
+        try:
+            stat = Path(path).stat()
+            if int(record.get("file_size") or 0) != int(stat.st_size):
+                self.playback_resume.clear_local(path)
+                return 0.0
+            if abs(float(record.get("file_mtime") or 0.0) - float(stat.st_mtime)) > 1.0:
+                self.playback_resume.clear_local(path)
+                return 0.0
+            position = max(0.0, float(record.get("watched_position") or 0.0))
+            duration = max(0.0, float(record.get("duration") or 0.0))
+            return 0.0 if duration > 0 and position >= duration * 0.95 else position if position >= 5 else 0.0
+        except (OSError, TypeError, ValueError):
+            return 0.0
+
+    def _resume_position_for_video(self, video: VideoInfo) -> float:
+        position = self.history.watched_position(video.video_id, video.webpage_url)
+        duration = max(0.0, float(video.duration or 0.0))
+        return 0.0 if duration > 0 and position >= duration * 0.95 else position if position >= 5 else 0.0
+
+    def _begin_resume_tracking(self, key: str, position: float = 0.0) -> None:
+        self._resume_media_key = str(key or "")
+        self._resume_position_source = self._resume_media_key
+        self._resume_last_position = max(0.0, float(position or 0.0))
+        self._resume_latest_position = self._resume_last_position
+        self._resume_last_write_at = time.monotonic()
+        self._resume_ignore_until = time.monotonic() + 2.0 if position > 0 else 0.0
+        self._resume_allow_regression = False
+
+    def _flush_playback_resume(self, position: float | None = None, *, force: bool = True) -> None:
+        key = self._resume_media_key
+        if not key:
+            return
+        try:
+            mpv_position = max(0.0, float(self.mpv.position() if position is None else position))
+            page = getattr(self, "player_page", None)
+            page_position = max(0.0, float(getattr(page, "_position", 0.0) or 0.0)) if position is not None else 0.0
+            current = max(mpv_position, self._resume_latest_position, page_position)
+            duration = max(0.0, float(self.mpv.duration() or 0.0))
+        except (TypeError, ValueError):
+            return
+        now = time.monotonic()
+        if position is None and self._resume_latest_position > current + 2.0:
+            # stop/replace can make mpv's time-pos jump back to the new media's
+            # initial value before the forced flush runs. Preserve the last
+            # position observed from the old media instead of overwriting it.
+            current = self._resume_latest_position
+        if not force and now < self._resume_ignore_until:
+            return
+        if not force and abs(current - self._resume_last_position) < 5 and now - self._resume_last_write_at < self._resume_write_interval:
+            return
+        if key.startswith("local:"):
+            self.playback_resume.save_local(key[6:], current, duration, title=Path(key[6:]).name)
+        elif key.startswith("video:"):
+            self.history.update_watched_position(key[6:], current, duration, self._resume_video_url)
+        logger.debug("playback resume saved key=%s position=%.3f duration=%.3f force=%s", key, current, duration, force)
+        self._resume_last_position = current
+        self._resume_latest_position = current
+        self._resume_last_write_at = now
+
+    def _clear_current_resume(self) -> None:
+        key = self._resume_media_key
+        if key.startswith("local:"):
+            self.playback_resume.clear_local(key[6:])
+        elif key.startswith("video:"):
+            self.history.update_watched_position(key[6:], 0.0, self.mpv.duration(), self._resume_video_url)
+        self._resume_media_key = ""
+        self._resume_video_url = ""
+        self._resume_position_source = ""
+        self._resume_last_position = 0.0
+        self._resume_latest_position = 0.0
+        self._resume_allow_regression = False
+
+    def _load_local_media(self, path: str, *, arm_window_mode: bool = True) -> None:
+        resolved = str(Path(path).expanduser().resolve())
+        resume = self._local_resume_position(resolved)
+        self.current_video = None
+        self.current_local_media_path = resolved
+        self.current_quality_label = ""
+        self.current_audio_track_id = ""
+        self._active_queue = "local"
+        self._begin_resume_tracking("local:" + resolved, resume)
+        if arm_window_mode:
+            self._arm_playback_window_mode()
+        self.stack.setCurrentWidget(self.player_page)
+        self.mpv.load(resolved, start_position=resume)
+        self._set_playback_finished(False)
+        self.player_page.update_local_file_info(resolved)
+        self.player_page.set_playback_available(True)
+        self.player_page.set_cast_available(True)
+        self.player_page.set_paused(False)
+        self.player_page.set_download_available(False)
+        self.player_page.set_download_state("")
+        if resume > 0:
+            self.toast.show_message(f"从 {format_seconds(resume)} 继续播放")
+        self._apply_playback_window_mode()
+
     def play_local_file(self, path: str) -> None:
         logger.info("play local file requested: %s", path)
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         self._remember_playback_return_widget()
-        self.current_video = None
-        self.current_local_media_path = str(Path(path).resolve())
-        self.current_quality_label = ""
-        self.current_audio_track_id = ""
+        self._flush_playback_resume()
+        self._resume_media_key = ""
         self._clear_playlist_context()
         self._clear_collection_context()
-        self._arm_playback_window_mode()
-        self.stack.setCurrentWidget(self.player_page)
         try:
-            self.mpv.load(path)
-            self._set_playback_finished(False)
-            self.player_page.update_local_file_info(path)
-            self.player_page.set_playback_available(True)
-            self.player_page.set_cast_available(True)
-            self.player_page.set_paused(False)
-            self.player_page.set_download_available(False)
-            self.player_page.set_download_state("")
-            self._apply_playback_window_mode()
+            playlist = self._build_local_playlist(path)
+            current_index = next((i for i, entry in enumerate(playlist.entries) if entry.local_path == str(Path(path).expanduser().resolve())), 0)
+            self.current_playlist = playlist
+            self.current_playlist_index = current_index
+            self.current_playlist_key = ""
+            self.current_playlist_auto_play = False
+            self.player_page.set_playlist_context(playlist, current_index=current_index, auto_play_next=False)
+            self._load_local_media(str(Path(path).expanduser().resolve()))
         except Exception as exc:
             self._pending_playback_fullscreen = False
             if getattr(self, "_picture_in_picture", False):
@@ -2045,6 +2238,7 @@ class MainWindow(QMainWindow):
 
     def _stop_playback(self) -> None:
         logger.info("stop playback requested")
+        self._flush_playback_resume()
         if getattr(self, "_picture_in_picture", False):
             self._leave_picture_in_picture()
         if self._dlna_device is not None or self._dlna_cast_pending:
@@ -2074,6 +2268,9 @@ class MainWindow(QMainWindow):
         self.top_bar_widget.raise_()
 
     def _handle_playback_finished(self) -> None:
+        clear_resume = getattr(self, "_clear_current_resume", None)
+        if callable(clear_resume):
+            clear_resume()
         # 谁最后驱动了当前播放，谁优先负责连播；另一侧作为兜底。
         first = self._advance_collection_queue if self._active_queue == "collection" else self._advance_playlist_queue
         second = self._advance_playlist_queue if self._active_queue == "collection" else self._advance_collection_queue
@@ -2119,7 +2316,12 @@ class MainWindow(QMainWindow):
                 return
             if self._playback_finished:
                 logger.info("restart playback requested")
+                self._clear_current_resume()
                 self.mpv.restart()
+                if self.current_local_media_path:
+                    self._begin_resume_tracking("local:" + self.current_local_media_path)
+                elif self.current_video is not None:
+                    self._begin_resume_tracking("video:" + self.current_video.video_id)
                 self._set_playback_finished(False)
                 self.player_page.update_position(0.0)
                 self.player_page.set_paused(False)
@@ -2140,6 +2342,14 @@ class MainWindow(QMainWindow):
         if self._casting_to_dlna():
             return
         self.player_page.update_position(seconds)
+        if getattr(self, "_resume_media_key", ""):
+            observed = max(0.0, float(seconds or 0.0))
+            if self._resume_allow_regression or observed >= self._resume_latest_position - 2.0:
+                self._resume_latest_position = observed
+                self._resume_allow_regression = False
+        flush_resume = getattr(self, "_flush_playback_resume", None)
+        if callable(flush_resume):
+            flush_resume(seconds, force=False)
 
     def _handle_mpv_duration_changed(self, seconds: float) -> None:
         if self._casting_to_dlna():
@@ -2151,6 +2361,8 @@ class MainWindow(QMainWindow):
             self.player_page.set_paused(self._dlna_remote_paused)
             return
         self.player_page.set_paused(paused)
+        if paused:
+            self._flush_playback_resume()
 
     def _seek_playback(self, seconds: float) -> None:
         if self._dlna_device is not None:
@@ -2159,6 +2371,7 @@ class MainWindow(QMainWindow):
                 return
             self._start_dlna_action(self._dlna_device, "seek", seconds)
             return
+        self._resume_allow_regression = True
         self.mpv.seek(seconds)
 
     def _set_playback_finished(self, finished: bool) -> None:
@@ -3772,6 +3985,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
             logger.info("main window closing")
+            self._flush_playback_resume()
             if self._picture_in_picture:
                 self._persist_picture_in_picture_state()
             self._shutting_down = True

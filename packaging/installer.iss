@@ -31,6 +31,7 @@ UninstallDisplayIcon={app}\Tube_Ultimate_Player.exe
 Source: "{#ProjectRoot}\dist\Tube_Ultimate_Player\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 Source: "{#ProjectRoot}\3rdpart\*"; DestDir: "{app}\3rdpart"; Flags: recursesubdirs ignoreversion
 Source: "{#ProjectRoot}\docs\assets\icons\*"; DestDir: "{app}\docs\assets\icons"; Flags: recursesubdirs ignoreversion
+Source: "{#ProjectRoot}\docs\assets\pip\*"; DestDir: "{app}\docs\assets\pip"; Flags: recursesubdirs ignoreversion
 Source: "{#ProjectRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProjectRoot}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProjectRoot}\app_version.txt"; DestDir: "{app}"; Flags: ignoreversion

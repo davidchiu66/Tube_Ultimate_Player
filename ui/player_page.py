@@ -1060,7 +1060,12 @@ class PlayerPage(QWidget):
         # 全屏切换会改变可用宽度，两侧面板都要重新算宽度与滑出位置。
         self.playlist_overlay.relayout(self.rect())
         self.collection_overlay.relayout(self.rect())
-        if self._controls_visible:
+        if self._playback_finished:
+            # Finished playback disables auto-hide. Returning from PIP must
+            # still leave the normal controller visible.
+            self._controls_visible = True
+            self._position_control_panel(animated=False)
+        elif self._controls_visible:
             self._controls_visible = False
             self._position_control_panel(animated=True)
         else:

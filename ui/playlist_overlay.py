@@ -355,7 +355,7 @@ class PlaylistOverlay(QFrame):
             return None
         return (
             tuple(
-                (entry.video_id, entry.title, entry.thumbnail, entry.duration, entry.uploader)
+                (entry.video_id, entry.title, entry.thumbnail, entry.duration, entry.uploader, entry.local_path)
                 for entry in playlist.entries
             ),
             tuple(

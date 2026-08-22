@@ -62,6 +62,7 @@ class PlaylistEntry:
     section_title: str = ""
     section_position: int = 0
     section_thumbnail: str = ""
+    local_path: str = ""
 
     def to_home_video(self) -> HomeVideo:
         return HomeVideo(

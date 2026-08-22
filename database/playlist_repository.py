@@ -194,6 +194,7 @@ class PlaylistRepository:
             section_title=str(entry.section_title or ""),
             section_position=int(entry.section_position or 0),
             section_thumbnail=str(entry.section_thumbnail or ""),
+            local_path=str(entry.local_path or ""),
         )
 
     @staticmethod

@@ -101,6 +101,17 @@ class PictureInPictureControlTests(unittest.TestCase):
         self.assertEqual(self.page.picture_in_picture_replay_button.text(), "重新播放")
         self.assertEqual(self.page.picture_in_picture_return_button.text(), "返回播放器")
 
+    def test_returning_from_finished_picture_in_picture_keeps_normal_controls_visible(self) -> None:
+        self.page.set_fullscreen(True)
+        self.page.set_picture_in_picture(True)
+        self.page.set_playback_finished(True)
+
+        self.page.set_picture_in_picture(False)
+        self.page.set_fullscreen(True)
+
+        self.assertTrue(self.page.control_panel.isVisible())
+        self.assertTrue(self.page._controls_visible)
+
     def test_mini_progress_and_volume_follow_normal_controls(self) -> None:
         self.page.update_duration(100)
         self.page.update_position(25)

@@ -29,13 +29,26 @@ def _pick_existing(*candidates: Path) -> Path:
     return candidates[0]
 
 
+def _pick_existing_with_child(*candidates: Path, child: str) -> Path:
+    """Pick a resource root only when the requested packaged child is present."""
+    for candidate in candidates:
+        if (candidate / child).exists():
+            return candidate
+    return candidates[0]
+
+
 BUNDLE_DIR = _bundle_dir()
 APP_DIR = _app_dir()
 BASE_DIR = APP_DIR
 THIRDPART_DIR = _pick_existing(APP_DIR / "3rdpart", BUNDLE_DIR / "3rdpart", SOURCE_DIR / "3rdpart")
 RESOURCE_DIR = _pick_existing(APP_DIR / "resources", BUNDLE_DIR / "resources", SOURCE_DIR / "resources")
 DEFAULT_CONFIG_DIR = _pick_existing(APP_DIR / "config", BUNDLE_DIR / "config", SOURCE_DIR / "config")
-ASSET_DIR = _pick_existing(APP_DIR / "docs" / "assets", BUNDLE_DIR / "docs" / "assets", SOURCE_DIR / "docs" / "assets")
+ASSET_DIR = _pick_existing_with_child(
+    APP_DIR / "docs" / "assets",
+    BUNDLE_DIR / "docs" / "assets",
+    SOURCE_DIR / "docs" / "assets",
+    child="pip/pip_style_a.svg",
+)
 
 
 @dataclass(frozen=True, slots=True)

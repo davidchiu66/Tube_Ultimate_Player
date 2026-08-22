@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS playlist_item (
 );
 
 CREATE INDEX IF NOT EXISTS idx_playlist_item_key_position ON playlist_item(playlist_key, position);
+
+CREATE TABLE IF NOT EXISTS local_playback_resume (
+    path TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    file_mtime REAL NOT NULL DEFAULT 0,
+    watched_position REAL NOT NULL DEFAULT 0,
+    duration REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_playback_resume_updated_at ON local_playback_resume(updated_at);
 """
 
 

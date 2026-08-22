@@ -12,19 +12,23 @@ class HistoryRepository:
     def __init__(self, db: SQLiteManager) -> None:
         self.db = db
 
-    def record_play(self, video: VideoInfo, watched_position: int = 0) -> None:
+    def record_play(self, video: VideoInfo, watched_position: int | None = None) -> None:
         now = datetime.now().isoformat(timespec="seconds")
         with self.db.connection() as conn:
             existing = conn.execute(
-                "SELECT id, play_count FROM history WHERE video_id = ? ORDER BY id DESC LIMIT 1",
-                (video.video_id,),
+                """
+                SELECT id, play_count FROM history
+                WHERE video_id = ? OR (webpage_url IS NOT NULL AND webpage_url = ?)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (video.video_id, video.webpage_url),
             ).fetchone()
             if existing:
                 conn.execute(
                     """
                     UPDATE history
                     SET title = ?, source_site = ?, webpage_url = ?, uploader = ?, thumbnail = ?, duration = ?,
-                        watched_position = ?, play_count = ?, last_played_at = ?
+                        watched_position = COALESCE(?, watched_position), play_count = ?, last_played_at = ?
                     WHERE id = ?
                     """,
                     (
@@ -56,12 +60,49 @@ class HistoryRepository:
                         video.uploader,
                         video.thumbnail,
                         video.duration,
-                        watched_position,
+                        watched_position or 0,
                         now,
                         now,
                     ),
                 )
 
+    def watched_position(self, video_id: str, webpage_url: str = "") -> float:
+        clean_id = str(video_id or "").strip()
+        clean_url = str(webpage_url or "").strip()
+        if not clean_id and not clean_url:
+            return 0.0
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT watched_position FROM history
+                WHERE video_id = ? OR (webpage_url IS NOT NULL AND webpage_url = ?)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (clean_id, clean_url),
+            ).fetchone()
+        try:
+            return max(0.0, float(row["watched_position"] or 0.0)) if row else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def update_watched_position(self, video_id: str, position: float, duration: float = 0.0, webpage_url: str = "") -> None:
+        clean_id = str(video_id or "").strip()
+        clean_url = str(webpage_url or "").strip()
+        if not clean_id and not clean_url:
+            return
+        try:
+            watched = max(0.0, float(position or 0.0))
+            total = max(0.0, float(duration or 0.0))
+        except (TypeError, ValueError):
+            return
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                UPDATE history SET watched_position = ?, duration = CASE WHEN ? > 0 THEN ? ELSE duration END
+                WHERE video_id = ? OR (webpage_url IS NOT NULL AND webpage_url = ?)
+                """,
+                (watched, total, total, clean_id, clean_url),
+            )
     def remove(self, video_id: str) -> int:
         """删除某个视频的全部历史行，返回实际删除数。"""
         clean_id = str(video_id or "").strip()
