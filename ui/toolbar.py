@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from services.site_registry import SITE_DEFINITIONS, normalize_site
+
 try:
     import qtawesome as qta
 except ImportError:  # pragma: no cover
@@ -195,7 +197,7 @@ class SearchBox(QFrame):
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("ToolbarSearchEdit")
         self.search_edit.setFixedHeight(36)
-        self.search_edit.setPlaceholderText("搜索视频（YouTube / Bilibili）")
+        self.search_edit.setPlaceholderText("搜索在线视频")
         self.search_edit.setClearButtonEnabled(False)
         self.search_edit.setFrame(False)
         self.search_edit.setMinimumWidth(120)
@@ -253,54 +255,55 @@ class SourceSelector(QFrame):
         self.setFixedHeight(40)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        self.bilibili_radio = QRadioButton("BiliBili")
-        self.bilibili_radio.setObjectName("ToolbarSourceRadio")
-        self.bilibili_radio.setToolTip("首页与搜索使用 Bilibili")
-        self.bilibili_radio.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.youtube_radio = QRadioButton("YouTube")
-        self.youtube_radio.setObjectName("ToolbarSourceRadio")
-        self.youtube_radio.setToolTip("首页与搜索使用 YouTube")
-        self.youtube_radio.setCursor(Qt.CursorShape.PointingHandCursor)
-
         self.button_group = QButtonGroup(self)
         self.button_group.setExclusive(True)
-        self.button_group.addButton(self.bilibili_radio)
-        self.button_group.addButton(self.youtube_radio)
-        self.bilibili_radio.setChecked(True)
+        self._radios: dict[str, QRadioButton] = {}
 
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(10, 2, 10, 2)
         self._layout.setSpacing(10)
-        self._layout.addWidget(self.bilibili_radio)
-        self._layout.addWidget(self.youtube_radio)
-
-        # 只在真正被选中时发一次信号，避免同一次切换发出「取消选中 + 选中」两条。
-        self.bilibili_radio.toggled.connect(lambda checked: self._emit_if_checked(checked, "bilibili"))
-        self.youtube_radio.toggled.connect(lambda checked: self._emit_if_checked(checked, "youtube"))
+        for definition in SITE_DEFINITIONS:
+            radio = QRadioButton(definition.label)
+            radio.setObjectName("ToolbarSourceRadio")
+            radio.setToolTip(f"首页与搜索使用 {definition.label}")
+            radio.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._radios[definition.key] = radio
+            setattr(self, f"{definition.key}_radio", radio)
+            self.button_group.addButton(radio)
+            self._layout.addWidget(radio)
+            radio.toggled.connect(
+                lambda checked, source=definition.key: self._emit_if_checked(checked, source)
+            )
+        self._radios["bilibili"].setChecked(True)
 
     def set_compact_mode(self, compact: bool) -> None:
         """窄窗口下换用短标签并收紧边距，把空间让给搜索框与导航按钮。
 
         与 ToolbarButton 的做法一致；全称仍留在 tooltip 里。
         """
-        self.bilibili_radio.setText("B站" if compact else "BiliBili")
-        self.youtube_radio.setText("YT" if compact else "YouTube")
-        margin = 6 if compact else 10
+        for definition in SITE_DEFINITIONS:
+            self._radios[definition.key].setText(definition.compact_label if compact else definition.label)
+            self._radios[definition.key].setMinimumWidth(18 if compact else 58)
+            self._radios[definition.key].setMaximumWidth(26 if compact else 90)
+        margin = 2 if compact else 10
         self._layout.setContentsMargins(margin, 2, margin, 2)
-        self._layout.setSpacing(6 if compact else 10)
+        self._layout.setSpacing(2 if compact else 10)
 
     def source(self) -> str:
-        return "youtube" if self.youtube_radio.isChecked() else "bilibili"
+        for source, radio in self._radios.items():
+            if radio.isChecked():
+                return source
+        return "bilibili"
 
     def set_source(self, source: str) -> None:
         """静默同步选中态，不触发 source_changed（用于外部状态回填）。"""
-        target = self.youtube_radio if str(source or "").strip().lower() == "youtube" else self.bilibili_radio
+        target = self._radios[normalize_site(source, "bilibili")]
         if target.isChecked():
             return
-        for radio in (self.bilibili_radio, self.youtube_radio):
+        for radio in self._radios.values():
             radio.blockSignals(True)
         target.setChecked(True)
-        for radio in (self.bilibili_radio, self.youtube_radio):
+        for radio in self._radios.values():
             radio.blockSignals(False)
 
     def _emit_if_checked(self, checked: bool, source: str) -> None:
@@ -427,6 +430,7 @@ class PlayerToolbar(QWidget):
         icon_only = mode == "icon"
         self.source_selector.set_compact_mode(icon_only)
         self.search_box.set_compact_mode(icon_only)
+        self.source_selector.setMaximumWidth(125 if icon_only else 360)
         for button in (
             self.search_button,
             self.url_button,

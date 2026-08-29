@@ -916,6 +916,7 @@ class PlayerPage(QWidget):
         self.title_label.setText(video.title)
         self.picture_in_picture_title_label.setText(video.title or "正在播放")
         meta_parts = [
+            *([f"作者 {video.uploader}"] if str(video.uploader or "").strip() else []),
             f"时长 {format_seconds(video.duration)}",
             f"清晰度 {selected_quality}",
             # 「无字幕」比「字幕 0 个」更像一句话：用户看到 0 个会怀疑是程序没取到。

@@ -42,7 +42,7 @@ class AboutDialog(QDialog):
         version_label = QLabel(f"版本: v{read_app_version()}")
         stack_label = QLabel("基于: PySide6 + libmpv + yt-dlp")
         features_label = QLabel(
-            "功能:\n- YouTube / Bilibili 首页与搜索\n- URL 解析播放\n- 多清晰度播放\n- 下载 / 收藏 / 历史"
+            "功能:\n- YouTube / Bilibili / 抖音 / TikTok 首页与搜索\n- URL 解析播放\n- 多清晰度播放\n- 下载 / 收藏 / 历史"
         )
         copyright_label = QLabel("Copyright: 2026")
         for label in (version_label, stack_label, features_label, copyright_label):

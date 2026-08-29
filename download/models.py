@@ -18,6 +18,10 @@ STATUS_DELETED = "deleted"
 class DownloadTask:
     url: str
     title: str
+    # 短视频站点的网页解析容易被风控拦截；已解析出可播放媒体时直接交给下载器。
+    # url 仍保留原网页地址，作为任务去重、来源判断和 Cookie 选择依据。
+    download_url: str = ""
+    http_headers: dict[str, str] | None = None
     video_id: str = ""
     source_site: str = "youtube"
     quality_label: str = "Auto"
@@ -35,6 +39,16 @@ class DownloadTask:
     updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        allowed_headers = {"user-agent": "User-Agent", "referer": "Referer", "origin": "Origin"}
+        self.http_headers = {
+            allowed_headers[str(name or "").strip().lower()]: str(value or "")
+            .replace("\r", "")
+            .replace("\n", "")
+            .strip()
+            for name, value in dict(self.http_headers or {}).items()
+            if str(name or "").strip().lower() in allowed_headers
+            and str(value or "").replace("\r", "").replace("\n", "").strip()
+        }
         if not self.task_id:
             self.task_id = uuid4().hex
         now = datetime.now()

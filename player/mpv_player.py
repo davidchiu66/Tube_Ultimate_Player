@@ -154,6 +154,16 @@ class MpvPlayer(QObject):
         referer = headers.get("Referer") or headers.get("referer")
         if referer:
             self.set_property_string("referrer", referer)
+        # Signed short-video CDN URLs may require the browser session cookie in
+        # addition to User-Agent/Referer. mpv expects these as comma-separated
+        # HTTP header fields; clear the property when no custom headers remain.
+        header_fields = []
+        for key, value in headers.items():
+            if key.lower() in {"user-agent", "referer", "cookie", "origin"} and value:
+                if key.lower() in {"user-agent", "referer"}:
+                    continue
+                header_fields.append(f"{key}: {value}")
+        self.set_property_string("http-header-fields", ",".join(header_fields))
 
     def shutdown(self) -> None:
         if getattr(self, "_handle", None):

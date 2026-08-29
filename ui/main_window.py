@@ -52,7 +52,9 @@ from resolver.models import (
 )
 from resolver.quality_selector import select_quality_by_hint, select_quality_by_tier
 from resolver.site_resolver import SiteResolver
+from services.site_registry import SITE_KEYS, SITE_LABELS, site_for_url
 from services.config_service import ConfigService
+from services.douyin_browser_service import DouyinBrowserService
 from services.network_quality_service import NetworkMeasurement, NetworkMeasurementCache, select_quality_for_bandwidth
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
 from services.runtime_install_service import NODE_TRUSTED_HOSTS, RuntimeInstallService
@@ -269,6 +271,8 @@ class MainWindow(QMainWindow):
         self.favorites = FavoriteRepository(self.db)
         self.playlists = PlaylistRepository(self.db)
         self.resolver = SiteResolver(self.config)
+        self.douyin_browser_service = DouyinBrowserService(self.config, self)
+        self.resolver.set_douyin_browser_client(self.douyin_browser_service)
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
@@ -978,11 +982,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _site_label_for_url(url: str) -> str:
-        parsed = urlparse(str(url or "").strip())
-        host = parsed.netloc.lower()
-        if host.endswith("bilibili.com") or host.endswith("b23.tv"):
-            return "Bilibili"
-        return "YouTube"
+        return {"bilibili": "Bilibili", "youtube": "YouTube", "douyin": "抖音", "tiktok": "TikTok"}.get(
+            site_for_url(url), "YouTube"
+        )
 
     def _refresh_home_page(self) -> None:
         if self.home_page.mode() == "search" and self._search_keyword:
@@ -1937,8 +1939,9 @@ class MainWindow(QMainWindow):
         if not video.webpage_url:
             self.toast.show_message("下载失败：视频地址不可用")
             return
+        resolved = self.resolver.resolve_cached_short_video(video.webpage_url)
         self._enqueue_download(
-            VideoInfo(
+            resolved or VideoInfo(
                 video_id=video.video_id,
                 title=video.title,
                 source_site=video.source_site,
@@ -2691,7 +2694,7 @@ class MainWindow(QMainWindow):
             self._start_dlna_action(self._dlna_device, "set_volume", self._dlna_pending_volume)
 
     def _schedule_creator_playlist(self, video: VideoInfo) -> None:
-        if video.source_site not in {"youtube", "bilibili"}:
+        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok"}:
             return
         if not (video.creator_id or video.channel_id or video.creator_url):
             logger.info("creator playlist skipped; video has no creator identity id=%s", video.video_id)
@@ -3820,14 +3823,14 @@ class MainWindow(QMainWindow):
         unreadable = list(getattr(report, "unreadable", None) or [])
         self.config.set_probed_cookie_browsers(result)
         self.config.save()
-        missing = [site for site in ("bilibili", "youtube") if not result.get(site)]
+        missing = [site for site in SITE_KEYS if not result.get(site)]
         settings_page = self._created_page("settings")
         if settings_page is not None:
             settings_page.set_cookie_probe_result(result, missing, unreadable)
         if not missing:
             logger.info("cookie probe matched every site result=%s", result)
             return
-        labels = {"bilibili": "Bilibili", "youtube": "YouTube"}
+        labels = SITE_LABELS
         names = "、".join(labels[site] for site in missing)
         # 提示用 toast 而不是模态框：启动时弹窗打断使用，设置页另有常驻提示。
         if unreadable:
@@ -3989,6 +3992,7 @@ class MainWindow(QMainWindow):
             if self._picture_in_picture:
                 self._persist_picture_in_picture_state()
             self._shutting_down = True
+            self.douyin_browser_service.shutdown()
             self._invalidate_creator_playlist_request()
             self._dlna_position_timer.stop()
             self._dlna_volume_timer.stop()

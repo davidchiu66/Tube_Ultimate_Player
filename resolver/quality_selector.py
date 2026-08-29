@@ -207,8 +207,10 @@ class QualitySelector:
 
         def _label_of(fmt: dict) -> str:
             height = int(fmt.get("height") or 0)
+            width = int(fmt.get("width") or 0)
+            display_height = min(width, height) if width > 0 and height > width else height
             fps = int(fmt.get("fps") or 0)
-            return f"{height}p{fps}" if fps and fps > 30 else f"{height}p"
+            return f"{display_height}p{fps}" if fps and fps > 30 else f"{display_height}p"
 
         best_by_label: dict[str, dict] = {}
         # 同档位的已混音变体单独留一份：A1 把画面轨切到纯视频后，"随画面（免转码）"

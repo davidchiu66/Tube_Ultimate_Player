@@ -9,22 +9,22 @@
 </p>
 
 <p align="center">
-  面向 YouTube 与 Bilibili 的搜索、首页浏览、URL 播放、播放列表管理与下载场景。
+  面向 YouTube、Bilibili、抖音与 TikTok 的搜索、首页浏览、URL 播放、播放列表管理与下载场景。
 </p>
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.28-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.29-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-442-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-803-16a34a?style=flat-square">
 </p>
 
 ## 亮点
 
-- 同时支持 YouTube 与 Bilibili，两站点共用统一播放器、下载器、收藏与历史体系
+- 同时支持 YouTube、Bilibili、抖音与 TikTok，四站点共用统一播放器、下载器、收藏、历史和播放记忆体系
 - 支持首页推荐、关键词搜索、URL 直接播放、播放列表详情页与播放器侧滑播放列表面板
 - 首页 / 搜索 / 播放列表 / 播放器显示视频更新时间（数据源提供时）
 - 完整字幕支持：Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举，下拉框列常用轨，其余可在带搜索的完整列表中挑选
@@ -56,7 +56,7 @@
 
 ### 典型使用方式
 
-1. 启动应用后进入默认首页，可选择 `Bilibili` 或 `YouTube`
+1. 启动应用后进入默认首页，可选择 `Bilibili`、`YouTube`、`抖音` 或 `TikTok`
 2. 在顶部搜索框输入关键词，或通过“播放 URL”弹窗直接输入任意站点地址
 3. 点击首页或搜索结果卡片中的“播放”，也可双击卡片、收藏、历史或播放列表条目开始播放
 4. 在播放器中切换清晰度、倍速、全屏，点击“浏览器播放”打开原始页面，或点击“投屏”发送到局域网 DLNA 设备
@@ -67,16 +67,16 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 首页 | YouTube / Bilibili 推荐内容、分页浏览、卡片独立播放/收藏/下载、更新时间、长标题三行省略 |
-| 搜索 | 双站点关键词搜索、分页、卡片独立播放/收藏/下载、更新时间、等待动画与长标题三行省略 |
-| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 列表类链接，保留最近播放历史 |
+| 首页 | YouTube / Bilibili / 抖音 / TikTok 推荐内容、分站点缓存与分页浏览、卡片独立播放/收藏/下载 |
+| 搜索 | 四站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
+| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 抖音 / TikTok 及列表类链接，保留最近播放历史 |
 | 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、在线视频/本地视频播放记忆点、浏览器播放、全屏、小窗拖动/等比缩放/置顶、同目录本地播放列表、快进/后退、静音、滚轮与快捷键调音量、音量/倍速中屏提示、自动隐藏控制器 |
 | 字幕 | Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举、常用轨直选、完整列表搜索、下载后本地加载 |
 | 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表面板、已保存列表加载/删除、命名保存、自动连播、批量下载、更新时间列 |
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制、上游断流重连 |
 | 下载 | 下载队列、并发控制、暂停、继续、删除、批量操作、最新置顶、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 常规与快捷键 Tab、三态代理模式、双站点独立 Cookie、按站点 Cookie 自动检测与重新检测、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义、滚动适配较小窗口 |
+| 设置 | 常规与快捷键 Tab、三态代理模式、四站点独立 Cookie 与默认画质、按站点 Cookie 自动检测、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
 | 关于 | 当前版本、系统与 CPU 架构探测展示、GitHub 链接、检测新版本、Release Note 展示、Windows 自动升级与 Linux 手动升级包下载 |
 
 ## Bilibili 支持说明
@@ -162,6 +162,8 @@ Tube_Ultimate_Player/
 - `config/user_config.json`
 - `cookie_youtube.txt`
 - `cookie_bilibili.txt`
+- `cookie_douyin.txt`
+- `cookie_tiktok.txt`
 - `data/tube_ultimate_player.sqlite3`
 - `data/download_tasks.json`
 - `downloads/`
@@ -312,13 +314,13 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 ## 下载、收藏与历史
 
 - 三个列表统一使用黑底金边表格风格，避免深色主题下出现白底白字不可读的问题。
-- 下载任务、收藏和播放历史均显示来源（`YouTube` / `Bilibili`）。
+- 下载任务、收藏和播放历史均显示来源（`YouTube` / `Bilibili` / `抖音` / `TikTok`）。
 - 收藏和播放历史保存作者信息；旧 SQLite 数据库启动时会自动补充缺失字段。
 - 列表搜索为本地即时筛选，不会重复请求站点接口。
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `442` 项）：
+运行完整自动化测试（当前版本共 `803` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -347,7 +349,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 1. 本项目是通用桌面客户端，不提供任何受版权保护内容的托管、镜像或转售服务。
 2. 用户应仅在拥有合法权利、授权或当地法律允许的情况下使用本工具访问、播放或下载内容。
-3. 用户应自行遵守 YouTube、Bilibili 及相关平台的服务条款、版权政策、地区限制、年龄限制和其他适用规则。
+3. 用户应自行遵守 YouTube、Bilibili、抖音、TikTok 及相关平台的服务条款、版权政策、地区限制、年龄限制和其他适用规则。
 4. 本项目不保证对任何第三方平台的持续可用性、兼容性或访问权限。
 5. 用户导入的 Cookie、代理、账号状态及下载行为均由用户自行负责；仓库不包含任何真实个人 Cookie、账号数据或私有配置。
 6. 本项目对第三方软件和服务的引用仅用于兼容与集成说明，不代表对其拥有权或附带再授权。
@@ -358,6 +360,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 - `cookie_youtube.txt`
 - `cookie_bilibili.txt`
+- `cookie_douyin.txt`
+- `cookie_tiktok.txt`
 - `config/user_config.json`
 - `logs/`
 - `downloads/`

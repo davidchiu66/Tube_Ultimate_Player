@@ -344,6 +344,9 @@ class DownloadPage(QWidget):
         if not save_dir.exists():
             return ""
         markers = [f" [{candidate}]" for candidate in _video_id_candidates(task.video_id)]
+        raw_id = str(task.video_id or "").split(":", 1)[-1]
+        if raw_id:
+            markers.append(f" [{raw_id}]")
         transient_suffixes = (".part", ".ytdl", ".tmp", ".temp")
         try:
             for path in save_dir.iterdir():
@@ -379,8 +382,8 @@ def _video_id_candidates(video_id: str) -> list[str]:
         return []
 
     candidates: list[str] = [raw]
-    if raw.startswith("bilibili:"):
-        raw = raw[len("bilibili:") :]
+    if raw.startswith(("bilibili:", "douyin:", "tiktok:")):
+        raw = raw.split(":", 1)[1]
         if raw not in candidates:
             candidates.append(raw)
     if raw.startswith("BV") or raw.startswith("av"):

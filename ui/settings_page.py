@@ -39,6 +39,7 @@ from services.config_service import (
     ConfigService,
     detect_browser_cookie_sources,
 )
+from services.site_registry import SITE_DEFINITIONS, SITE_KEYS
 from services.cookie_service import secure_cookie_file
 from services.locale_service import system_language_tag
 from services.runtime_install_service import RuntimeStatus
@@ -69,11 +70,11 @@ class SettingsPage(QWidget):
     def __init__(self, config: ConfigService) -> None:
         super().__init__()
         self.config = config
-        self._cookie_texts = {"youtube": "", "bilibili": ""}
+        self._cookie_texts = {site: "" for site in SITE_KEYS}
         self._cookie_site = "bilibili"
-        self._quality_drafts = {"youtube": "high", "bilibili": "high"}
-        self._browser_drafts = {"youtube": "auto", "bilibili": "auto"}
-        self._profile_drafts = {"youtube": "", "bilibili": ""}
+        self._quality_drafts = {site: "high" for site in SITE_KEYS}
+        self._browser_drafts = {site: "auto" for site in SITE_KEYS}
+        self._profile_drafts = {site: "" for site in SITE_KEYS}
         self._quality_changed_sites: set[str] = set()
         self._browser_changed_sites: set[str] = set()
         self._loading_settings = True
@@ -94,36 +95,35 @@ class SettingsPage(QWidget):
         self.proxy_edit.setPlaceholderText("http://127.0.0.1:7890 / socks5://127.0.0.1:1080")
 
         self.default_home_group = QButtonGroup(self)
-        self.default_home_bilibili = QRadioButton("Bilibili")
-        self.default_home_youtube = QRadioButton("YouTube")
-        self.default_home_group.addButton(self.default_home_bilibili)
-        self.default_home_group.addButton(self.default_home_youtube)
+        self._default_home_radios: dict[str, QRadioButton] = {}
         default_home_row = QHBoxLayout()
         default_home_row.setContentsMargins(0, 0, 0, 0)
         default_home_row.setSpacing(16)
-        default_home_row.addWidget(self.default_home_bilibili)
-        default_home_row.addWidget(self.default_home_youtube)
+        for definition in SITE_DEFINITIONS:
+            radio = QRadioButton(definition.label)
+            self._default_home_radios[definition.key] = radio
+            setattr(self, f"default_home_{definition.key}", radio)
+            self.default_home_group.addButton(radio)
+            default_home_row.addWidget(radio)
         self.default_home_hint = QLabel("仅决定启动后默认打开的网站")
         self.default_home_hint.setObjectName("MetaLabel")
         default_home_row.addWidget(self.default_home_hint)
         default_home_row.addStretch(1)
 
         self.site_config_group = QButtonGroup(self)
-        self.site_config_bilibili = QRadioButton("Bilibili")
-        self.site_config_youtube = QRadioButton("YouTube")
-        self.site_config_group.addButton(self.site_config_bilibili)
-        self.site_config_group.addButton(self.site_config_youtube)
-        self.site_config_bilibili.toggled.connect(
-            lambda checked: self._switch_cookie_site("bilibili") if checked else None
-        )
-        self.site_config_youtube.toggled.connect(
-            lambda checked: self._switch_cookie_site("youtube") if checked else None
-        )
+        self._site_config_radios: dict[str, QRadioButton] = {}
         site_config_row = QHBoxLayout()
         site_config_row.setContentsMargins(0, 0, 0, 0)
         site_config_row.setSpacing(16)
-        site_config_row.addWidget(self.site_config_bilibili)
-        site_config_row.addWidget(self.site_config_youtube)
+        for definition in SITE_DEFINITIONS:
+            radio = QRadioButton(definition.label)
+            self._site_config_radios[definition.key] = radio
+            setattr(self, f"site_config_{definition.key}", radio)
+            self.site_config_group.addButton(radio)
+            site_config_row.addWidget(radio)
+            radio.toggled.connect(
+                lambda checked, site=definition.key: self._switch_cookie_site(site) if checked else None
+            )
         site_config_row.addStretch(1)
 
         self.playback_window_group = QButtonGroup(self)
@@ -380,24 +380,20 @@ class SettingsPage(QWidget):
         self._loading_settings = True
         self.config.load()
         default_home = self.config.default_home_source()
-        self._cookie_texts = {
-            "youtube": self._read_cookie_text("youtube"),
-            "bilibili": self._read_cookie_text("bilibili"),
-        }
+        self._cookie_texts = {site: self._read_cookie_text(site) for site in SITE_KEYS}
         self._quality_drafts = {
-            site: self.config.default_quality_mode(site) for site in ("youtube", "bilibili")
+            site: self.config.default_quality_mode(site) for site in SITE_KEYS
         }
         self._browser_drafts = {
             site: self.config.configured_cookie_browser_for_site(site)
-            for site in ("youtube", "bilibili")
+            for site in SITE_KEYS
         }
         self._profile_drafts = {
             site: self.config.cookie_browser_profile_for_site(site)
-            for site in ("youtube", "bilibili")
+            for site in SITE_KEYS
         }
         self._cookie_site = default_home
-        self.default_home_bilibili.setChecked(default_home != "youtube")
-        self.default_home_youtube.setChecked(default_home == "youtube")
+        self._default_home_radios[default_home].setChecked(True)
         starts_fullscreen = self.config.playback_starts_fullscreen()
         self.playback_window_windowed.setChecked(not starts_fullscreen)
         self.playback_window_fullscreen.setChecked(starts_fullscreen)
@@ -408,8 +404,7 @@ class SettingsPage(QWidget):
         self.picture_in_picture_style_combo.setCurrentIndex(
             picture_in_picture_style_index if picture_in_picture_style_index >= 0 else 0
         )
-        self.site_config_bilibili.setChecked(default_home != "youtube")
-        self.site_config_youtube.setChecked(default_home == "youtube")
+        self._site_config_radios[default_home].setChecked(True)
         audio_language = str(self.config.get("player.default_audio_language", "auto") or "auto")
         audio_language_index = self.default_audio_language_combo.findData(audio_language)
         self.default_audio_language_combo.setCurrentIndex(
@@ -463,7 +458,8 @@ class SettingsPage(QWidget):
 
         self.config.set("youtube.proxy", self.proxy_edit.text().strip())
         self.config.set("network.proxy_mode", self.proxy_mode_combo.currentData() or PROXY_MODE_AUTO)
-        self.config.set("content.default_home", "youtube" if self.default_home_youtube.isChecked() else "bilibili")
+        default_home = next((site for site, radio in self._default_home_radios.items() if radio.isChecked()), "bilibili")
+        self.config.set("content.default_home", default_home)
         self.config.set(
             "player.playback_window_mode",
             "fullscreen" if self.playback_window_fullscreen.isChecked() else "window",
@@ -478,7 +474,7 @@ class SettingsPage(QWidget):
         if self._quality_changed_sites:
             # 旧调用方和旧版本只能看到全局值；固定跟随保存后的默认首页，避免同时修改
             # 两站时由 set 的无序迭代决定结果。新版本始终优先使用上面的分站键。
-            legacy_site = "youtube" if self.default_home_youtube.isChecked() else "bilibili"
+            legacy_site = default_home
             self.config.set(
                 "player.default_quality",
                 self._quality_drafts.get(legacy_site) or QUALITY_MODES[0],
@@ -611,7 +607,7 @@ class SettingsPage(QWidget):
         unreadable: list[str] | None = None,
     ) -> None:
         """展示启动探测的结果；某站点没找到时给出手动配置引导。"""
-        labels = {"bilibili": "Bilibili", "youtube": "YouTube"}
+        labels = {definition.key: definition.label for definition in SITE_DEFINITIONS}
         parts = [f"{labels[site]}：{spec}" for site, spec in result.items() if spec]
         if unreadable:
             # 运行中的 Chromium 会独占 Cookies 库，读不到不等于没登录。
@@ -624,10 +620,10 @@ class SettingsPage(QWidget):
     def refresh_cookie_probe_from_config(self) -> None:
         result = {
             site: str(self.config.get(f"cookies.{site}.auto_browser", "") or "").strip()
-            for site in ("bilibili", "youtube")
+            for site in SITE_KEYS
         }
         missing = [site for site, spec in result.items() if not spec]
-        if not any(self.config.cookie_auto_probe_enabled(site) for site in ("bilibili", "youtube")):
+        if not any(self.config.cookie_auto_probe_enabled(site) for site in SITE_KEYS):
             self.cookie_probe_label.setText("仅在「自动检测」模式下生效")
             self.reprobe_cookie_button.setEnabled(False)
             return
@@ -669,7 +665,7 @@ class SettingsPage(QWidget):
         self._cookie_texts[self._cookie_site] = self.cookie_edit.toPlainText()
 
     def _update_cookie_content_label(self) -> None:
-        label = "Bilibili" if self._cookie_site == "bilibili" else "YouTube"
+        label = next((definition.label for definition in SITE_DEFINITIONS if definition.key == self._cookie_site), self._cookie_site)
         self.cookie_content_label.setText(f"{label} Cookie 内容")
 
     def _cookie_file_path(self, site: str, *, for_write: bool = False) -> Path:

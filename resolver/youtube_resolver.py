@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 import datetime as _dt
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -19,7 +21,7 @@ from services.config_service import (
     detect_browser_cookie_sources,
     rank_cookie_sources,
 )
-from services.cookie_service import prepare_cookie_file
+from services.cookie_service import prepare_cookie_file, load_browser_cookie_header
 from services.chromium_cookie_extractor import extract_cookies_to_netscape
 from services.locale_service import system_language_tag
 from services.logging_service import sanitize_command
@@ -40,12 +42,14 @@ class YoutubeResolver:
         self.ytdlp_path = self._find_ytdlp()
 
     def resolve(self, url: str) -> VideoInfo:
-        normalized_url = normalize_youtube_video_url(url)
-        if normalized_url:
+        original_url = str(url or "").strip()
+        source_site = _detect_source_site(original_url)
+        normalized_url = normalize_youtube_video_url(original_url) if source_site == "youtube" else original_url
+        if source_site == "youtube" and normalized_url:
             if normalized_url != url:
                 ytdlp_logger.info("normalized YouTube URL from %s to %s", url, normalized_url)
             url = normalized_url
-        elif _is_youtube_playlist_url(url):
+        elif source_site == "youtube" and _is_youtube_playlist_url(url):
             raise RuntimeError("当前链接是 YouTube 播放列表，不支持直接播放，请打开具体视频后再播放。")
 
         command = self._build_command(url)
@@ -81,8 +85,65 @@ class YoutubeResolver:
             ytdlp_logger.exception("yt-dlp returned invalid JSON")
             raise RuntimeError(f"yt-dlp 返回的 JSON 无法解析: {exc}") from exc
 
+        if source_site == "douyin":
+            info = self._merge_douyin_detail_formats(info, original_url)
         self._log_info_summary(info)
-        return self._parse_info(info, result.stderr.strip())
+        video = self._parse_info(info, result.stderr.strip())
+        if source_site == "douyin":
+            author = info.get("author") if isinstance(info.get("author"), dict) else {}
+            nickname = str(
+                author.get("nickname") or author.get("nickname_platform") or
+                info.get("author_name") or info.get("channel") or ""
+            ).strip()
+            if nickname and nickname.casefold() != str(video.uploader or "").strip().casefold():
+                video.uploader = nickname
+            if nickname and isinstance(video.raw_info, dict):
+                video.raw_info.setdefault("author", {})
+                if isinstance(video.raw_info["author"], dict):
+                    video.raw_info["author"].setdefault("nickname", nickname)
+        if video.source_site == "youtube" and source_site in {"douyin", "tiktok"}:
+            video.source_site = source_site
+            video.webpage_url = str(info.get("webpage_url") or original_url)
+            raw_id = str(info.get("id") or "").strip()
+            video.video_id = f"{source_site}:{raw_id or _current_video_id_for_site(video.webpage_url, source_site).split(':', 1)[-1]}"
+        return video
+
+    def _merge_douyin_detail_formats(self, info: dict, source_url: str) -> dict:
+        video_id = str(info.get("id") or "").strip()
+        if not video_id:
+            return info
+        params = {"aweme_id": video_id, "device_platform": "webapp", "aid": "6383", "channel": "channel_pc_web", "pc_client_type": "1", "version_code": "190500", "version_name": "19.5.0"}
+        endpoint = "https://www.douyin.com/aweme/v1/web/aweme/detail/?" + urllib.parse.urlencode(params)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36", "Referer": source_url, "Accept": "application/json, text/plain, */*"}
+        browser = self.config.cookie_browser_for_site("douyin")
+        if browser:
+            cookie = load_browser_cookie_header(browser, source_url)
+            if cookie:
+                headers["Cookie"] = cookie
+        _label, proxy = self.config.effective_proxy()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}) if proxy else urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(urllib.request.Request(endpoint, headers=headers), timeout=30) as response:
+                detail = json.loads(response.read().decode("utf-8", "replace") or "{}")
+        except Exception:
+            ytdlp_logger.warning("douyin detail formats unavailable id=%s", video_id, exc_info=True)
+            return info
+        video = (detail.get("aweme_detail") or {}).get("video") or {}
+        enriched = list(info.get("formats") or [])
+        known = {str(item.get("format_id") or "") for item in enriched if isinstance(item, dict)}
+        for index, bitrate in enumerate(video.get("bit_rate") or []):
+            play = bitrate.get("play_addr") or {}
+            urls = play.get("url_list") or []
+            if not urls:
+                continue
+            format_id = f"douyin-{bitrate.get('gear_name') or index}"
+            if format_id in known:
+                continue
+            enriched.append({"format_id": format_id, "url": str(urls[0]), "ext": "mp4", "protocol": "https", "width": int(play.get("width") or video.get("width") or 0), "height": int(play.get("height") or video.get("height") or 0), "fps": int(video.get("fps") or 30), "vcodec": "h264", "acodec": "aac", "tbr": float(bitrate.get("bit_rate") or 0) / 1000, "filesize": play.get("data_size"), "format_note": str(bitrate.get("gear_name") or "")})
+        if enriched:
+            info = dict(info)
+            info["formats"] = enriched
+        return info
 
     def detect_url_kind(self, url: str) -> str:
         raw = str(url or "").strip()
@@ -297,6 +358,47 @@ class YoutubeResolver:
             len(entries),
         )
         return paged, has_next
+
+    def fetch_generic_videos(
+        self,
+        url: str,
+        *,
+        page: int = 1,
+        page_size: int = 56,
+        context: str = "内容",
+    ) -> tuple[list[HomeVideo], bool]:
+        """Best-effort flat extraction for Douyin/TikTok feeds and searches."""
+        source_site = _detect_source_site(url)
+        page = max(1, int(page))
+        page_size = max(1, min(100, int(page_size)))
+        total_needed = page * page_size + 1
+        command = self._build_home_command(url, total_needed)
+        result = self._run_ytdlp(command, url, f"{source_site}-{context}-page-{page}")
+        if result.returncode != 0:
+            result = self._retry_with_alternate_browsers(
+                url,
+                f"{source_site}-{context}-page-{page}",
+                lambda browser: self._build_home_command(url, total_needed, override_cookie_browser=browser),
+                result,
+            )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                f"{source_site.upper()} {context}暂时无法获取。请配置该站点 Cookie、检查地区/代理后重试。\n{self._format_error(detail)}"
+            )
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{source_site.upper()} {context}返回的数据无法解析: {exc}") from exc
+        entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
+        videos = [
+            video
+            for entry in entries
+            if (video := self._parse_generic_home_entry(entry, source_site)) is not None
+        ]
+        start = (page - 1) * page_size
+        end = start + page_size
+        return videos[start:end], len(videos) > end
 
     def resolve_collection(self, video: VideoInfo) -> PlaylistInfo | None:
         """当前视频所属的"合集"。
@@ -723,11 +825,14 @@ class YoutubeResolver:
                 creator_id = str((info.get("owner") or {}).get("mid") or "").strip()
             if creator_id and not creator_url:
                 creator_url = f"https://space.bilibili.com/{creator_id}"
-        else:
+        elif source_site == "youtube":
             creator_id = str(info.get("channel_id") or info.get("uploader_id") or "").strip()
             creator_url = str(info.get("channel_url") or info.get("uploader_url") or "").strip()
             if creator_id and not creator_url:
                 creator_url = f"https://www.youtube.com/channel/{creator_id}"
+        else:
+            creator_id = str(info.get("uploader_id") or info.get("channel_id") or info.get("creator_id") or "").strip()
+            creator_url = str(info.get("uploader_url") or info.get("channel_url") or info.get("creator_url") or "").strip()
         video_id = str(info.get("id") or "")
         if source_site == "bilibili":
             video_id = _bilibili_video_key(
@@ -735,6 +840,8 @@ class YoutubeResolver:
                 bvid=str(info.get("bvid") or info.get("id") or ""),
                 aid=str(info.get("aid") or ""),
             )
+        elif source_site in {"douyin", "tiktok"}:
+            video_id = f"{source_site}:{video_id or _current_video_id_for_site(webpage_url, source_site).split(':', 1)[-1]}"
 
         return VideoInfo(
             video_id=video_id,
@@ -794,6 +901,8 @@ class YoutubeResolver:
     ) -> PlaylistEntry | None:
         if source_site == "bilibili":
             return YoutubeResolver._parse_bilibili_playlist_entry(entry, playlist_id, position)
+        if source_site in {"douyin", "tiktok"}:
+            return YoutubeResolver._parse_generic_playlist_entry(entry, playlist_id, position, source_site)
 
         video_id = _clean_video_id(str(entry.get("id") or "").strip())
         url = str(entry.get("webpage_url") or entry.get("url") or "").strip()
@@ -818,6 +927,38 @@ class YoutubeResolver:
             uploader=str(entry.get("uploader") or entry.get("channel") or "").strip(),
             duration=int(entry.get("duration") or 0),
             thumbnail=thumbnail,
+            position=position,
+            availability=str(entry.get("availability") or ""),
+            upload_date=_youtube_upload_date(entry),
+        )
+
+    @staticmethod
+    def _parse_generic_playlist_entry(
+        entry: dict,
+        playlist_id: str,
+        position: int,
+        source_site: str,
+    ) -> PlaylistEntry | None:
+        raw_id = str(entry.get("id") or "").strip()
+        url = str(entry.get("webpage_url") or entry.get("url") or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            if source_site == "tiktok" and raw_id:
+                uploader_id = str(entry.get("uploader_id") or "").strip()
+                url = f"https://www.tiktok.com/@{uploader_id or '_'}/video/{raw_id}"
+            elif source_site == "douyin" and raw_id:
+                url = f"https://www.douyin.com/video/{raw_id}"
+        if not url:
+            return None
+        actual_id = raw_id or _current_video_id_for_site(url, source_site).split(":", 1)[-1]
+        return PlaylistEntry(
+            playlist_id=playlist_id,
+            video_id=f"{source_site}:{actual_id}",
+            title=str(entry.get("title") or entry.get("description") or actual_id).strip(),
+            webpage_url=url,
+            source_site=source_site,
+            uploader=str(entry.get("uploader") or entry.get("channel") or entry.get("creator") or "").strip(),
+            duration=int(entry.get("duration") or 0),
+            thumbnail=_normalize_thumbnail_url(_extract_thumbnail(entry)),
             position=position,
             availability=str(entry.get("availability") or ""),
             upload_date=_youtube_upload_date(entry),
@@ -892,6 +1033,31 @@ class YoutubeResolver:
         )
 
     @staticmethod
+    def _parse_generic_home_entry(entry: dict, source_site: str) -> HomeVideo | None:
+        raw_id = str(entry.get("id") or "").strip()
+        title = str(entry.get("title") or entry.get("description") or "").strip()
+        url = str(entry.get("webpage_url") or entry.get("url") or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            if source_site == "tiktok" and raw_id:
+                uploader_id = str(entry.get("uploader_id") or "_").strip() or "_"
+                url = f"https://www.tiktok.com/@{uploader_id}/video/{raw_id}"
+            elif source_site == "douyin" and raw_id:
+                url = f"https://www.douyin.com/video/{raw_id}"
+        if not url or not title:
+            return None
+        actual_id = raw_id or _current_video_id_for_site(url, source_site).split(":", 1)[-1]
+        return HomeVideo(
+            video_id=f"{source_site}:{actual_id}",
+            title=title,
+            webpage_url=url,
+            source_site=source_site,
+            uploader=str(entry.get("uploader") or entry.get("channel") or entry.get("creator") or "").strip(),
+            duration=int(entry.get("duration") or 0),
+            thumbnail=_normalize_thumbnail_url(_extract_thumbnail(entry)),
+            upload_date=_youtube_upload_date(entry),
+        )
+
+    @staticmethod
     def _format_stats(info: dict, formats: list[dict]) -> dict:
         return {
             "id": info.get("id"),
@@ -939,6 +1105,20 @@ class YoutubeResolver:
         if not detail:
             return "yt-dlp 解析失败"
         lower = detail.lower()
+        if "fresh cookies" in lower and "douyin" in lower:
+            return (
+                "抖音要求使用浏览器中的新鲜 Cookie 才能访问此内容。\n\n"
+                "请在设置页为抖音选择已登录/近期访问过抖音的浏览器，或导入 Netscape 格式 cookies.txt。\n\n"
+                f"{detail}"
+            )
+        if "tiktok" in lower and any(token in lower for token in ("unexpected response", "region", "not available", "status code 403")):
+            return (
+                "TikTok 当前请求受到 Cookie、地区或平台风控限制。\n\n"
+                "请配置 TikTok 浏览器 Cookie，并确认当前网络或代理能够访问该视频所在地区。\n\n"
+                f"{detail}"
+            )
+        if any(token in lower for token in ("private video", "video is private", "login required")):
+            return "该视频为私密内容或需要登录后访问。请配置对应站点 Cookie。\n\n" + detail
         if "playlist type is unviewable" in lower:
             return (
                 "当前链接指向 YouTube 播放列表或推荐列表，不是具体视频地址。\n\n"
@@ -1150,6 +1330,14 @@ def _is_bilibili_host(host: str) -> bool:
     return host.endswith("bilibili.com") or host.endswith("b23.tv")
 
 
+def _is_douyin_host(host: str) -> bool:
+    return host.endswith("douyin.com") or host.endswith("iesdouyin.com")
+
+
+def _is_tiktok_host(host: str) -> bool:
+    return host.endswith("tiktok.com")
+
+
 def _creator_videos_url(video: VideoInfo) -> str:
     raw = str(video.creator_url or "").strip().rstrip("/")
     if video.source_site == "bilibili":
@@ -1160,6 +1348,11 @@ def _creator_videos_url(video: VideoInfo) -> str:
         parsed = urlparse(raw)
         raw = parsed._replace(query="", fragment="").geturl().rstrip("/")
         return raw if raw.endswith("/video") else f"{raw}/video"
+
+    if video.source_site in {"douyin", "tiktok"}:
+        if not raw:
+            return ""
+        return urlparse(raw)._replace(query="", fragment="").geturl().rstrip("/")
 
     if not raw and (video.creator_id or video.channel_id):
         raw = f"https://www.youtube.com/channel/{video.creator_id or video.channel_id}"
@@ -1175,12 +1368,22 @@ def _detect_source_site(url: str) -> str:
     host = parsed.netloc.lower()
     if _is_bilibili_host(host):
         return "bilibili"
+    if _is_douyin_host(host):
+        return "douyin"
+    if _is_tiktok_host(host):
+        return "tiktok"
     return "youtube"
 
 
 def _current_video_id_for_site(url: str, source_site: str) -> str:
     if source_site == "bilibili":
         return _bilibili_video_key(url)
+    if source_site in {"douyin", "tiktok"}:
+        parsed = urlparse(str(url or ""))
+        match = re.search(r"/(?:video|photo)/(\d+)", parsed.path)
+        if match:
+            return f"{source_site}:{match.group(1)}"
+        return f"{source_site}:{parsed.path.rstrip('/').rsplit('/', 1)[-1] or 'unknown'}"
     return _video_id_from_watch_url(url)
 
 

@@ -42,6 +42,8 @@ SITE_LOGIN_COOKIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "__Secure-3PAPISID",
         ),
     ),
+    "douyin": ((".douyin.com", "douyin.com", ".iesdouyin.com", "iesdouyin.com"), ("sessionid", "passport_csrf_token", "ttwid")),
+    "tiktok": ((".tiktok.com", "tiktok.com"), ("sessionid", "sid_tt", "sessionid_ss", "sid_guard")),
 }
 
 

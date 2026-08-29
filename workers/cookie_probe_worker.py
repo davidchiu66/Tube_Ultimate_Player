@@ -24,7 +24,7 @@ class CookieProbeSignals(QObject):
 class CookieProbeWorker(QRunnable):
     """启动时异步探测各站点的登录 Cookie 浏览器，不阻塞首屏。"""
 
-    def __init__(self, sites: tuple[str, ...] = ("bilibili", "youtube")) -> None:
+    def __init__(self, sites: tuple[str, ...] = ("bilibili", "youtube", "douyin", "tiktok")) -> None:
         super().__init__()
         self.sites = sites
         self.signals = CookieProbeSignals()

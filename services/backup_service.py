@@ -15,6 +15,7 @@ from pathlib import Path
 from app_paths import APP_NAME, CONFIG_DIR, DATA_DIR, RUNTIME_ROOT, read_app_version
 from download.download_manager import TASKS_FILE
 from services.config_service import USER_CONFIG_PATH, ConfigService
+from services.site_registry import SITE_KEYS
 from services.webdav_client import BACKUP_NAME_RE, RemoteBackup, WebdavClient
 from workers.archive_extract_worker import validate_archive_entry
 
@@ -67,9 +68,12 @@ def build_backup_archive(
         files.append(("data/tube_ultimate_player.sqlite3", snapshot))
         _stage_json(Path(tasks_path), stage / "data" / "download_tasks.json", files, "data/download_tasks.json", "[]")
         if include_cookies:
-            for site in ("youtube", "bilibili"):
+            for site in SITE_KEYS:
                 if cookie_paths is not None:
-                    source = Path(cookie_paths[site])
+                    configured = cookie_paths.get(site)
+                    if not configured:
+                        continue
+                    source = Path(configured)
                 else:
                     cookie_config = config or ConfigService()
                     source = Path(cookie_config.cookie_file_path(site))
@@ -150,6 +154,8 @@ def restore_backup_archive(
         "data/download_tasks.json": Path(tasks_path),
         "cookies/cookie_youtube.txt": _cookie_target("youtube", Path(config_dir)),
         "cookies/cookie_bilibili.txt": _cookie_target("bilibili", Path(config_dir)),
+        "cookies/cookie_douyin.txt": _cookie_target("douyin", Path(config_dir)),
+        "cookies/cookie_tiktok.txt": _cookie_target("tiktok", Path(config_dir)),
     }
     snapshot = build_backup_archive(
         output_dir=snapshots,
@@ -161,6 +167,8 @@ def restore_backup_archive(
         cookie_paths={
             "youtube": targets["cookies/cookie_youtube.txt"],
             "bilibili": targets["cookies/cookie_bilibili.txt"],
+            "douyin": targets["cookies/cookie_douyin.txt"],
+            "tiktok": targets["cookies/cookie_tiktok.txt"],
         },
     )
     try:
@@ -250,6 +258,7 @@ def _validate_manifest_shape(manifest: object) -> None:
         if relative in seen or relative not in {
             "config/user_config.json", "data/tube_ultimate_player.sqlite3",
             "data/download_tasks.json", "cookies/cookie_youtube.txt", "cookies/cookie_bilibili.txt",
+            "cookies/cookie_douyin.txt", "cookies/cookie_tiktok.txt",
         }:
             raise BackupError(f"manifest 包含无效文件：{relative}")
         seen.add(relative)

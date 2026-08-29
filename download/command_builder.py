@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 
 from app_paths import thirdpart_path
@@ -19,6 +20,8 @@ def build_download_task(
 ) -> DownloadTask:
     """`audio_format_id` 非空时取代清晰度自带的默认音轨，让下载与播放器里选中的音轨一致。"""
     quality = video.qualities.get(quality_label) if quality_label else None
+    if quality is None and video.source_site in {"douyin", "tiktok"} and video.qualities:
+        quality_label, quality = next(iter(video.qualities.items()))
     format_selector = "bestvideo+bestaudio/best"
     expected_bytes = None
     if quality:
@@ -32,6 +35,22 @@ def build_download_task(
             (track.tbr or track.abr) if track else quality.audio_tbr,
             video.duration,
         )
+        if video.source_site in {"douyin", "tiktok"} and quality.video_url:
+            # 这些格式是首页/搜索接口返回的应用内格式，不是 yt-dlp 网页解析器认识的
+            # format_id。播放器已经验证过媒体地址，下载时复用它即可绕开二次网页风控。
+            format_selector = "best"
+            return DownloadTask(
+                url=video.webpage_url,
+                download_url=quality.video_url,
+                http_headers=_safe_download_headers(video.http_headers),
+                video_id=video.video_id,
+                source_site=video.source_site,
+                title=video.title or video.webpage_url,
+                quality_label=quality_label or "Auto",
+                format_selector=format_selector,
+                save_dir=config.download_dir(),
+                expected_bytes=expected_bytes,
+            )
         if selected_audio_id:
             if _ffmpeg_available(config):
                 format_selector = f"{quality.format_id}+{selected_audio_id}"
@@ -67,7 +86,10 @@ def build_download_command(
     override_cookie_browser: str = "",
     explicit_cookie_file: str = "",
 ) -> list[str]:
-    output_template = str(Path(task.save_dir) / "%(title).200B [%(id)s].%(ext)s")
+    if task.download_url:
+        output_template = str(direct_download_output_path(task, ".%(ext)s"))
+    else:
+        output_template = str(Path(task.save_dir) / "%(title).200B [%(id)s].%(ext)s")
     command = [
         str(_find_ytdlp()),
         "--newline",
@@ -96,6 +118,9 @@ def build_download_command(
         task.format_selector or "bestvideo+bestaudio/best",
     ]
 
+    for name, value in _safe_download_headers(task.http_headers).items():
+        command.extend(["--add-header", f"{name}:{value}"])
+
     js_runtime = config.js_runtime()
     if js_runtime:
         command.extend(["--js-runtimes", js_runtime])
@@ -108,7 +133,11 @@ def build_download_command(
     if proxy:
         command.extend(["--proxy", proxy])
 
-    cookie_browser = override_cookie_browser or config.explicit_cookie_browser()
+    site = config.cookie_site_for_url(task.url)
+    explicit_for_site = getattr(config, "explicit_cookie_browser_for_site", None)
+    cookie_browser = override_cookie_browser or (
+        explicit_for_site(site) if callable(explicit_for_site) else config.explicit_cookie_browser()
+    )
     cookie_file = config.cookie_file_for_url(task.url)
     # explicit_cookie_file 是我们从 Chromium App-Bound Cookie 现解出来的 Netscape 文件，
     # 优先级最高：它就是为「浏览器 DPAPI 解不了」这条重试路径准备的。
@@ -123,8 +152,37 @@ def build_download_command(
     elif auto_cookie_browser := config.auto_cookie_browser_for_site(config.cookie_site_for_url(task.url)):
         command.extend(["--cookies-from-browser", auto_cookie_browser])
 
-    command.append(task.url)
+    command.append(task.download_url or task.url)
     return command
+
+
+def direct_download_output_path(task: DownloadTask, extension: str = ".mp4") -> Path:
+    raw_id = str(task.video_id or "video").split(":", 1)[-1]
+    safe_title = _safe_filename_component(task.title, 120)
+    safe_id = _safe_filename_component(raw_id, 64)
+    suffix = str(extension or ".mp4")
+    if not suffix.startswith("."):
+        suffix = "." + suffix
+    return Path(task.save_dir) / f"{safe_title} [{safe_id}]{suffix}"
+
+
+def _safe_download_headers(headers: object) -> dict[str, str]:
+    """只持久化媒体请求所需的非敏感请求头，Cookie 始终由运行时配置读取。"""
+    allowed = {"user-agent": "User-Agent", "referer": "Referer", "origin": "Origin"}
+    if not isinstance(headers, dict):
+        return {}
+    result: dict[str, str] = {}
+    for raw_name, raw_value in headers.items():
+        name = allowed.get(str(raw_name or "").strip().lower())
+        value = str(raw_value or "").replace("\r", "").replace("\n", "").strip()
+        if name and value:
+            result[name] = value
+    return result
+
+
+def _safe_filename_component(value: str, limit: int) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(value or "")).strip(" .")
+    return (cleaned or "video")[:limit].rstrip(" .")
 
 
 def should_retry_with_cookie_file(output: str) -> bool:
@@ -152,7 +210,10 @@ def chromium_cookie_fallback_file(config: ConfigService, url: str) -> str:
     """
     tried: set[str] = set()
     site = config.cookie_site_for_url(url)
-    preferred = config.explicit_cookie_browser() or config.auto_cookie_browser_for_site(site)
+    explicit_for_site = getattr(config, "explicit_cookie_browser_for_site", None)
+    preferred = (
+        explicit_for_site(site) if callable(explicit_for_site) else config.explicit_cookie_browser()
+    ) or config.auto_cookie_browser_for_site(site)
     candidates: list[str] = [preferred] if preferred else []
     candidates.extend(value for _label, value in detect_browser_cookie_sources())
     for spec in candidates:

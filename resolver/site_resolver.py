@@ -9,12 +9,14 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 import datetime as _dt
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 
 from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, PlaylistSection, VideoInfo
+from resolver.quality_selector import QualitySelector
 from resolver.youtube_resolver import YoutubeResolver
 from services.config_service import (
     ConfigService,
@@ -22,6 +24,7 @@ from services.config_service import (
     rank_cookie_sources,
 )
 from services.cookie_service import load_browser_cookie_header, load_cookie_header
+from services.site_registry import SITE_KEYS, site_for_url
 
 
 logger = logging.getLogger("tube_player.resolver")
@@ -42,6 +45,11 @@ _COLLECTION_CACHE_TTL_SECONDS = 600.0
 _MAX_PAGE_CACHE_ITEMS = 48
 _MAX_CREATOR_CACHE_ITEMS = 32
 _MAX_COLLECTION_CACHE_ITEMS = 32
+_SHORT_VIDEO_ITEM_CACHE_TTL_SECONDS = 600.0
+_MAX_SHORT_VIDEO_ITEM_CACHE_ITEMS = 256
+_DOUYIN_BROWSE_MIN_INTERVAL_SECONDS = 2.5
+_DOUYIN_VERIFY_COOLDOWN_SECONDS = 30.0
+_MAX_DOUYIN_SEARCH_SESSIONS = 16
 
 
 class SiteResolver:
@@ -52,10 +60,24 @@ class SiteResolver:
         self._page_cache: OrderedDict[str, tuple[float, list[HomeVideo], bool]] = OrderedDict()
         self._creator_cache: OrderedDict[str, tuple[float, PlaylistInfo | None]] = OrderedDict()
         self._collection_cache: OrderedDict[str, tuple[float, PlaylistInfo | None]] = OrderedDict()
+        # 首页/搜索接口返回的短视频条目包含带签名的直链。TikTok 网页二次解析
+        # 经常被风控拦截，因此在卡片生命周期内保留原始条目供播放/下载复用。
+        self._short_video_item_cache: OrderedDict[str, tuple[float, str, dict]] = OrderedDict()
+        self._douyin_search_sessions: OrderedDict[str, dict] = OrderedDict()
+        self._douyin_home_sessions: OrderedDict[str, dict] = OrderedDict()
         # 首页/搜索与作者列表都可能被多个 worker 线程同时读写，各自加锁保护。
         self._page_cache_lock = threading.Lock()
         self._creator_cache_lock = threading.Lock()
         self._collection_cache_lock = threading.Lock()
+        self._short_video_item_cache_lock = threading.Lock()
+        self._douyin_search_session_lock = threading.Lock()
+        self._douyin_home_session_lock = threading.Lock()
+        self._douyin_browse_request_lock = threading.Lock()
+        self._douyin_browse_last_request_at = 0.0
+        self._douyin_browser_client = None
+
+    def set_douyin_browser_client(self, client) -> None:
+        self._douyin_browser_client = client
 
     def home_source(self) -> str:
         return self.config.default_home_source()
@@ -64,27 +86,61 @@ class SiteResolver:
     def normalize_source(source: str) -> str:
         """把任意站点标识收敛成 'youtube' / 'bilibili'，无法识别时返回空串。"""
         normalized = str(source or "").strip().lower()
-        return normalized if normalized in {"youtube", "bilibili"} else ""
+        return normalized if normalized in SITE_KEYS else ""
 
     def home_source_label(self, source: str = "") -> str:
         effective = self.normalize_source(source) or self.home_source()
-        return "Bilibili" if effective == "bilibili" else "YouTube"
+        return {"bilibili": "Bilibili", "youtube": "YouTube", "douyin": "抖音", "tiktok": "TikTok"}.get(effective, "YouTube")
 
     def resolve(self, url: str) -> VideoInfo:
+        source = site_for_url(url)
+        if source in {"douyin", "tiktok"}:
+            cached = self._short_video_item_lookup(url)
+            if cached is not None:
+                try:
+                    return self._video_info_from_short_video_item(cached[1], source, url)
+                except Exception:
+                    logger.warning("cached %s item could not be converted, falling back to yt-dlp", source, exc_info=True)
         return self.youtube.resolve(url)
+
+    def resolve_cached_short_video(self, url: str) -> VideoInfo | None:
+        """返回首页/搜索/作者列表中已经解析过的短视频，绝不发起网页请求。"""
+        source = site_for_url(url)
+        if source not in {"douyin", "tiktok"}:
+            return None
+        cached = self._short_video_item_lookup(url)
+        if cached is None:
+            return None
+        try:
+            return self._video_info_from_short_video_item(cached[1], source, url)
+        except Exception:
+            logger.warning("cached %s item could not be converted for download", source, exc_info=True)
+            return None
 
     def detect_url_kind(self, url: str) -> str:
         if _is_bilibili_url(url):
             return self.bilibili.detect_url_kind(url)
+        source = site_for_url(url)
+        if source == "tiktok":
+            path = urllib.parse.urlparse(str(url or "")).path.lower()
+            if "/@" in path and "/video/" not in path:
+                return "playlist"
+            if "/collection/" in path:
+                return "playlist"
+            return "video"
+        if source == "douyin":
+            return "video"
         return self.youtube.detect_url_kind(url)
 
     def resolve_playlist(self, url: str) -> PlaylistInfo:
         if _is_bilibili_url(url):
             return self.bilibili.resolve_playlist(url)
+        if site_for_url(url) in {"douyin", "tiktok"}:
+            return self.youtube.resolve_playlist_generic(url)
         return self.youtube.resolve_playlist(url)
 
     def resolve_creator_playlist(self, video: VideoInfo, limit: int = 50) -> PlaylistInfo | None:
-        if video.source_site not in {"youtube", "bilibili"}:
+        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok"}:
             return None
         creator_key = str(video.creator_id or video.channel_id or video.creator_url).strip()
         if not creator_key:
@@ -99,6 +155,10 @@ class SiteResolver:
 
         if video.source_site == "bilibili":
             creator_url, fetched_entries = self.bilibili.fetch_creator_videos(video, limit)
+        elif video.source_site == "douyin":
+            creator_url, fetched_entries = self._fetch_douyin_creator_videos(video, limit)
+        elif video.source_site == "tiktok":
+            creator_url, fetched_entries = self._fetch_tiktok_creator_videos(video, limit)
         else:
             creator_url, fetched_entries = self.youtube.fetch_creator_videos(video, limit)
 
@@ -133,9 +193,12 @@ class SiteResolver:
 
         playlist = None
         if len(entries) > 1:
+            creator_name = self._creator_display_name(video, entries, creator_key)
+            if creator_name:
+                entries[0].uploader = creator_name
             playlist = PlaylistInfo(
                 playlist_id=playlist_id,
-                title=f"{video.uploader or '制作者'} 的视频",
+                title=f"{creator_name or video.uploader or '制作者'} 的视频",
                 webpage_url=creator_url or video.creator_url,
                 source_site=video.source_site,
                 uploader=video.uploader,
@@ -153,6 +216,197 @@ class SiteResolver:
             len(entries) if playlist else 0,
         )
         return deepcopy(playlist)
+
+    @staticmethod
+    def _creator_display_name(video: VideoInfo, entries: list[PlaylistEntry], creator_key: str) -> str:
+        """Prefer a creator's display nickname over a login/user ID.
+
+        Some Douyin responses expose ``uploader`` as the account slug while
+        neighboring feed entries contain the human-readable nickname. Reuse
+        that nickname for the playlist title and current entry label.
+        """
+        raw = video.raw_info if isinstance(video.raw_info, dict) else {}
+        candidates = [
+            (raw.get("author") or {}).get("nickname") if isinstance(raw.get("author"), dict) else "",
+        ]
+        # Neighboring creator-feed entries are often the only place where the
+        # human-readable nickname is present; put them before yt-dlp's slug-like
+        # uploader/channel fields.
+        candidates.extend(entry.uploader for entry in entries)
+        candidates.extend([raw.get("uploader"), raw.get("channel"), raw.get("creator"), video.uploader])
+        key = str(creator_key or "").strip().casefold()
+        current = str(video.uploader or "").strip().casefold()
+        for value in candidates:
+            name = str(value or "").strip()
+            if name and name.casefold() not in {key, current, "_", "unknown"}:
+                return name
+        return ""
+
+    def _fetch_douyin_creator_videos(self, video: VideoInfo, limit: int) -> tuple[str, list[PlaylistEntry]]:
+        sec_uid = str(video.channel_id or "").strip()
+        if not sec_uid:
+            raise RuntimeError("当前抖音视频缺少作者 sec_uid")
+        creator_url = str(video.creator_url or f"https://www.douyin.com/user/{sec_uid}")
+        cursor = 0
+        entries: list[PlaylistEntry] = []
+        seen: set[str] = set()
+        while len(entries) < limit:
+            payload = self._request_short_video_json(
+                "douyin", "https://www.douyin.com/aweme/v1/web/aweme/post/",
+                {"device_platform": "webapp", "aid": "6383", "channel": "channel_pc_web",
+                 "sec_user_id": sec_uid, "max_cursor": str(cursor), "count": str(min(50, limit - len(entries))),
+                 "publish_video_strategy_type": "2", "pc_client_type": "1", "version_code": "190500",
+                 "version_name": "19.5.0"}, creator_url,
+            )
+            raw_items = payload.get("aweme_list") or []
+            for item in raw_items:
+                if isinstance(item, dict):
+                    self._short_video_item_store("douyin", item)
+                home = self._short_video_home_item(item, "douyin") if isinstance(item, dict) else None
+                if home is None or home.video_id in seen:
+                    continue
+                seen.add(home.video_id)
+                entries.append(PlaylistEntry(
+                    playlist_id=f"douyin:creator:{sec_uid}", video_id=home.video_id, title=home.title,
+                    webpage_url=home.webpage_url, source_site="douyin", uploader=home.uploader,
+                    duration=home.duration, thumbnail=home.thumbnail, position=len(entries) + 1,
+                ))
+                if len(entries) >= limit:
+                    break
+            if not payload.get("has_more") or not raw_items:
+                break
+            next_cursor = int(payload.get("max_cursor") or 0)
+            if next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return creator_url, entries
+
+    def _fetch_tiktok_creator_videos(self, video: VideoInfo, limit: int) -> tuple[str, list[PlaylistEntry]]:
+        sec_uid = str(video.channel_id or video.creator_id or "").strip()
+        creator_url = str(video.creator_url or "").strip()
+        cached_entries = self._cached_short_video_creator_entries("tiktok", video, limit)
+        # 搜索结果通常一次就含有该作者的多条视频。优先使用这些已通过风控且带可播
+        # 直链的条目，避免再打目前经常返回空对象的作者接口。
+        if len(cached_entries) > 1:
+            return creator_url, cached_entries
+        raw_author = (video.raw_info or {}).get("author") if isinstance(video.raw_info, dict) else {}
+        raw_author = raw_author if isinstance(raw_author, dict) else {}
+        creator_handle = str(raw_author.get("uniqueId") or raw_author.get("unique_id") or "").strip()
+        if not creator_handle and "/@" in urllib.parse.urlparse(creator_url).path:
+            creator_handle = urllib.parse.urlparse(creator_url).path.split("/@", 1)[1].split("/", 1)[0]
+        if creator_handle and creator_handle != "_":
+            try:
+                # TikTok 的作者动态接口经常对非浏览器请求返回空对象，而同一登录会话下
+                # 搜索接口可用。以用户名搜索后仍按 secUid/uniqueId 精确过滤，不会把
+                # 名称相似的其它账号混进播放列表。
+                self._search_tiktok(creator_handle, 1, min(50, max(2, int(limit))))
+                searched_entries = self._cached_short_video_creator_entries("tiktok", video, limit)
+                if len(searched_entries) > 1:
+                    return creator_url, searched_entries
+                if len(searched_entries) > len(cached_entries):
+                    cached_entries = searched_entries
+            except Exception as exc:
+                logger.warning("TikTok creator search fallback unavailable handle=%s: %s", creator_handle, exc)
+        if not sec_uid:
+            return creator_url, cached_entries
+        count = min(30, max(1, int(limit)))
+        params = {
+            "aid": "1988", "app_language": "en", "app_name": "tiktok_web",
+            "browser_language": "en-US", "browser_name": "Mozilla", "browser_online": "true",
+            "browser_platform": "Win32", "browser_version": "5.0 (Windows)", "channel": "tiktok_web",
+            "cookie_enabled": "true", "count": str(count), "cursor": "0", "device_platform": "web_pc",
+            "focus_state": "true", "from_page": "user", "history_len": "2", "is_fullscreen": "false",
+            "is_page_visible": "true", "language": "en", "os": "windows", "priority_region": "",
+            "referer": "", "region": "US", "screen_height": "1080", "screen_width": "1920",
+            "secUid": sec_uid, "type": "1", "tz_name": "Asia/Shanghai", "webcast_language": "en",
+        }
+        try:
+            payload = self._request_short_video_json(
+                "tiktok", "https://www.tiktok.com/api/post/item_list/", params,
+                creator_url or "https://www.tiktok.com/",
+            )
+        except Exception as exc:
+            logger.warning("TikTok creator endpoint unavailable; using cached entries: %s", exc)
+            return creator_url, cached_entries
+        entries: list[PlaylistEntry] = list(cached_entries)
+        seen: set[str] = set()
+        seen.update(entry.video_id for entry in entries)
+        for item in payload.get("itemList") or payload.get("item_list") or []:
+            if not isinstance(item, dict):
+                continue
+            self._short_video_item_store("tiktok", item)
+            home = self._short_video_home_item(item, "tiktok")
+            if home is None or home.video_id in seen:
+                continue
+            seen.add(home.video_id)
+            entries.append(PlaylistEntry(
+                playlist_id=f"tiktok:creator:{sec_uid}", video_id=home.video_id, title=home.title,
+                webpage_url=home.webpage_url, source_site="tiktok", uploader=home.uploader,
+                duration=home.duration, thumbnail=home.thumbnail, position=len(entries) + 1,
+            ))
+            if len(entries) >= limit:
+                break
+        return creator_url, entries
+
+    def _cached_short_video_creator_entries(
+        self, source: str, video: VideoInfo, limit: int
+    ) -> list[PlaylistEntry]:
+        raw_author = (video.raw_info or {}).get("author") if isinstance(video.raw_info, dict) else {}
+        raw_author = raw_author if isinstance(raw_author, dict) else {}
+        wanted_ids = {
+            str(video.channel_id or "").strip(),
+            str(video.creator_id or "").strip(),
+            str(raw_author.get("secUid") or raw_author.get("sec_uid") or "").strip(),
+            str(raw_author.get("uniqueId") or raw_author.get("unique_id") or "").strip(),
+        }
+        creator_path = urllib.parse.urlparse(str(video.creator_url or "")).path
+        if source == "tiktok" and "/@" in creator_path:
+            wanted_ids.add(creator_path.split("/@", 1)[1].split("/", 1)[0])
+        wanted_ids.discard("")
+        if not wanted_ids:
+            return []
+
+        lock = getattr(self, "_short_video_item_cache_lock", None)
+        cache = getattr(self, "_short_video_item_cache", None)
+        if lock is None or cache is None:
+            return []
+        now = time.time()
+        items: list[dict] = []
+        seen_raw: set[str] = set()
+        with lock:
+            for cached_at, cached_source, item in cache.values():
+                if cached_source != source or now - cached_at > _SHORT_VIDEO_ITEM_CACHE_TTL_SECONDS:
+                    continue
+                raw_value = item.get("id") if source == "tiktok" else item.get("aweme_id")
+                raw_id = str(raw_value or "").strip()
+                if not raw_id or raw_id in seen_raw:
+                    continue
+                author = item.get("author") or {}
+                if not isinstance(author, dict):
+                    continue
+                author_ids = {
+                    str(author.get("secUid") or author.get("sec_uid") or "").strip(),
+                    str(author.get("uniqueId") or author.get("unique_id") or "").strip(),
+                }
+                if wanted_ids.isdisjoint(author_ids):
+                    continue
+                seen_raw.add(raw_id)
+                items.append(deepcopy(item))
+
+        playlist_id = f"{source}:creator:{next(iter(wanted_ids))}"
+        entries: list[PlaylistEntry] = []
+        for item in items:
+            home = self._short_video_home_item(item, source)
+            if home is None:
+                continue
+            entries.append(PlaylistEntry(
+                playlist_id=playlist_id, video_id=home.video_id, title=home.title,
+                webpage_url=home.webpage_url, source_site=source, uploader=home.uploader,
+                duration=home.duration, thumbnail=home.thumbnail, position=len(entries) + 1,
+            ))
+            if len(entries) >= limit:
+                break
+        return entries
 
     def resolve_collection_playlist(self, video: VideoInfo) -> PlaylistInfo | None:
         """当前视频所属合集。返回 None 表示"不属于任何合集"，是常态而非错误。"""
@@ -213,10 +467,513 @@ class SiteResolver:
             return cached
         if source == "bilibili":
             result = self.bilibili.fetch_home_videos(page, page_size)
+        elif source == "douyin":
+            result = self._fetch_short_video_home("douyin", page, page_size, force_refresh=force_refresh)
+        elif source == "tiktok":
+            result = self._fetch_short_video_home("tiktok", page, page_size)
         else:
             result = self.youtube.fetch_home_videos(page, page_size)
         self._cache_store(key, result)
         return result
+
+    def _fetch_short_video_home(
+        self,
+        source: str,
+        page: int,
+        page_size: int,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[list[HomeVideo], bool]:
+        """Fetch recommendation feeds through the sites' web JSON endpoints.
+
+        yt-dlp intentionally does not support the site root URLs; the browser
+        pages call these endpoints after loading. Reuse the configured browser
+        Cookie and proxy, then map the response into the normal HomeVideo model.
+        """
+        page = max(1, int(page))
+        target_count = max(1, min(56, int(page_size)))
+        count = min(18 if source == "douyin" else 20, target_count)
+        if source == "douyin":
+            cookie_browser = ""
+            if getattr(self, "config", None) is not None:
+                cookie_browser = str(self.config.cookie_browser_for_site("douyin") or "")
+            use_firefox_identity = (
+                getattr(self, "_douyin_browser_client", None) is None
+                and cookie_browser.split(":", 1)[0].strip().lower() == "firefox"
+            )
+            browser_name = "Firefox" if use_firefox_identity else "Chrome"
+            browser_version = "142.0" if use_firefox_identity else "131"
+            endpoint = "https://www.douyin.com/aweme/v1/web/tab/feed/"
+            params = {
+                "device_platform": "webapp", "aid": "6383", "channel": "channel_pc_web",
+                "count": str(count), "pc_client_type": "1", "version_code": "190500",
+                "version_name": "19.5.0", "cookie_enabled": "true", "screen_width": "1920",
+                "screen_height": "1080", "browser_language": "zh-CN", "browser_platform": "Win32",
+                "browser_name": browser_name, "browser_version": browser_version, "browser_online": "true",
+                "engine_name": "Gecko" if use_firefox_identity else "Blink",
+                "engine_version": browser_version, "os_name": "Windows", "os_version": "10",
+                "platform": "PC", "cursor": "0",
+            }
+        else:
+            endpoint = "https://www.tiktok.com/api/recommend/item_list/"
+            params = {
+                "aid": "1988", "app_language": "en", "app_name": "tiktok_web",
+                "browser_language": "en-US", "browser_name": "Mozilla", "browser_online": "true",
+                "browser_platform": "Win32", "channel": "tiktok_web", "cookie_enabled": "true",
+                "count": str(count), "cursor": str((page - 1) * count), "device_platform": "web_pc",
+                "focus_state": "true", "from_page": "fyp", "history_len": "4", "is_fullscreen": "false",
+                "is_page_visible": "true", "language": "en", "os": "windows", "region": "US",
+                "screen_height": "1080", "screen_width": "1920", "tz_name": "Asia/Shanghai",
+                "webcast_language": "en",
+            }
+        root = "https://www.douyin.com/jingxuan" if source == "douyin" else "https://www.tiktok.com/explore"
+        videos: list[HomeVideo] = []
+        seen: set[str] = set()
+        if source == "douyin":
+            # 精选页的真实滚动流每次通常只返回 2 条。签名浏览器可按自然滚动
+            # 顺序聚合多个小批次；旧 HTTP 降级路径仍限制为一次请求。
+            try:
+                fingerprint = self._config_fingerprint("douyin")
+            except (AttributeError, TypeError):
+                fingerprint = "default"
+            session_lock = getattr(self, "_douyin_home_session_lock", None)
+            if session_lock is None:
+                session_lock = self._douyin_home_session_lock = threading.Lock()
+            sessions = getattr(self, "_douyin_home_sessions", None)
+            if sessions is None:
+                sessions = self._douyin_home_sessions = OrderedDict()
+            with session_lock:
+                previous = sessions.get(fingerprint)
+                if previous is None or (force_refresh and page == 1):
+                    session = {"cursor_by_page": {1: 0}, "pages": {}, "has_more": True}
+                else:
+                    session = previous
+                cached_items = session["pages"].get(page)
+                if cached_items is not None and not force_refresh:
+                    batch_items = deepcopy(cached_items)
+                    has_more = bool(session["has_more"])
+                    request_count = 0
+                else:
+                    if page > 1 and page not in session["cursor_by_page"]:
+                        raise RuntimeError("请先加载抖音首页的上一页，以便沿用推荐流游标")
+                    cursor = int(session["cursor_by_page"].get(page, 0))
+                    batch_items = []
+                    batch_seen: set[str] = set()
+                    request_count = 0
+                    has_more = True
+                    browser_client = getattr(self, "_douyin_browser_client", None)
+                    try:
+                        if browser_client is not None and hasattr(browser_client, "request_home_json"):
+                            request_params = dict(params, cursor=str(cursor), count=str(count))
+                            payloads = [browser_client.request_home_json(
+                                endpoint,
+                                request_params,
+                                root,
+                                page=page,
+                                target_count=count,
+                            )]
+                        else:
+                            request_params = dict(params, cursor=str(cursor), count=str(count))
+                            payloads = [self._request_douyin_browse_json(endpoint, request_params, root)]
+                        for payload in payloads:
+                            request_count += 1
+                            raw_batch = [
+                                item for item in (payload.get("aweme_list") or [])
+                                if isinstance(item, dict)
+                            ]
+                            added = 0
+                            for item in raw_batch:
+                                video_id = str(item.get("aweme_id") or "").strip()
+                                if video_id and video_id not in batch_seen:
+                                    batch_seen.add(video_id)
+                                    batch_items.append(item)
+                                    added += 1
+                            has_more = bool(payload.get("has_more")) or bool(raw_batch)
+                            next_cursor = int(
+                                payload.get("cursor")
+                                or payload.get("max_cursor")
+                                or cursor + max(1, len(raw_batch))
+                            )
+                            if len(batch_items) >= count or not has_more or not added or next_cursor == cursor:
+                                cursor = next_cursor
+                                break
+                            cursor = next_cursor
+                    except Exception:
+                        if batch_items:
+                            has_more = True
+                            logger.warning(
+                                "douyin home signed scroll interrupted page=%s retained=%s requests=%s",
+                                page,
+                                len(batch_items),
+                                request_count,
+                            )
+                        elif previous is not None and page in previous["pages"]:
+                            batch_items = deepcopy(previous["pages"][page])
+                            has_more = True
+                            request_count = 0
+                        else:
+                            raise
+                    if batch_items:
+                        session["pages"][page] = deepcopy(batch_items)
+                        session["cursor_by_page"][page + 1] = cursor
+                        session["has_more"] = has_more
+                        sessions[fingerprint] = session
+                        sessions.move_to_end(fingerprint)
+                        while len(sessions) > 4:
+                            sessions.popitem(last=False)
+                    elif previous is None or page not in previous["pages"]:
+                        raise RuntimeError("抖音首页接口返回空结果")
+            for item in batch_items:
+                self._short_video_item_store(source, item)
+                parsed = self._short_video_home_item(item, source)
+                if parsed is not None and parsed.video_id not in seen:
+                    seen.add(parsed.video_id)
+                    videos.append(parsed)
+            logger.info(
+                "douyin home browse completed page=%s count=%s requests=%s has_next=%s",
+                page,
+                len(videos),
+                request_count,
+                has_more,
+            )
+            return videos[:count], has_more
+        cursor = (page - 1) * count if source != "douyin" else 0
+        has_more = False
+        max_rounds = 32 if source == "douyin" else 8
+        for _ in range(max_rounds):
+            params["cursor"] = str(cursor)
+            payload = self._request_short_video_json(source, endpoint, params, root)
+            raw_items = payload.get("aweme_list") if source == "douyin" else payload.get("itemList")
+            raw_items = [item for item in (raw_items or []) if isinstance(item, dict)]
+            for raw_item in raw_items:
+                self._short_video_item_store(source, raw_item)
+            batch = [self._short_video_home_item(item, source) for item in raw_items]
+            added = 0
+            for item in batch:
+                if item is not None and item.video_id not in seen:
+                    seen.add(item.video_id)
+                    videos.append(item)
+                    added += 1
+            has_more = bool(payload.get("has_more") or payload.get("hasMore"))
+            if len(videos) >= page * target_count or not has_more:
+                break
+            cursor += max(1, len(raw_items or []))
+        # TikTok 的 cursor 已经在请求阶段定位到 page；与 YouTube 的累计
+        # 条目接口不同，不能再次按 page 偏移切片，否则第二页会被切成空表。
+        start = 0 if source == "tiktok" else (page - 1) * target_count
+        return videos[start : start + target_count], has_more
+
+    def _request_douyin_browse_json(
+        self, endpoint: str, params: dict[str, str], referer: str
+    ) -> dict:
+        """Serialize and pace Douyin feed/search requests for one browser session."""
+        browser_client = getattr(self, "_douyin_browser_client", None)
+        if browser_client is not None:
+            return browser_client.request_json(endpoint, params, referer)
+        lock = getattr(self, "_douyin_browse_request_lock", None)
+        if lock is None:
+            lock = self._douyin_browse_request_lock = threading.Lock()
+        interval = max(
+            0.0,
+            float(getattr(self, "_douyin_browse_min_interval_seconds", _DOUYIN_BROWSE_MIN_INTERVAL_SECONDS)),
+        )
+        with lock:
+            last_request_at = float(getattr(self, "_douyin_browse_last_request_at", 0.0))
+            delay = interval - (time.monotonic() - last_request_at)
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                return self._request_short_video_json("douyin", endpoint, params, referer)
+            finally:
+                self._douyin_browse_last_request_at = time.monotonic()
+
+    def _request_short_video_json(self, source: str, endpoint: str, params: dict[str, str], referer: str) -> dict:
+        query = urllib.parse.urlencode(params)
+        url = f"{endpoint}?{query}"
+        browser = self.config.cookie_browser_for_site(source) if getattr(self, "config", None) is not None else ""
+        if str(browser or "").split(":", 1)[0].strip().lower() == "firefox":
+            user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) "
+                "Gecko/20100101 Firefox/142.0"
+            )
+        else:
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+        headers = {
+            "User-Agent": user_agent,
+            "Referer": referer,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if source in {"douyin", "tiktok"}:
+            headers.update({
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+            })
+        if source == "tiktok":
+            headers["Origin"] = "https://www.tiktok.com"
+        if browser:
+            cookie = load_browser_cookie_header(browser, referer)
+            if cookie:
+                headers["Cookie"] = cookie
+        _label, proxy = self.config.effective_proxy()
+        opener = urllib.request.build_opener()
+        if proxy:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        try:
+            with opener.open(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8", "replace") or "{}")
+        except urllib.error.HTTPError as exc:
+            if source == "tiktok" and exc.code in {400, 403}:
+                # TikTok rejects some optional browser telemetry parameters for
+                # particular sessions. Warm the Explore page and retry with the
+                # minimal stable parameter set used by its web client.
+                try:
+                    with opener.open(urllib.request.Request(referer, headers=headers), timeout=30):
+                        pass
+                    minimal = {key: value for key, value in params.items() if key in {
+                        "aid", "app_name", "channel", "count", "cursor", "device_platform",
+                        "from_page", "region", "language", "webcast_language",
+                    }}
+                    # Search requests need the full browser-shaped query. For
+                    # 403 responses retry the original query after warming the
+                    # page; for 400 retain the known-good minimal retry.
+                    if exc.code == 403:
+                        minimal = dict(params)
+                    retry_url = f"{endpoint}?{urllib.parse.urlencode(minimal)}"
+                    with opener.open(urllib.request.Request(retry_url, headers=headers), timeout=30) as response:
+                        data = json.loads(response.read().decode("utf-8", "replace") or "{}")
+                except Exception as retry_exc:
+                    raise RuntimeError(f"TIKTOK 首页暂时无法获取。请检查 Cookie、地区或代理后重试。\n{retry_exc}") from retry_exc
+            else:
+                raise RuntimeError(f"{source.upper()} 首页暂时无法获取。请检查 Cookie、地区或代理后重试。\n{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"{source.upper()} 首页暂时无法获取。请检查 Cookie、地区或代理后重试。\n{exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{source.upper()} 首页返回数据格式无效")
+        return data
+
+    def _short_video_item_store(self, source: str, item: dict, url: str = "") -> None:
+        if not isinstance(item, dict):
+            return
+        video = item.get("video") or {}
+        raw_value = item.get("aweme_id") if source == "douyin" else item.get("id")
+        raw_id = str(raw_value or "").strip()
+        if not raw_id:
+            return
+        author = item.get("author") or {}
+        unique_id = str(author.get("uniqueId") or "_").strip() if isinstance(author, dict) else "_"
+        aliases = {
+            f"{source}:{raw_id}",
+            raw_id,
+            str(url or "").strip(),
+        }
+        if source == "douyin":
+            aliases.add(f"https://www.douyin.com/video/{raw_id}")
+        else:
+            aliases.add(f"https://www.tiktok.com/@{unique_id}/video/{raw_id}")
+        now = time.time()
+        lock = getattr(self, "_short_video_item_cache_lock", None)
+        if lock is None:
+            lock = self._short_video_item_cache_lock = threading.Lock()
+        cache = getattr(self, "_short_video_item_cache", None)
+        if cache is None:
+            cache = self._short_video_item_cache = OrderedDict()
+        elif not hasattr(cache, "move_to_end"):
+            cache = self._short_video_item_cache = OrderedDict(cache)
+        with lock:
+            for alias in aliases:
+                if alias:
+                    key = f"{source}|{alias}"
+                    cache[key] = (now, source, deepcopy(item))
+                    cache.move_to_end(key)
+            while len(cache) > _MAX_SHORT_VIDEO_ITEM_CACHE_ITEMS:
+                cache.popitem(last=False)
+
+    def _short_video_item_lookup(self, url: str) -> tuple[str, dict] | None:
+        source = site_for_url(url)
+        if source not in {"douyin", "tiktok"}:
+            return None
+        raw = str(url or "").strip()
+        parsed = urllib.parse.urlparse(raw)
+        aliases = [raw]
+        match = re.search(r"/(?:video|aweme/detail)/([0-9A-Za-z_-]+)", parsed.path, re.I)
+        if match:
+            aliases.extend([match.group(1), f"{source}:{match.group(1)}"])
+        lock = getattr(self, "_short_video_item_cache_lock", None)
+        cache = getattr(self, "_short_video_item_cache", None)
+        if lock is None or cache is None:
+            return None
+        with lock:
+            for alias in aliases:
+                cached = cache.get(f"{source}|{alias}")
+                if cached is None:
+                    continue
+                cached_at, cached_source, item = cached
+                if time.time() - cached_at > _SHORT_VIDEO_ITEM_CACHE_TTL_SECONDS:
+                    cache.pop(f"{source}|{alias}", None)
+                    continue
+                cache.move_to_end(f"{source}|{alias}")
+                return cached_source, deepcopy(item)
+        return None
+
+    def _video_info_from_short_video_item(self, item: dict, source: str, requested_url: str) -> VideoInfo:
+        raw_value = item.get("aweme_id") if source == "douyin" else item.get("id")
+        raw_id = str(raw_value or "").strip()
+        if not raw_id:
+            raise ValueError("short video item has no id")
+        author = item.get("author") or {}
+        if source == "douyin":
+            uploader = str(author.get("nickname") or "").strip() if isinstance(author, dict) else ""
+            creator_id = str(author.get("sec_uid") or author.get("uid") or "").strip() if isinstance(author, dict) else ""
+            creator_url = f"https://www.douyin.com/user/{creator_id}" if creator_id else ""
+            webpage_url = f"https://www.douyin.com/video/{raw_id}"
+            title = str(item.get("desc") or item.get("item_title") or raw_id).strip()
+            video = item.get("video") or {}
+            duration = int(float(video.get("duration") or 0) / 1000)
+        else:
+            unique_id = str(author.get("uniqueId") or "_").strip() if isinstance(author, dict) else "_"
+            uploader = str(author.get("nickname") or unique_id).strip() if isinstance(author, dict) else unique_id
+            creator_id = str(author.get("secUid") or author.get("sec_uid") or unique_id).strip() if isinstance(author, dict) else unique_id
+            creator_url = f"https://www.tiktok.com/@{unique_id}" if unique_id and unique_id != "_" else ""
+            webpage_url = f"https://www.tiktok.com/@{unique_id}/video/{raw_id}"
+            title = str(item.get("desc") or raw_id).strip()
+            video = item.get("video") or {}
+            duration = int(video.get("duration") or 0)
+
+        formats: list[dict] = []
+
+        def add_play(play: dict | str, index: int, codec: str = "") -> None:
+            if isinstance(play, str):
+                urls = [play]
+                play = {}
+            elif isinstance(play, dict):
+                urls = play.get("UrlList") or play.get("url_list") or play.get("urlList") or []
+            else:
+                return
+            if isinstance(urls, str):
+                urls = [urls]
+            url = self._preferred_short_video_url(urls, source)
+            if not url:
+                return
+            width = int(play.get("Width") or play.get("width") or video.get("Width") or video.get("width") or 0)
+            height = int(play.get("Height") or play.get("height") or video.get("Height") or video.get("height") or 0)
+            formats.append({"format_id": f"{source}-{index}-{width}x{height}", "url": url,
+                            "ext": "mp4", "protocol": "https", "width": width, "height": height,
+                            "fps": int(play.get("Fps") or play.get("fps") or 30),
+                            "vcodec": codec or str(play.get("CodecType") or play.get("codecType") or "h264"),
+                            "acodec": "aac", "tbr": float(play.get("Bitrate") or play.get("bitrate") or 0) / 1000})
+        bitrate_items = video.get("bitrateInfo") or video.get("bit_rate") or []
+        struct = video.get("PlayAddrStruct") or video.get("play_addr") or video.get("playAddr") or {}
+        # TikTok search cards expose ``video.playAddr`` as a lone raw CDN URL
+        # alongside ``bitrateInfo[*].PlayAddr.UrlList``. The raw URL is often a
+        # higher nominal resolution but returns 403; the bitrate list contains
+        # the authenticated same-origin gateway. Do not let the unusable raw
+        # URL win quality sorting merely because its dimensions are larger.
+        if not (source == "tiktok" and isinstance(struct, str) and bitrate_items):
+            add_play(struct, 0)
+        for index, bitrate in enumerate(bitrate_items, 1):
+            if not isinstance(bitrate, dict):
+                continue
+            play = bitrate.get("PlayAddr") or bitrate.get("play_addr") or bitrate.get("playAddr") or {}
+            add_play(play, index, str(bitrate.get("CodecType") or bitrate.get("codec_type") or ""))
+        if not formats:
+            add_play(video.get("downloadAddr") or video.get("download_addr") or {}, 999)
+        qualities = QualitySelector.select_all(formats)
+        if not qualities:
+            raise ValueError("short video item has no playable media URL")
+        cover = video.get("cover") or video.get("Cover") or video.get("dynamicCover") or ""
+        if isinstance(cover, dict):
+            cover = (cover.get("url_list") or cover.get("UrlList") or [""])[0]
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+                   "Referer": webpage_url, "Origin": "https://www.tiktok.com" if source == "tiktok" else "https://www.douyin.com"}
+        browser = self.config.cookie_browser_for_site(source) if getattr(self, "config", None) is not None else ""
+        if browser:
+            cookie = load_browser_cookie_header(browser, webpage_url)
+            playback_cookie = self._compact_short_video_cookie_header(cookie, source)
+            if playback_cookie:
+                headers["Cookie"] = playback_cookie
+        return VideoInfo(video_id=f"{source}:{raw_id}", title=title or raw_id, source_site=source,
+                         uploader=uploader, channel_id=creator_id, creator_id=creator_id,
+                         creator_url=creator_url, duration=duration, webpage_url=webpage_url or requested_url,
+                         thumbnail=str(cover or ""), qualities=qualities, http_headers=headers, raw_info=item)
+
+    @staticmethod
+    def _preferred_short_video_url(urls: object, source: str) -> str:
+        """Prefer the authenticated same-origin media gateway over raw CDN hosts.
+
+        Douyin and TikTok commonly put two CDN URLs before an ``/aweme/v1/play/``
+        URL. Those CDN URLs can return 403 for a valid logged-in browser session,
+        while the same-origin gateway validates the Cookie and redirects to a
+        usable CDN object. Preserve the original order as the fallback for older
+        payloads that contain only direct media URLs.
+        """
+        if isinstance(urls, str):
+            candidates = [urls]
+        elif isinstance(urls, (list, tuple)):
+            candidates = [str(value or "").strip() for value in urls]
+        else:
+            candidates = []
+        candidates = [url for url in candidates if url.startswith(("http://", "https://"))]
+        expected_host = f"www.{source}.com"
+        return next(
+            (
+                url
+                for url in candidates
+                if urllib.parse.urlparse(url).hostname == expected_host
+                and "/aweme/v1/play/" in urllib.parse.urlparse(url).path
+            ),
+            candidates[0] if candidates else "",
+        )
+
+    @staticmethod
+    def _compact_short_video_cookie_header(cookie: str, source: str) -> str:
+        """Keep mpv's media request headers below FFmpeg's header-size limit.
+
+        A logged-in Douyin profile can accumulate tens of kilobytes of UI and
+        experiment cookies. Forwarding all of them makes FFmpeg fail with
+        ``overlong headers`` before it reads any media bytes. The signed media
+        gateways only need the core session/device cookies.
+        """
+        common_names = {
+            "sessionid", "sessionid_ss", "sid_tt", "sid_guard", "ttwid",
+            "s_v_web_id", "msToken", "tt_csrf_token",
+        }
+        if source == "douyin":
+            common_names.update({
+                "passport_csrf_token", "__ac_nonce", "__ac_signature",
+            })
+        selected: list[str] = []
+        for part in str(cookie or "").split(";"):
+            name, separator, _value = part.strip().partition("=")
+            if separator and name in common_names:
+                selected.append(part.strip())
+        return "; ".join(selected)
+
+    @staticmethod
+    def _short_video_home_item(item: dict, source: str) -> HomeVideo | None:
+        if source == "douyin":
+            video_id = str(item.get("aweme_id") or "").strip()
+            title = str(item.get("desc") or item.get("item_title") or "").strip()
+            author = item.get("author") or {}
+            thumbnail = str((((item.get("video") or {}).get("cover") or {}).get("url_list") or [""])[0])
+            url = f"https://www.douyin.com/video/{video_id}" if video_id else ""
+            duration = int(float((item.get("video") or {}).get("duration") or 0) / 1000)
+            uploader = str(author.get("nickname") or "").strip() if isinstance(author, dict) else ""
+        else:
+            video_id = str(item.get("id") or "").strip()
+            title = str(item.get("desc") or "").strip()
+            author = item.get("author") or {}
+            video = item.get("video") or {}
+            thumbnail = str(video.get("cover") or video.get("dynamicCover") or "")
+            unique_id = str(author.get("uniqueId") or "_").strip() if isinstance(author, dict) else "_"
+            url = f"https://www.tiktok.com/@{unique_id}/video/{video_id}" if video_id else ""
+            duration = int((video.get("duration") or 0) if isinstance(video, dict) else 0)
+            uploader = str(author.get("nickname") or unique_id).strip() if isinstance(author, dict) else ""
+        if not video_id or not url:
+            return None
+        return HomeVideo(video_id=f"{source}:{video_id}", title=title or video_id, webpage_url=url,
+                         source_site=source, uploader=uploader, duration=duration, thumbnail=thumbnail)
 
     def search_videos(
         self,
@@ -230,14 +987,388 @@ class SiteResolver:
         source = self.normalize_source(source) or self.home_source()
         query = str(keyword or "").strip()
         key = self._cache_key("search", source, query, page, page_size)
-        if not force_refresh and (cached := self._cache_lookup(key, _SEARCH_CACHE_TTL_SECONDS)):
+        cached = self._cache_lookup(key, _SEARCH_CACHE_TTL_SECONDS)
+        if not force_refresh and cached:
             return cached
-        if source == "bilibili":
-            result = self.bilibili.search_videos(query, page, page_size)
-        else:
-            result = self.youtube.search_videos(query, page, page_size)
+        try:
+            if source == "bilibili":
+                result = self.bilibili.search_videos(query, page, page_size)
+            elif source == "douyin":
+                result = self._search_douyin(query, page, page_size, force_refresh=force_refresh)
+            elif source == "tiktok":
+                try:
+                    result = self._search_tiktok(query, page, page_size)
+                except Exception as exc:
+                    logger.warning("TikTok official search failed; using recommendation fallback: %s", exc)
+                    result = self._search_tiktok_fallback(query, page, page_size)
+            else:
+                result = self.youtube.search_videos(query, page, page_size)
+        except Exception:
+            if source == "douyin" and cached:
+                logger.warning(
+                    "douyin search refresh blocked; retaining cached page query=%s page=%s count=%s",
+                    query,
+                    page,
+                    len(cached[0]),
+                )
+                return list(cached[0]), True
+            raise
         self._cache_store(key, result)
         return result
+
+    def _search_tiktok(self, keyword: str, page: int, page_size: int) -> tuple[list[HomeVideo], bool]:
+        """Search TikTok's web endpoint using the browser-shaped parameter set.
+
+        The endpoint is sensitive to missing telemetry fields and returns 403 or
+        an empty body when called with the abbreviated recommendation parameters.
+        It currently responds with ``item_list`` (not ``itemList``) for this route.
+        """
+        page = max(1, int(page))
+        target_count = max(1, min(100, int(page_size)))
+        count = min(20, target_count)
+        query = str(keyword or "").strip()
+        referer = "https://www.tiktok.com/search?q=" + urllib.parse.quote(query)
+        cookie = ""
+        browser = self.config.cookie_browser_for_site("tiktok")
+        if browser:
+            cookie = load_browser_cookie_header(browser, referer)
+        cookie_values: dict[str, str] = {}
+        for part in cookie.split(";"):
+            if "=" in part:
+                key, value = part.strip().split("=", 1)
+                cookie_values[key] = value
+        params = {
+            "WebIdLastTime": str(int(time.time())),
+            "aid": "1988", "app_language": "en", "app_name": "tiktok_web",
+            "browser_language": "zh-CN", "browser_name": "Mozilla", "browser_online": "true",
+            "browser_platform": "Win32", "browser_version": "5.0 (Windows)",
+            "channel": "tiktok_web", "cookie_enabled": "true", "count": str(count),
+            "cursor": "0", "device_platform": "web_pc", "focus_state": "true",
+            "device_id": "",
+            "from_page": "search", "history_len": "2", "is_fullscreen": "false",
+            "is_page_visible": "true", "keyword": query, "language": "en", "os": "windows",
+            "priority_region": "", "referer": "", "region": "US", "screen_height": "1080",
+            "screen_width": "1920", "tz_name": "Asia/Shanghai", "verifyFp": cookie_values.get("verify_fp", ""),
+            "webcast_language": "en", "msToken": cookie_values.get("msToken", ""),
+        }
+        videos: list[HomeVideo] = []
+        seen: set[str] = set()
+        has_more = False
+        cursor = 0
+        search_id = ""
+        wanted_end = page * target_count
+        max_requests = max(1, (wanted_end + count - 1) // count + 2)
+        for _ in range(max_requests):
+            params["cursor"] = str(cursor)
+            if search_id:
+                params["search_id"] = search_id
+            payload = self._request_short_video_json("tiktok", "https://www.tiktok.com/api/search/item/full/", params, referer)
+            if not search_id:
+                search_id = self._short_video_search_id(payload)
+            raw_items = payload.get("item_list") or payload.get("itemList") or []
+            if not isinstance(raw_items, list):
+                raw_items = []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                self._short_video_item_store("tiktok", item)
+                parsed = self._short_video_home_item(item, "tiktok")
+                if parsed is not None and parsed.video_id not in seen:
+                    seen.add(parsed.video_id)
+                    videos.append(parsed)
+            current_has_more = bool(payload.get("has_more") or payload.get("hasMore"))
+            has_more = current_has_more
+            next_cursor = int(payload.get("cursor") or cursor + len(raw_items))
+            if len(videos) >= wanted_end or not current_has_more or next_cursor == cursor or not raw_items:
+                break
+            cursor = next_cursor
+        if not videos:
+            raise RuntimeError("TikTok 搜索接口返回空结果")
+        start = (page - 1) * target_count
+        return videos[start:wanted_end], bool(has_more or len(videos) > wanted_end)
+
+    def _search_douyin(
+        self, keyword: str, page: int, page_size: int, *, force_refresh: bool = False
+    ) -> tuple[list[HomeVideo], bool]:
+        page = max(1, int(page))
+        # 抖音搜索的原生批次最多约 20 条。一页对应一次平台请求，避免为了
+        # 通用 UI 的 56 条页大小连续请求三到四次并触发安全校验。
+        target_count = max(1, min(20, int(page_size)))
+        count = min(20, target_count)
+        referer = "https://www.douyin.com/search/" + urllib.parse.quote(keyword)
+        fingerprint = ""
+        if getattr(self, "config", None) is not None:
+            try:
+                fingerprint = self._config_fingerprint("douyin")
+            except (AttributeError, TypeError):
+                pass
+        session_key = f"{str(keyword or '').strip().casefold()}|{target_count}|{fingerprint}"
+        session_lock = getattr(self, "_douyin_search_session_lock", None)
+        if session_lock is None:
+            session_lock = self._douyin_search_session_lock = threading.Lock()
+        sessions = getattr(self, "_douyin_search_sessions", None)
+        if sessions is None:
+            sessions = self._douyin_search_sessions = OrderedDict()
+        cookie_browser = ""
+        if getattr(self, "config", None) is not None:
+            cookie_browser = str(self.config.cookie_browser_for_site("douyin") or "")
+        use_firefox_identity = (
+            getattr(self, "_douyin_browser_client", None) is None
+            and cookie_browser.split(":", 1)[0].strip().lower() == "firefox"
+        )
+        browser_name = "Firefox" if use_firefox_identity else "Chrome"
+        browser_version = "142.0" if use_firefox_identity else "131"
+        engine_name = "Gecko" if use_firefox_identity else "Blink"
+        engine_version = browser_version
+
+        with session_lock:
+            now = time.time()
+            previous_session = sessions.get(session_key)
+            if previous_session is not None and now - float(previous_session.get("updated_at", 0.0)) > _SEARCH_CACHE_TTL_SECONDS:
+                sessions.pop(session_key, None)
+                previous_session = None
+            if previous_session is not None:
+                sessions.move_to_end(session_key)
+
+            # 翻页始终沿用 search_id/cursor。第一页明确刷新时才建立候选会话，
+            # 且旧会话保留到候选请求成功，以便安全校验发生时无损回退。
+            if previous_session is not None and (not force_refresh or page > 1):
+                session = previous_session
+            else:
+                session = {
+                    "updated_at": now,
+                    "search_id": "",
+                    "cursor": 0,
+                    "items": [],
+                    "seen_ids": set(),
+                    "page_ranges": {},
+                    "has_more": True,
+                    "blocked_until": 0.0,
+                }
+
+            page_ranges: dict[int, tuple[int, int]] = session["page_ranges"]
+            if page in page_ranges and not force_refresh:
+                start, end = page_ranges[page]
+                videos = [self._short_video_home_item(item, "douyin") for item in session["items"][start:end]]
+                videos = [video for video in videos if video is not None]
+                has_next = bool(len(session["items"]) > end or session["has_more"])
+                logger.info(
+                    "douyin search session cache hit query=%s page=%s count=%s has_next=%s",
+                    keyword,
+                    page,
+                    len(videos),
+                    has_next,
+                )
+                return videos, has_next
+
+            blocked_until = float(session.get("blocked_until", 0.0))
+            if blocked_until > now:
+                fallback_range = page_ranges.get(page)
+                if fallback_range is not None:
+                    start, end = fallback_range
+                    videos = [self._short_video_home_item(item, "douyin") for item in session["items"][start:end]]
+                    return [video for video in videos if video is not None], True
+                raise RuntimeError(
+                    f"抖音搜索正在进行请求冷却，请在 {max(1, int(blocked_until - now))} 秒后重试；已有结果不会丢失"
+                )
+
+            if page > 1 and page - 1 not in page_ranges:
+                raise RuntimeError("请先加载抖音搜索的上一页，以便沿用平台搜索会话")
+            # 页面边界按实际已返回条目记录。首批只有 17 条时，下一页从第 18 条
+            # 续取，而不是按固定 56 条偏移跳过中间结果。
+            page_start = page_ranges[page - 1][1] if page > 1 else 0
+            raw_items: list[dict] = session["items"]
+            seen_ids: set[str] = session["seen_ids"]
+            search_id = str(session["search_id"] or "")
+            cursor = int(session["cursor"] or 0)
+            verify_blocked = False
+            request_count = 0
+            max_requests = 1
+
+            for _ in range(max_requests):
+                if len(raw_items) - page_start >= target_count:
+                    break
+                request_params = {
+                    "device_platform": "webapp", "aid": "6383", "channel": "channel_pc_web",
+                    "search_channel": "aweme_general", "keyword": keyword, "count": str(count),
+                    "offset": str(cursor), "search_source": "normal_search", "query_correct_type": "1",
+                    "is_filter_search": "0", "pc_client_type": "1", "version_code": "190500",
+                    "version_name": "19.5.0", "cookie_enabled": "true", "screen_width": "1920",
+                    "screen_height": "1080", "browser_language": "zh-CN", "browser_platform": "Win32",
+                    "browser_name": browser_name, "browser_version": browser_version, "browser_online": "true",
+                    "engine_name": engine_name, "engine_version": engine_version, "os_name": "Windows", "os_version": "10",
+                    "platform": "PC", "from_group_id": "", "need_filter_settings": "1",
+                    "list_type": "single", "cpu_core_num": "16", "device_memory": "8",
+                    "downlink": "10", "effective_type": "4g", "round_trip_time": "50",
+                }
+                if search_id:
+                    request_params["search_id"] = search_id
+                payload = self._request_douyin_browse_json(
+                    "https://www.douyin.com/aweme/v1/web/general/search/single/",
+                    request_params,
+                    referer,
+                )
+                request_count += 1
+                nil_info = payload.get("search_nil_info") if isinstance(payload.get("search_nil_info"), dict) else {}
+                verify_blocked = (
+                    nil_info.get("search_nil_type") == "verify_check"
+                    or nil_info.get("search_nil_item") == "verify_check"
+                )
+                if verify_blocked:
+                    session["blocked_until"] = time.time() + _DOUYIN_VERIFY_COOLDOWN_SECONDS
+                    session["has_more"] = True
+                    logger.warning(
+                        "douyin search verify_check query=%s page=%s offset=%s requests=%s retained=%s",
+                        keyword,
+                        page,
+                        cursor,
+                        request_count,
+                        len(raw_items) - page_start,
+                    )
+                    break
+
+                if not search_id:
+                    search_id = self._short_video_search_id(payload)
+                batch_items = [item for item in (payload.get("aweme_list") or []) if isinstance(item, dict)]
+                for card in payload.get("data") or []:
+                    if not isinstance(card, dict):
+                        continue
+                    aweme = card.get("aweme_info")
+                    if isinstance(aweme, dict):
+                        batch_items.append(aweme)
+                    batch_items.extend(item for item in (card.get("aweme_list") or []) if isinstance(item, dict))
+                added = 0
+                for item in batch_items:
+                    video_id = str(item.get("aweme_id") or "").strip()
+                    if video_id and video_id not in seen_ids:
+                        seen_ids.add(video_id)
+                        raw_items.append(item)
+                        added += 1
+
+                next_cursor = int(payload.get("cursor") or cursor + count)
+                cursor_stalled = next_cursor == cursor
+                if not cursor_stalled:
+                    cursor = next_cursor
+                # 有效批次偶尔错误返回 has_more=0；半批以上允许继续探测一次。
+                # 空批、全重复批或 cursor 停滞则立即停止，避免无意义请求。
+                likely_truncated = len(batch_items) >= max(8, count // 2)
+                session["has_more"] = bool(payload.get("has_more")) or likely_truncated
+                logger.info(
+                    "douyin search batch query=%s page=%s offset=%s received=%s added=%s has_more=%s",
+                    keyword,
+                    page,
+                    request_params["offset"],
+                    len(batch_items),
+                    added,
+                    session["has_more"],
+                )
+                if not session["has_more"] or cursor_stalled or not added:
+                    break
+
+            page_end = min(page_start + target_count, len(raw_items))
+            if page_end > page_start:
+                page_ranges[page] = (page_start, page_end)
+            session["updated_at"] = time.time()
+            session["search_id"] = search_id
+            session["cursor"] = cursor
+            for raw_item in raw_items[page_start:page_end]:
+                self._short_video_item_store("douyin", raw_item)
+
+            if page_end == page_start:
+                if previous_session is not None and previous_session is not session and page in previous_session["page_ranges"]:
+                    old_start, old_end = previous_session["page_ranges"][page]
+                    old_videos = [
+                        self._short_video_home_item(item, "douyin")
+                        for item in previous_session["items"][old_start:old_end]
+                    ]
+                    logger.warning("douyin search blocked; falling back to previous session query=%s page=%s", keyword, page)
+                    return [video for video in old_videos if video is not None], True
+                if verify_blocked:
+                    raise RuntimeError("抖音搜索请求触发平台安全验证，已自动降低请求频率；请在 30 秒后重试")
+                raise RuntimeError("抖音搜索接口返回空结果")
+
+            if verify_blocked and previous_session is not None and previous_session is not session:
+                old_range = previous_session["page_ranges"].get(page)
+                if old_range is not None and old_range[1] - old_range[0] > page_end - page_start:
+                    old_start, old_end = old_range
+                    old_videos = [
+                        self._short_video_home_item(item, "douyin")
+                        for item in previous_session["items"][old_start:old_end]
+                    ]
+                    logger.warning("douyin search partial refresh discarded in favor of fuller cached page query=%s", keyword)
+                    return [video for video in old_videos if video is not None], True
+
+            sessions[session_key] = session
+            sessions.move_to_end(session_key)
+            while len(sessions) > _MAX_DOUYIN_SEARCH_SESSIONS:
+                sessions.popitem(last=False)
+            videos = [self._short_video_home_item(item, "douyin") for item in raw_items[page_start:page_end]]
+            videos = [video for video in videos if video is not None]
+            has_next = bool(len(raw_items) > page_end or session["has_more"] or verify_blocked)
+            logger.info(
+                "douyin search page completed query=%s page=%s count=%s requests=%s verify_blocked=%s has_next=%s",
+                keyword,
+                page,
+                len(videos),
+                request_count,
+                verify_blocked,
+                has_next,
+            )
+            return videos, has_next
+
+    @staticmethod
+    def _short_video_search_id(payload: dict) -> str:
+        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+        log_pb = payload.get("log_pb") if isinstance(payload.get("log_pb"), dict) else {}
+        return str(
+            extra.get("search_request_id")
+            or log_pb.get("impr_id")
+            or extra.get("logid")
+            or ""
+        ).strip()
+
+    def _search_tiktok_fallback(self, keyword: str, page: int, page_size: int) -> tuple[list[HomeVideo], bool]:
+        normalized = str(keyword or "").strip().casefold()
+        if not normalized:
+            return [], False
+        # TikTok's web search endpoint requires a rotating signature and may
+        # return 403 even with a valid browser Cookie. Search the authenticated
+        # recommendation pages as a bounded fallback, but inspect all metadata
+        # fields retained by the API (description, hashtags and author) rather
+        # than only the card title. This avoids silently missing obvious hits.
+        candidates: list[HomeVideo] = []
+        seen: set[str] = set()
+        has_more = False
+        for feed_page in range(1, 5):
+            try:
+                batch, feed_more = self._fetch_short_video_home("tiktok", feed_page, 56)
+            except Exception as exc:
+                logger.warning("TikTok fallback search feed page %s unavailable: %s", feed_page, exc)
+                if not candidates:
+                    raise RuntimeError(
+                        "TikTok 搜索暂时无法获取结果。TikTok 当前搜索接口需要动态签名，"
+                        "且本次请求被平台风控拦截。请确认已在 Firefox 登录 TikTok，"
+                        "或稍后重试；首页推荐内容仍可正常播放。"
+                    ) from exc
+                break
+            has_more = has_more or feed_more
+            for video in batch:
+                if video.video_id not in seen:
+                    seen.add(video.video_id)
+                    candidates.append(video)
+        matched = [
+            video for video in candidates
+            if normalized in f"{video.title} {video.uploader}".casefold()
+        ]
+        if not matched:
+            raise RuntimeError(
+                "TikTok 搜索暂时无法获取结果。TikTok 当前搜索接口需要动态签名，"
+                "且本次请求被平台风控拦截（HTTP 403）。请确认已在 Firefox 登录 TikTok，"
+                "或稍后重试；首页推荐内容仍可正常播放。"
+            )
+        start = (max(1, int(page)) - 1) * max(1, int(page_size))
+        end = start + max(1, int(page_size))
+        return matched[start:end], has_more and len(matched) > end
 
     def _cache_key(self, mode: str, source: str, keyword: str, page: int, page_size: int) -> str:
         fingerprint = self._config_fingerprint(source)

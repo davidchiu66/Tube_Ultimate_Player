@@ -4,6 +4,7 @@ import logging
 from logging import FileHandler
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 from app_paths import LOG_DIR
 
@@ -68,7 +69,13 @@ def sanitize_command(command: Iterable[str]) -> list[str]:
             label = "<cookie-file>" if sanitized[-1] == "--cookies" else "<proxy>"
             sanitized.append(label)
         else:
-            sanitized.append(str(part))
+            value = str(part)
+            parsed = urlparse(value)
+            if parsed.scheme in {"http", "https"} and (
+                "/aweme/v1/play/" in parsed.path or str(parsed.hostname or "").endswith("douyinvod.com")
+            ):
+                value = f"{parsed.scheme}://{parsed.netloc}/<media-url>"
+            sanitized.append(value)
     return sanitized
 
 

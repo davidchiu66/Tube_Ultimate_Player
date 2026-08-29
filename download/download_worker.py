@@ -8,12 +8,15 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from download.command_builder import (
+    build_download_task,
     build_download_command,
     chromium_cookie_fallback_file,
+    direct_download_output_path,
     should_retry_with_alternate_browser,
     should_retry_with_cookie_file,
 )
@@ -24,6 +27,8 @@ from services.config_service import (
     rank_cookie_sources,
 )
 from services.logging_service import sanitize_command
+from services.cookie_service import load_browser_cookie_header, load_cookie_header
+from resolver.site_resolver import SiteResolver
 
 
 logger = logging.getLogger("tube_player.download")
@@ -47,6 +52,7 @@ class DownloadWorker(QRunnable):
         self.config = config
         self.signals = DownloadWorkerSignals()
         self._process: subprocess.Popen[str] | None = None
+        self._active_response = None
         self._stop_requested = threading.Event()
         # 对外只报单调递增的整体进度，见 _publish_progress。
         self._reported_percent = 0.0
@@ -60,11 +66,37 @@ class DownloadWorker(QRunnable):
                 process.terminate()
             except OSError:
                 pass
+        response = self._active_response
+        if response is not None:
+            try:
+                response.close()
+            except OSError:
+                pass
 
     @Slot()
     def run(self) -> None:
         self.signals.started.emit(self.task.task_id)
-        output = self._run_once(force_cookie_file=False)
+        refresh_error = ""
+        if self.task.source_site in {"douyin", "tiktok"} and not self.task.download_url:
+            refresh_error = self._refresh_legacy_short_video_task()
+        output = (
+            self._run_direct_media()
+            if self.task.download_url
+            else (
+                _DownloadOutput(1, refresh_error, "")
+                if refresh_error
+                else self._run_once(force_cookie_file=False)
+            )
+        )
+        if (
+            self.task.download_url
+            and output.returncode != 0
+            and not self._stop_requested.is_set()
+            and any(code in output.text for code in ("HTTP Error 401", "HTTP Error 403", "HTTP Error 404", "HTTP Error 410"))
+        ):
+            logger.warning("direct media URL rejected; refreshing task_id=%s", self.task.task_id)
+            refresh_error = self._refresh_legacy_short_video_task()
+            output = _DownloadOutput(1, refresh_error, "") if refresh_error else self._run_direct_media()
 
         # 先换浏览器再退回 Cookie 文件：Chrome/Brave/Edge 的 App-Bound Encryption
         # （Chrome 127+）会让 yt-dlp 报 "Failed to decrypt with DPAPI"，这跟账号无关，
@@ -110,7 +142,7 @@ class DownloadWorker(QRunnable):
         if (
             output.returncode != 0
             and not self._stop_requested.is_set()
-            and self.config.cookie_file()
+            and self.config.cookie_file_for_url(self.task.url)
             and should_retry_with_cookie_file(output.text)
         ):
             logger.warning(
@@ -126,10 +158,173 @@ class DownloadWorker(QRunnable):
         else:
             self.signals.failed.emit(self.task.task_id, output.error_message())
 
+    def _refresh_legacy_short_video_task(self) -> str:
+        """Upgrade a pre-direct-download task by finding the same item in current search data."""
+        try:
+            resolver = SiteResolver(self.config)
+            raw_id = str(self.task.video_id or "").split(":", 1)[-1]
+            queries = [str(self.task.title or "").strip()[:120], raw_id]
+            found = None
+            last_search_error = ""
+            for query in queries:
+                if not query:
+                    continue
+                try:
+                    cards, _more = resolver.search_videos(
+                        query,
+                        1,
+                        56,
+                        force_refresh=True,
+                        source=self.task.source_site,
+                    )
+                except Exception as exc:  # noqa: BLE001 - try the stable video ID next
+                    last_search_error = str(exc).strip()
+                    logger.warning(
+                        "legacy task refresh query failed task_id=%s query_kind=%s error=%s",
+                        self.task.task_id,
+                        "title" if query != raw_id else "video-id",
+                        last_search_error,
+                    )
+                    continue
+                found = next(
+                    (
+                        card
+                        for card in cards
+                        if str(card.video_id or "").split(":", 1)[-1] == raw_id
+                    ),
+                    None,
+                )
+                if found is not None:
+                    break
+            if found is None:
+                detail = f"（{last_search_error}）" if last_search_error else ""
+                raise RuntimeError(f"当前搜索结果中没有找到原视频{detail}")
+            video = resolver.resolve(found.webpage_url)
+            refreshed = build_download_task(video, self.task.quality_label, self.config)
+            if not refreshed.download_url:
+                raise RuntimeError("平台没有返回可下载的媒体地址")
+            self.task.download_url = refreshed.download_url
+            self.task.http_headers = dict(refreshed.http_headers or {})
+            self.task.quality_label = refreshed.quality_label
+            self.task.format_selector = refreshed.format_selector
+            self.task.expected_bytes = refreshed.expected_bytes
+            logger.info(
+                "legacy short-video task refreshed task_id=%s site=%s quality=%s",
+                self.task.task_id,
+                self.task.source_site,
+                self.task.quality_label,
+            )
+            return ""
+        except Exception as exc:  # noqa: BLE001 - convert refresh failure into task error
+            logger.exception("legacy short-video task refresh failed task_id=%s", self.task.task_id)
+            return f"旧版短视频下载任务无法刷新：{exc}。请从首页、搜索或播放页重新添加该视频。"
+
+    def _run_direct_media(self) -> "_DownloadOutput":
+        """Download a resolved short-video stream without yt-dlp's webpage probe."""
+        final_path = direct_download_output_path(self.task)
+        part_path = final_path.with_suffix(final_path.suffix + ".part")
+        try:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            if final_path.is_file() and final_path.stat().st_size > 0:
+                return _DownloadOutput(0, "", str(final_path))
+
+            resume_at = part_path.stat().st_size if part_path.is_file() else 0
+            headers = self._direct_media_headers()
+            if resume_at > 0:
+                headers["Range"] = f"bytes={resume_at}-"
+            request = urllib.request.Request(self.task.download_url, headers=headers)
+            _label, proxy = self.config.effective_proxy()
+            proxy_handler = (
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+                if proxy
+                else urllib.request.ProxyHandler({})
+            )
+            opener = urllib.request.build_opener(proxy_handler)
+            started = time.perf_counter()
+            window_started = started
+            window_bytes = resume_at
+            downloaded = resume_at
+            logger.info(
+                "direct media download start task_id=%s site=%s resume_at=%s",
+                self.task.task_id,
+                self.task.source_site,
+                resume_at,
+            )
+            response = opener.open(request, timeout=30)
+            self._active_response = response
+            status = int(getattr(response, "status", 200) or 200)
+            if resume_at > 0 and status != 206:
+                resume_at = 0
+                downloaded = 0
+                window_bytes = 0
+            total = _response_total_bytes(response, resume_at)
+            mode = "ab" if resume_at > 0 and status == 206 else "wb"
+            with response, part_path.open(mode) as output_file:
+                while not self._stop_requested.is_set():
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    output_file.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.perf_counter()
+                    if now - window_started >= 0.5:
+                        elapsed = max(0.001, now - window_started)
+                        speed_bps = max(0.0, (downloaded - window_bytes) / elapsed)
+                        percent = min(99.5, downloaded * 100 / total) if total > 0 else None
+                        eta = (total - downloaded) / speed_bps if total > downloaded and speed_bps > 0 else 0.0
+                        self._publish_progress(
+                            percent,
+                            _format_speed(speed_bps) if speed_bps > 0 else "",
+                            _format_eta(eta) if eta > 0 else "",
+                        )
+                        window_started = now
+                        window_bytes = downloaded
+                output_file.flush()
+            self._active_response = None
+            if self._stop_requested.is_set():
+                return _DownloadOutput(1, "下载已停止", "")
+            if total > 0 and downloaded < total:
+                raise OSError(f"媒体响应提前结束：已下载 {downloaded} / {total} 字节")
+            part_path.replace(final_path)
+            self._publish_progress(100.0, "", "")
+            logger.info(
+                "direct media download completed task_id=%s bytes=%s path=%s",
+                self.task.task_id,
+                downloaded,
+                final_path,
+            )
+            return _DownloadOutput(0, "", str(final_path))
+        except Exception as exc:  # noqa: BLE001 - worker must report network/filesystem failures
+            self._active_response = None
+            logger.exception("direct media download failed task_id=%s", self.task.task_id)
+            return _DownloadOutput(1, f"短视频媒体下载失败：{exc}", "")
+
+    def _direct_media_headers(self) -> dict[str, str]:
+        headers = dict(self.task.http_headers or {})
+        site = str(self.task.source_site or "").strip().lower()
+        root = "https://www.tiktok.com" if site == "tiktok" else "https://www.douyin.com"
+        headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36")
+        headers.setdefault("Referer", self.task.url or root + "/")
+        headers.setdefault("Origin", root)
+        headers.setdefault("Accept", "*/*")
+        headers.setdefault("Accept-Encoding", "identity")
+
+        browser = self.config.cookie_browser_for_site(site)
+        cookie = load_browser_cookie_header(browser, self.task.url) if browser else ""
+        if not cookie:
+            cookie_file = self.config.cookie_file_for_url(self.task.url)
+            if cookie_file:
+                cookie = load_cookie_header(cookie_file, self.task.url)
+        if cookie:
+            compact_cookie = SiteResolver._compact_short_video_cookie_header(cookie, site)
+            if compact_cookie:
+                headers["Cookie"] = compact_cookie
+        return headers
+
     def _alternate_cookie_browsers(self) -> list[str]:
         """除当前正在用的浏览器之外，其它可用的 Cookie 源，按读得出来的可能性排序。"""
         site = self.config.cookie_site_for_url(self.task.url)
-        current = self.config.explicit_cookie_browser() or self.config.auto_cookie_browser_for_site(site)
+        current = self.config.explicit_cookie_browser_for_site(site) or self.config.auto_cookie_browser_for_site(site)
         browsers: list[str] = []
         for _label, value in rank_cookie_sources(detect_browser_cookie_sources()):
             if not value or value == current or value in browsers:
@@ -176,6 +371,7 @@ class DownloadWorker(QRunnable):
             text=True,
             encoding="utf-8",
             errors="replace",
+            bufsize=1,
             creationflags=creationflags,
         )
 
@@ -308,6 +504,19 @@ class _DownloadOutput:
     def error_message(self) -> str:
         detail = self.text.strip()
         return detail or f"yt-dlp 下载失败，退出码 {self.returncode}"
+
+
+def _response_total_bytes(response, resume_at: int) -> int:
+    content_range = str(response.headers.get("Content-Range") or "")
+    match = re.search(r"/(\d+)$", content_range)
+    if match:
+        return int(match.group(1))
+    try:
+        length = int(response.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        length = 0
+    status = int(getattr(response, "status", 200) or 200)
+    return length + resume_at if status == 206 and resume_at > 0 else length
 
 
 class _FileProgressEstimator:

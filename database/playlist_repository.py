@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from database.sqlite_manager import SQLiteManager
 from resolver.models import PlaylistEntry, SavedPlaylist
+from services.site_registry import site_for_url
 
 
 class PlaylistRepository:
@@ -227,7 +228,4 @@ def _row_value(row, key: str):
 
 
 def _detect_source_site(url: str) -> str:
-    host = urlparse(str(url or "").strip()).netloc.lower()
-    if host.endswith("bilibili.com") or host.endswith("b23.tv"):
-        return "bilibili"
-    return "youtube"
+    return site_for_url(str(url or ""))

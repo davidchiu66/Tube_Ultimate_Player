@@ -21,6 +21,7 @@ from download.models import (
 )
 from resolver.models import VideoInfo
 from resolver.source_utils import detect_source_site
+from services.site_registry import site_for_url
 from services.config_service import ConfigService
 
 
@@ -96,6 +97,23 @@ class DownloadManager(QObject):
         url = video.webpage_url
         existing = self._find_by_url(url)
         if existing:
+            if existing.status in {STATUS_FAILED, STATUS_PAUSED} and video.source_site in {"douyin", "tiktok"}:
+                refreshed = build_download_task(video, quality_label, self.config, audio_format_id)
+                if refreshed.download_url:
+                    existing.download_url = refreshed.download_url
+                    existing.http_headers = dict(refreshed.http_headers or {})
+                    existing.quality_label = refreshed.quality_label
+                    existing.format_selector = refreshed.format_selector
+                    existing.expected_bytes = refreshed.expected_bytes
+                    existing.status = STATUS_QUEUED
+                    existing.error_message = ""
+                    existing.progress = 0.0
+                    existing.touch()
+                    self.task_changed.emit(existing)
+                    self.message.emit(f"已刷新并重新加入下载队列：{existing.title}")
+                    self._save_tasks()
+                    self._schedule()
+                    return existing
             if existing.status == STATUS_COMPLETED:
                 self.message.emit(f"已完成下载：{existing.title}")
             else:
@@ -361,9 +379,13 @@ class DownloadManager(QObject):
         save_dir = Path(task.save_dir)
         if not save_dir.exists():
             return ""
-        markers = [f" [{candidate}]" for candidate in _video_id_candidates(task.video_id)]
+        candidates = _video_id_candidates(task.video_id)
+        raw_id = str(task.video_id or "").split(":", 1)[-1]
+        if raw_id and raw_id not in candidates:
+            candidates.append(raw_id)
+        markers = [f" [{candidate}]" for candidate in candidates]
         for path in save_dir.iterdir():
-            if not path.is_file() or path.suffix.lower() in (".part", ".ytdl"):
+            if not path.is_file() or path.suffix.lower() in (".part", ".ytdl", ".tmp", ".temp"):
                 continue
             if any(marker in path.name for marker in markers):
                 return str(path)
@@ -383,7 +405,27 @@ class DownloadManager(QObject):
                     resolved,
                 )
             return resolved
-        return output_path
+        return self._recover_output_path_by_filename(task) or output_path
+
+    @staticmethod
+    def _recover_output_path_by_filename(task: DownloadTask) -> str:
+        directory = Path(task.save_dir or "")
+        if not directory.exists():
+            return ""
+        raw_id = str(task.video_id or "").split(":", 1)[-1]
+        if not raw_id:
+            return ""
+        try:
+            for path in directory.iterdir():
+                if (
+                    path.is_file()
+                    and f"[{raw_id}]" in path.stem
+                    and path.suffix.lower() not in {".part", ".ytdl", ".tmp", ".temp"}
+                ):
+                    return str(path)
+        except OSError:
+            return ""
+        return ""
 
     def _load_tasks(self) -> None:
         if not TASKS_FILE.exists():
@@ -441,6 +483,9 @@ class DownloadManager(QObject):
 
         if removed:
             self._tasks = kept
+            for task in self._tasks:
+                if task.status == STATUS_COMPLETED:
+                    task.output_path = self._resolve_output_path(task, task.output_path)
             self._rebuild_indexes()
             logger.info("download tasks deduplicated removed=%s remaining=%s", removed, len(self._tasks))
             self._save_tasks()
@@ -451,6 +496,11 @@ class DownloadManager(QObject):
             return
 
         existing_ids = {_normalized_video_id(task.video_id) for task in self._tasks if task.video_id}
+        existing_ids.update(
+            str(task.video_id or "").split(":", 1)[-1]
+            for task in self._tasks
+            if task.video_id and ":" in str(task.video_id)
+        )
         existing_paths = {
             str(Path(task.output_path)).lower()
             for task in self._tasks
@@ -472,8 +522,9 @@ class DownloadManager(QObject):
                 continue
             video_id = match.group("video_id")
             normalized_video_id = _normalized_video_id(video_id)
+            base_video_id = str(video_id).split(":", 1)[-1]
             normalized_path = str(path).lower()
-            if normalized_video_id in existing_ids or normalized_path in existing_paths:
+            if normalized_video_id in existing_ids or base_video_id in existing_ids or normalized_path in existing_paths:
                 continue
             title = path.stem[: match.start()].strip() or path.stem
             url = _url_from_video_id(video_id)
@@ -584,13 +635,17 @@ def _url_from_video_id(video_id: str) -> str:
                 return f"https://www.bilibili.com/video/av{aid}?p={page}"
         if aid.isdigit():
             return f"https://www.bilibili.com/video/av{aid}"
+    if raw.startswith("douyin:"):
+        return f"https://www.douyin.com/video/{raw[len('douyin:') :]}"
+    if raw.startswith("tiktok:"):
+        return f"https://www.tiktok.com/@_/video/{raw[len('tiktok:') :]}"
     return f"https://www.youtube.com/watch?v={raw}"
 
 
 def _normalized_video_id(video_id: str) -> str:
     raw = str(video_id or "").strip()
-    if raw.startswith("bilibili:"):
-        raw = raw[len("bilibili:") :]
+    if raw.startswith(("bilibili:", "douyin:", "tiktok:")):
+        raw = raw.split(":", 1)[1]
     if raw.startswith("BV"):
         return raw.split(":p", 1)[0]
     if raw.startswith("av"):
@@ -609,8 +664,8 @@ def _video_id_candidates(video_id: str) -> list[str]:
         if not value or value in candidates:
             continue
         candidates.append(value)
-        if value.startswith("bilibili:"):
-            stripped = value[len("bilibili:") :]
+        if value.startswith(("bilibili:", "douyin:", "tiktok:")):
+            stripped = value.split(":", 1)[1]
             if stripped and stripped not in candidates:
                 candidates.append(stripped)
         if ":p" in value:

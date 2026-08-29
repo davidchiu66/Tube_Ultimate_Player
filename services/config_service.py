@@ -21,6 +21,7 @@ from app_paths import (
 )
 from services.firefox_profiles import FirefoxProfile, firefox_profiles
 from services.shortcut_service import DEFAULT_SHORTCUTS
+from services.site_registry import SITE_KEYS, SITE_LABELS, site_for_url
 
 
 DEFAULT_CONFIG_PATH = default_config_path("default_config.json")
@@ -246,15 +247,13 @@ class ConfigService:
         return str(runtime_path(f"cookie_{normalized_site}.txt"))
 
     def cookie_site_for_url(self, target_url: str) -> str:
-        raw = str(target_url or "").strip()
-        host = (urlparse(raw).hostname or "").lower()
-        if host.endswith("bilibili.com") or host.endswith("b23.tv"):
-            return "bilibili"
-        return "youtube"
+        return site_for_url(target_url, self.default_home_source())
 
     def _normalize_cookie_site(self, site: str) -> str:
         normalized = str(site or "").strip().lower()
-        return normalized if normalized in {"youtube", "bilibili"} else self.default_home_source()
+        if normalized in SITE_KEYS:
+            return normalized
+        return self.default_home_source()
 
     def download_dir(self) -> str:
         value = str(self.get("download.save_dir", str(DOWNLOAD_DIR)) or str(DOWNLOAD_DIR)).strip()
@@ -289,10 +288,10 @@ class ConfigService:
 
     def default_home_source(self) -> str:
         value = str(self.get("content.default_home", "bilibili") or "bilibili").strip().lower()
-        return value if value in {"youtube", "bilibili"} else "bilibili"
+        return value if value in SITE_KEYS else "bilibili"
 
     def default_home_label(self) -> str:
-        return "Bilibili" if self.default_home_source() == "bilibili" else "YouTube"
+        return SITE_LABELS.get(self.default_home_source(), "Bilibili")
 
     def default_quality_mode(self, site: str = "") -> str:
         """返回站点的 smart/high/medium/low；旧值和非法值按 high 处理。"""
@@ -457,13 +456,13 @@ class ConfigService:
 
     def set_probed_cookie_browsers(self, mapping: dict[str, str]) -> None:
         """保存启动探测结果：{site: browser_spec}。未命中的站点清空其记录。"""
-        for site in ("bilibili", "youtube"):
+        for site in SITE_KEYS:
             spec = str(mapping.get(site, "") or "").strip()
             self.set(f"cookies.{site}.auto_browser", spec)
 
     def cookie_auto_probe_enabled(self, site: str = "") -> bool:
         if not str(site or "").strip():
-            return any(self.configured_cookie_browser_for_site(item) == "auto" for item in ("bilibili", "youtube"))
+            return any(self.configured_cookie_browser_for_site(item) == "auto" for item in SITE_KEYS)
         normalized_site = self._normalize_cookie_site(site)
         return self.configured_cookie_browser_for_site(normalized_site) == "auto"
 
