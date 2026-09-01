@@ -33,6 +33,8 @@ def _state(*, browse_mode: str = "home", keyword: str = "", source: str = "bilib
         _home_has_next=True,
         _search_keyword="旧关键词",
         _search_page=4,
+        _browse_source_switch_frozen=False,
+        resolver=SimpleNamespace(home_source_label=lambda source: source),
     )
 
     def store_home_state(current_source: str) -> None:
@@ -56,6 +58,7 @@ def _state(*, browse_mode: str = "home", keyword: str = "", source: str = "bilib
     state._store_home_state = store_home_state
     state.load_home = load_home
     state._start_search = start_search
+    state._set_browse_source_switch_frozen = lambda frozen: setattr(state, "_browse_source_switch_frozen", bool(frozen))
     state._set_browse_source = MethodType(MainWindow._set_browse_source, state)
     return state
 
@@ -66,7 +69,7 @@ class BrowseSourceSwitchTests(unittest.TestCase):
             with self.subTest(source=source, target=target):
                 state = _state(browse_mode="search", keyword="周杰伦", source=source)
                 rendered: list[object] = []
-                state.home_page = object()
+                state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
                 state.stack = SimpleNamespace(setCurrentWidget=lambda _widget: None)
                 state._render_home = lambda *_args: rendered.append(object())
 
@@ -81,6 +84,7 @@ class BrowseSourceSwitchTests(unittest.TestCase):
 
     def test_home_mode_without_text_loads_new_site_home(self) -> None:
         state = _state(browse_mode="home", keyword="")
+        state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
 
         state._set_browse_source("youtube")
 
@@ -92,6 +96,7 @@ class BrowseSourceSwitchTests(unittest.TestCase):
         for source, target in (("bilibili", "youtube"), ("youtube", "bilibili")):
             with self.subTest(source=source, target=target):
                 state = _state(browse_mode="search", keyword="  周杰伦  ", source=source)
+                state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
 
                 state._set_browse_source(target)
 
@@ -105,6 +110,7 @@ class BrowseSourceSwitchTests(unittest.TestCase):
 
     def test_search_mode_with_empty_text_falls_back_to_home(self) -> None:
         state = _state(browse_mode="search", keyword="   ")
+        state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
 
         state._set_browse_source("youtube")
 
@@ -114,6 +120,7 @@ class BrowseSourceSwitchTests(unittest.TestCase):
 
     def test_startup_home_mode_switches_to_home(self) -> None:
         state = _state()
+        state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
 
         state._set_browse_source("youtube")
 
@@ -133,6 +140,29 @@ class BrowseSourceSwitchTests(unittest.TestCase):
         self.assertEqual(state._browse_source, "bilibili")
         self.assertEqual(state._search_keyword, "旧关键词")
         self.assertEqual(state._home_page, 3)
+
+    def test_frozen_source_switch_is_ignored(self) -> None:
+        state = _state(source="bilibili")
+        state._browse_source_switch_frozen = True
+        state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
+
+        MainWindow._set_browse_source(state, "youtube")
+
+        self.assertEqual(state._browse_source, "bilibili")
+        self.assertEqual(state.actions, [])
+
+    def test_source_switch_freezes_until_browse_worker_finishes(self) -> None:
+        state = _state(source="bilibili")
+        state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None, set_loading=lambda *_args: None)
+
+        MainWindow._set_browse_source(state, "youtube")
+        self.assertTrue(state._browse_source_switch_frozen)
+
+        state._browse_generation = 1
+        state._browse_verification_pending_for_current_source = lambda: False
+        MainWindow._browse_load_finished(state, 1)
+
+        self.assertFalse(state._browse_source_switch_frozen)
 
 
 class BrowseStateResetTests(unittest.TestCase):
@@ -173,6 +203,8 @@ class BrowseStateResetTests(unittest.TestCase):
 
         state.url_edit = _TextField("周杰伦")
         state._browse_source = "bilibili"
+        state.home_page = SimpleNamespace(clear_videos=lambda **_kwargs: None)
+        state.resolver = SimpleNamespace(home_source_label=lambda source: source)
         state._store_home_state = lambda _source: None
         state.load_home = lambda: actions.append("home")
         state._start_search = lambda *_args, **_kwargs: actions.append("search")

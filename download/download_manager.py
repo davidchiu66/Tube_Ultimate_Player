@@ -97,7 +97,7 @@ class DownloadManager(QObject):
         url = video.webpage_url
         existing = self._find_by_url(url)
         if existing:
-            if existing.status in {STATUS_FAILED, STATUS_PAUSED} and video.source_site in {"douyin", "tiktok"}:
+            if existing.status in {STATUS_FAILED, STATUS_PAUSED} and video.source_site in {"douyin", "tiktok", "xiaohongshu"}:
                 refreshed = build_download_task(video, quality_label, self.config, audio_format_id)
                 if refreshed.download_url:
                     existing.download_url = refreshed.download_url
@@ -639,12 +639,14 @@ def _url_from_video_id(video_id: str) -> str:
         return f"https://www.douyin.com/video/{raw[len('douyin:') :]}"
     if raw.startswith("tiktok:"):
         return f"https://www.tiktok.com/@_/video/{raw[len('tiktok:') :]}"
+    if raw.startswith("xiaohongshu:"):
+        return f"https://www.xiaohongshu.com/explore/{raw[len('xiaohongshu:') :]}"
     return f"https://www.youtube.com/watch?v={raw}"
 
 
 def _normalized_video_id(video_id: str) -> str:
     raw = str(video_id or "").strip()
-    if raw.startswith(("bilibili:", "douyin:", "tiktok:")):
+    if raw.startswith(("bilibili:", "douyin:", "tiktok:", "xiaohongshu:")):
         raw = raw.split(":", 1)[1]
     if raw.startswith("BV"):
         return raw.split(":p", 1)[0]
@@ -664,7 +666,7 @@ def _video_id_candidates(video_id: str) -> list[str]:
         if not value or value in candidates:
             continue
         candidates.append(value)
-        if value.startswith(("bilibili:", "douyin:", "tiktok:")):
+        if value.startswith(("bilibili:", "douyin:", "tiktok:", "xiaohongshu:")):
             stripped = value.split(":", 1)[1]
             if stripped and stripped not in candidates:
                 candidates.append(stripped)

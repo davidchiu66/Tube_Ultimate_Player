@@ -83,6 +83,7 @@ class PlayerPage(QWidget):
     collection_load_requested = Signal(str)
     collection_delete_requested = Signal(str)
     collection_auto_play_changed = Signal(bool)
+    playlist_loading_hint_requested = Signal()
 
     def __init__(self, config: ConfigService | None = None) -> None:
         super().__init__()
@@ -347,6 +348,9 @@ class PlayerPage(QWidget):
         self.playlist_overlay.load_saved_requested.connect(self.playlist_load_requested)
         self.playlist_overlay.delete_saved_requested.connect(self.playlist_delete_requested)
         self.playlist_overlay.auto_play_changed.connect(self.playlist_auto_play_changed)
+        self.playlist_overlay.playlist_loading_hint_requested.connect(
+            self.playlist_loading_hint_requested
+        )
         self.collection_overlay.entry_activated.connect(self.collection_entry_requested)
         self.collection_overlay.download_entries_requested.connect(self.collection_download_requested)
         self.collection_overlay.save_requested.connect(self.collection_save_requested)
@@ -1249,6 +1253,8 @@ class PlayerPage(QWidget):
     def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = False) -> None:
         self._playlist_count = len(playlist.entries) if playlist is not None else 0
         self._playlist_index = current_index
+        if playlist is not None:
+            self.set_playlist_loading(False)
         self.playlist_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
         # Playlist item widgets are created dynamically, after the overlay's
         # initial mouse-tracking setup. Track them too so activity anywhere in
@@ -1260,8 +1266,12 @@ class PlayerPage(QWidget):
     def clear_playlist_context(self) -> None:
         self._playlist_count = 0
         self._playlist_index = -1
+        self.set_playlist_loading(False)
         self.playlist_overlay.set_playlist(None)
         self._update_picture_in_picture_queue_buttons()
+
+    def set_playlist_loading(self, loading: bool) -> None:
+        self.playlist_overlay.set_loading_state(loading)
 
     def set_playlist_saved_items(self, playlists, current_key: str = "") -> None:
         self.playlist_overlay.set_saved_playlists(playlists, current_key=current_key)

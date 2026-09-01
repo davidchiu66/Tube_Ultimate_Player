@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from resolver.models import PlaylistEntry, PlaylistInfo, SavedPlaylist
 from ui.playlist_overlay import PlaylistOverlay
@@ -160,6 +160,60 @@ class PlaylistOverlaySavedListTests(unittest.TestCase):
 
         self.assertEqual(emitted, [])
         self.assertTrue(overlay.delete_button.isEnabled())
+
+
+class PlaylistOverlayLoadingHintTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self) -> None:
+        self.host = QWidget()
+        self.host.resize(800, 600)
+        self.overlay = PlaylistOverlay(self.host)
+        self.overlay.relayout(self.host.rect())
+        self.overlay.hide()
+
+    def tearDown(self) -> None:
+        QApplication.processEvents()
+        self.overlay.close()
+        self.host.close()
+
+    def test_right_hot_zone_emits_loading_hint_once_until_pointer_leaves(self) -> None:
+        hints: list[bool] = []
+        self.overlay.playlist_loading_hint_requested.connect(lambda: hints.append(True))
+        self.overlay.set_loading_state(True)
+
+        hot_zone = QPoint(self.host.width() - 1, self.host.height() // 2)
+        self.overlay.handle_pointer(hot_zone)
+        self.overlay.handle_pointer(hot_zone)
+
+        self.assertEqual(hints, [True])
+        self.assertFalse(self.overlay.is_open())
+
+        self.overlay.handle_pointer(QPoint(self.host.width() // 2, self.host.height() // 2))
+        self.overlay.handle_pointer(hot_zone)
+        self.assertEqual(hints, [True, True])
+
+    def test_loading_hint_stops_after_playlist_is_ready(self) -> None:
+        hints: list[bool] = []
+        self.overlay.playlist_loading_hint_requested.connect(lambda: hints.append(True))
+        self.overlay.set_loading_state(True)
+        hot_zone = QPoint(self.host.width() - 1, self.host.height() // 2)
+        self.overlay.handle_pointer(hot_zone)
+
+        playlist = PlaylistInfo(
+            "p",
+            "作者视频",
+            "https://example.com",
+            entries=[PlaylistEntry("p", "v", "视频", "https://example.com/v")],
+        )
+        self.overlay.set_loading_state(False)
+        self.overlay.set_playlist(playlist, current_index=0)
+        self.overlay.handle_pointer(hot_zone)
+
+        self.assertEqual(hints, [True])
+        self.assertTrue(self.overlay.is_open())
 
 
 if __name__ == "__main__":

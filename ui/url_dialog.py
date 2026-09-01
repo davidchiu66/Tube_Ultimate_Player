@@ -33,9 +33,9 @@ class UrlPlayDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        label = QLabel("请输入视频 URL（支持 YouTube / Bilibili / 抖音 / TikTok）")
+        label = QLabel("请输入视频 URL（支持 YouTube / Bilibili / 抖音 / TikTok / 小红书）")
         self.url_edit = QLineEdit(initial_url)
-        self.url_edit.setPlaceholderText("https://www.youtube.com/watch?v=... 或 https://www.bilibili.com/video/...")
+        self.url_edit.setPlaceholderText("YouTube、Bilibili、抖音、TikTok 或小红书视频地址")
 
         history_label = QLabel("最近播放")
         history_label.setObjectName("MetaLabel")

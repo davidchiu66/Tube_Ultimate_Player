@@ -20,10 +20,11 @@ class SiteDefinition:
 
 
 SITE_DEFINITIONS: tuple[SiteDefinition, ...] = (
-    SiteDefinition("bilibili", "Bilibili", "B站", ("bilibili.com", "b23.tv")),
-    SiteDefinition("youtube", "YouTube", "YT", ("youtube.com", "youtu.be", "youtube-nocookie.com")),
-    SiteDefinition("douyin", "抖音", "DY", ("douyin.com", "iesdouyin.com")),
-    SiteDefinition("tiktok", "TikTok", "TT", ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com")),
+    SiteDefinition("bilibili", "Bilibili", "B", ("bilibili.com", "b23.tv")),
+    SiteDefinition("youtube", "YouTube", "Y", ("youtube.com", "youtu.be", "youtube-nocookie.com")),
+    SiteDefinition("douyin", "抖音", "D", ("douyin.com", "iesdouyin.com")),
+    SiteDefinition("tiktok", "TikTok", "T", ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com")),
+    SiteDefinition("xiaohongshu", "小红书", "X", ("xiaohongshu.com", "xhslink.com"), supports_playlist=False),
 )
 SITE_KEYS = tuple(item.key for item in SITE_DEFINITIONS)
 SITE_BY_KEY = {item.key: item for item in SITE_DEFINITIONS}

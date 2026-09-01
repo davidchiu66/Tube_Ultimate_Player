@@ -225,7 +225,9 @@ class SearchBox(QFrame):
 
     def set_compact_mode(self, compact: bool) -> None:
         self.leading_icon.setVisible(not compact)
-        self.search_edit.setMinimumWidth(120 if compact else 220)
+        # 五个单字符站点标识需要留出空间；紧凑模式把搜索输入压到更小，
+        # 避免 DPI/小窗口下挤掉右侧导航按钮。
+        self.search_edit.setMinimumWidth(80 if compact else 220)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         if watched is self.search_edit:
@@ -283,8 +285,8 @@ class SourceSelector(QFrame):
         """
         for definition in SITE_DEFINITIONS:
             self._radios[definition.key].setText(definition.compact_label if compact else definition.label)
-            self._radios[definition.key].setMinimumWidth(18 if compact else 58)
-            self._radios[definition.key].setMaximumWidth(26 if compact else 90)
+            self._radios[definition.key].setMinimumWidth(22 if compact else 58)
+            self._radios[definition.key].setMaximumWidth(30 if compact else 90)
         margin = 2 if compact else 10
         self._layout.setContentsMargins(margin, 2, margin, 2)
         self._layout.setSpacing(2 if compact else 10)
@@ -305,6 +307,11 @@ class SourceSelector(QFrame):
         target.setChecked(True)
         for radio in self._radios.values():
             radio.blockSignals(False)
+
+    def set_frozen(self, frozen: bool) -> None:
+        """冻结站点切换，避免首页/搜索切站期间提交新的并发浏览任务。"""
+        self.setEnabled(not bool(frozen))
+        self.setToolTip("网站正在加载，请稍候" if frozen else "选择首页与搜索使用的网站")
 
     def _emit_if_checked(self, checked: bool, source: str) -> None:
         if checked:
@@ -396,6 +403,9 @@ class PlayerToolbar(QWidget):
     def set_source(self, source: str) -> None:
         self.source_selector.set_source(source)
 
+    def set_source_switch_frozen(self, frozen: bool) -> None:
+        self.source_selector.set_frozen(frozen)
+
     def set_topmost_state(self, enabled: bool) -> None:
         self.topmost_button.setChecked(enabled)
         self.topmost_button.setToolTip("取消置顶" if enabled else "窗口置顶")
@@ -430,7 +440,7 @@ class PlayerToolbar(QWidget):
         icon_only = mode == "icon"
         self.source_selector.set_compact_mode(icon_only)
         self.search_box.set_compact_mode(icon_only)
-        self.source_selector.setMaximumWidth(125 if icon_only else 360)
+        self.source_selector.setMaximumWidth(168 if icon_only else 360)
         for button in (
             self.search_button,
             self.url_button,

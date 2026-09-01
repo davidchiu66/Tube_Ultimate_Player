@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tube-ultimate-player"
-version = "0.2.23"
+version = "0.2.30"
 description = "Tube Ultimate Player"
 readme = "README.md"
 license = { file = "LICENSE" }

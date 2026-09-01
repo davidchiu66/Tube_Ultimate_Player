@@ -20,6 +20,8 @@ class DouyinTikTokSupportTests(unittest.TestCase):
             ("https://v.douyin.com/abc/", "douyin", "抖音"),
             ("https://www.tiktok.com/@user/video/456", "tiktok", "TikTok"),
             ("https://vm.tiktok.com/abc/", "tiktok", "TikTok"),
+            ("https://www.xiaohongshu.com/explore/abc123", "xiaohongshu", "小红书"),
+            ("https://xhslink.com/abc", "xiaohongshu", "小红书"),
         )
         for url, site, label in cases:
             self.assertEqual(site_for_url(url), site)
@@ -28,11 +30,100 @@ class DouyinTikTokSupportTests(unittest.TestCase):
             self.assertEqual(_detect_source_site(url), site)
 
     def test_site_keys_include_both_new_sites(self) -> None:
-        self.assertEqual(SITE_KEYS, ("bilibili", "youtube", "douyin", "tiktok"))
+        self.assertEqual(SITE_KEYS, ("bilibili", "youtube", "douyin", "tiktok", "xiaohongshu"))
 
     def test_generic_video_ids_are_stable(self) -> None:
         self.assertEqual(_current_video_id_for_site("https://www.douyin.com/video/123", "douyin"), "douyin:123")
         self.assertEqual(_current_video_id_for_site("https://www.tiktok.com/@u/video/456", "tiktok"), "tiktok:456")
+
+    def test_douyin_user_video_url_is_normalized_from_vid(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        url = (
+            "https://www.douyin.com/user/sec_uid?from_tab_name=main&modal_id=7678359560649706779"
+            "&relation=0&vid=7658595418254626063"
+        )
+        self.assertEqual(
+            resolver._normalize_short_video_url(url),
+            "https://www.douyin.com/video/7678359560649706779",
+        )
+        self.assertEqual(resolver.detect_url_kind(url), "video")
+        self.assertEqual(resolver.detect_url_kind("https://www.douyin.com/user/sec_uid"), "playlist")
+
+    def test_douyin_user_video_url_accepts_modal_id_fallback(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        url = "https://www.douyin.com/user/sec_uid?modal_id=7678359560649706779"
+        self.assertEqual(
+            resolver._normalize_short_video_url(url),
+            "https://www.douyin.com/video/7678359560649706779",
+        )
+
+    def test_douyin_user_video_url_keeps_vid_as_collection_context(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        url = (
+            "https://www.douyin.com/user/sec_uid?modal_id=7678359560649706779"
+            "&showSubTab=compilation&vid=7658595418254626063"
+        )
+        self.assertEqual(resolver._douyin_collection_id_from_url(url), "7658595418254626063")
+
+    def test_douyin_collection_playlist_uses_mix_id_and_includes_current_video(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "")
+        resolver._request_douyin_browse_json = lambda endpoint, params, referer: {
+            "aweme_list": [
+                {"aweme_id": "1", "desc": "第一集", "author": {"nickname": "作者"},
+                 "video": {"duration": 1000, "cover": {"url_list": ["x"]}}},
+                {"aweme_id": "2", "desc": "第二集", "author": {"nickname": "作者"},
+                 "video": {"duration": 1000, "cover": {"url_list": ["x"]}}},
+            ],
+            "has_more": 0,
+        }
+        current = VideoInfo(
+            video_id="douyin:1", title="第一集", source_site="douyin",
+            webpage_url="https://www.douyin.com/video/1", uploader="作者", duration=1,
+            raw_info={"_tube_player_collection_id": "7658595418254626063"},
+        )
+        playlist = resolver._fetch_douyin_collection_playlist(current, "7658595418254626063")
+        self.assertIsNotNone(playlist)
+        self.assertEqual(playlist.playlist_id, "douyin:collection:7658595418254626063")
+        self.assertEqual([entry.video_id for entry in playlist.entries], ["douyin:1", "douyin:2"])
+
+    def test_douyin_collection_playlist_uses_browser_collection_page(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "")
+        resolver._douyin_browser_client = SimpleNamespace(
+            request_collection_json=lambda url, target_count, **_kwargs: {
+                "aweme_list": [
+                    {"aweme_id": "1", "desc": "第一集", "author": {"nickname": "作者"},
+                     "video": {"duration": 1000, "cover": {"url_list": ["x"]}}},
+                    {"aweme_id": "2", "desc": "第二集", "author": {"nickname": "作者"},
+                     "video": {"duration": 1000, "cover": {"url_list": ["x"]}}},
+                ],
+            },
+        )
+        current = VideoInfo(
+            video_id="douyin:1", title="第一集", source_site="douyin",
+            webpage_url="https://www.douyin.com/video/1", uploader="作者", duration=1,
+        )
+        playlist = resolver._fetch_douyin_collection_playlist(current, "7658595418254626063")
+        self.assertEqual(len(playlist.entries), 2)
+        self.assertEqual(playlist.webpage_url, "https://www.douyin.com/collection/7658595418254626063/1")
+
+    def test_douyin_user_video_url_resolves_using_canonical_cache(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._short_video_item_cache = {}
+        resolver._short_video_item_cache_lock = __import__("threading").Lock()
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "")
+        item = {
+            "aweme_id": "7658595418254626063", "desc": "抖音视频", "author": {"nickname": "作者"},
+            "video": {"duration": 1000, "cover": {"url_list": ["https://img.example/x.jpg"]},
+                      "PlayAddrStruct": {"UrlList": ["https://www.douyin.com/aweme/v1/play/?item_id=1"], "Width": 576, "Height": 1024}},
+        }
+        resolver._short_video_item_store("douyin", item)
+        resolver.youtube = SimpleNamespace(resolve=lambda _url: self.fail("yt-dlp should not run"))
+        url = "https://www.douyin.com/user/sec_uid?vid=7658595418254626063"
+        video = resolver.resolve(url)
+        self.assertEqual(video.video_id, "douyin:7658595418254626063")
+        self.assertEqual(video.webpage_url, "https://www.douyin.com/video/7658595418254626063")
 
     def test_generic_playlist_entry_mapping(self) -> None:
         entry = YoutubeResolver._parse_generic_playlist_entry(
@@ -105,6 +196,53 @@ class DouyinTikTokSupportTests(unittest.TestCase):
         }
         videos, more = resolver._search_douyin("科技", 1, 10)
         self.assertEqual(videos[0].video_id, "douyin:123")
+        self.assertTrue(more)
+
+    def test_douyin_placeholder_without_cover_or_author_is_filtered(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        placeholder = {
+            "aweme_id": "100",
+            "desc": "100",
+            "author": {},
+            "video": {"duration": 0},
+        }
+        self.assertFalse(resolver._douyin_card_is_displayable(placeholder))
+
+    def test_douyin_origin_cover_is_recognized(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        item = {
+            "aweme_id": "101",
+            "desc": "clip",
+            "author": {},
+            "video": {
+                "duration": 1000,
+                "origin_cover": {"url_list": ["https://img.example/cover.jpg"]},
+            },
+        }
+        video = resolver._short_video_home_item(item, "douyin")
+        self.assertEqual(video.thumbnail, "https://img.example/cover.jpg")
+        self.assertTrue(resolver._douyin_card_is_displayable(item))
+
+    def test_douyin_search_filters_placeholder_cards(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._douyin_browse_min_interval_seconds = 0
+        resolver._request_short_video_json = lambda *_args: {
+            "data": [
+                {"aweme_info": {
+                    "aweme_id": "bad", "desc": "bad", "author": {}, "video": {},
+                }},
+                {"aweme_info": {
+                    "aweme_id": "good", "desc": "good", "author": {"nickname": "作者"},
+                    "video": {"cover": {"url_list": ["https://img/good.jpg"]}},
+                }},
+            ],
+            "cursor": 20,
+            "has_more": 1,
+            "log_pb": {"impr_id": "session"},
+        }
+
+        videos, more = resolver._search_douyin("测试", 1, 20)
+        self.assertEqual([video.video_id for video in videos], ["douyin:good"])
         self.assertTrue(more)
 
     def test_tiktok_search_fallback_filters_feed(self) -> None:
@@ -335,27 +473,31 @@ class DouyinTikTokSupportTests(unittest.TestCase):
         def request(_site, _endpoint, params, _referer):
             self.assertEqual(params["browser_name"], "Firefox")
             self.assertEqual(params["engine_name"], "Gecko")
-            cursor = int(params["cursor"])
-            calls.append(cursor)
+            refresh_index = int(params["refresh_index"])
+            calls.append(refresh_index)
+            start = (refresh_index - 1) * 20
             return {
                 "aweme_list": [{
-                    "aweme_id": str(cursor), "desc": "clip", "author": {"nickname": "A"},
+                    "aweme_id": str(start + index), "desc": "clip", "author": {"nickname": "A"},
                     "video": {"duration": 1000, "cover": {"url_list": ["x"]}},
-                }],
+                } for index in range(20)],
                 "has_more": 1,
             }
 
         resolver._request_short_video_json = request
         videos, more = resolver._fetch_short_video_home("douyin", 1, 56)
 
-        self.assertEqual(len(videos), 1)
+        self.assertEqual(len(videos), 20)
         self.assertTrue(more)
         self.assertEqual(len(calls), 1)
 
         page_two, more = resolver._fetch_short_video_home("douyin", 2, 56)
-        self.assertEqual(len(page_two), 1)
+        self.assertEqual(len(page_two), 20)
         self.assertTrue(more)
-        self.assertEqual(calls, [0, 1])
+        self.assertEqual(calls, [1, 2])
+        self.assertTrue({item.video_id for item in videos}.isdisjoint(
+            {item.video_id for item in page_two}
+        ))
 
     def test_douyin_home_signed_browser_aggregates_natural_scroll_batches(self) -> None:
         resolver = SiteResolver.__new__(SiteResolver)
@@ -364,17 +506,20 @@ class DouyinTikTokSupportTests(unittest.TestCase):
 
         class BrowserClient:
             def __init__(self) -> None:
-                self.requests: list[tuple[int, int]] = []
+                self.requests: list[tuple[int, int, int]] = []
 
-            def request_home_json(self, _endpoint, _params, _referer, *, page, target_count):
-                self.requests.append((page, target_count))
+            def request_home_json(
+                self, _endpoint, _params, _referer, *, page, target_count, refresh_index
+            ):
+                self.requests.append((page, target_count, refresh_index))
+                start = (refresh_index - 1) * 20
                 return {
                     "aweme_list": [{
-                        "aweme_id": str(index), "desc": "clip",
+                        "aweme_id": str(start + index), "desc": "clip",
                         "author": {"nickname": "A"},
                         "video": {"duration": 1000, "cover": {"url_list": ["x"]}},
                     } for index in range(target_count)],
-                    "cursor": page * 9,
+                    "next_refresh_index": refresh_index + 1,
                     "has_more": 1,
                 }
 
@@ -382,16 +527,26 @@ class DouyinTikTokSupportTests(unittest.TestCase):
         resolver._douyin_browser_client = browser
         videos, more = resolver._fetch_short_video_home("douyin", 1, 56)
 
-        self.assertEqual(len(videos), 18)
+        self.assertEqual(len(videos), 20)
         self.assertTrue(more)
-        self.assertEqual(browser.requests, [(1, 18)])
+        self.assertEqual(browser.requests, [(1, 20, 1)])
+        session = next(iter(resolver._douyin_home_sessions.values()))
+        self.assertEqual(session["pages"][1], (0, 20))
+
+        page_two, more = resolver._fetch_short_video_home("douyin", 2, 56)
+        self.assertEqual(len(page_two), 20)
+        self.assertTrue(more)
+        self.assertEqual(browser.requests, [(1, 20, 1), (2, 20, 2)])
+        self.assertTrue({item.video_id for item in videos}.isdisjoint(
+            {item.video_id for item in page_two}
+        ))
 
     def test_douyin_signed_browser_does_not_fall_back_to_unsigned_http(self) -> None:
         resolver = SiteResolver.__new__(SiteResolver)
 
         class BrowserClient:
             @staticmethod
-            def request_json(_endpoint, _params, _referer):
+            def request_json(_endpoint, _params, _referer, **_kwargs):
                 raise RuntimeError("signed request failed")
 
         resolver._douyin_browser_client = BrowserClient()
@@ -399,6 +554,97 @@ class DouyinTikTokSupportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "signed request failed"):
             resolver._request_douyin_browse_json("https://example", {}, "https://www.douyin.com/")
+
+    def test_douyin_home_never_returns_an_incomplete_page(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._config_fingerprint = lambda _site: "incomplete"
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "firefox:profile")
+
+        class BrowserClient:
+            calls = 0
+
+            def request_home_json(
+                self, _endpoint, _params, _referer, *, page, target_count, refresh_index
+            ):
+                self.calls += 1
+                start = (self.calls - 1) * 7
+                return {
+                    "aweme_list": [{
+                        "aweme_id": str(start + index), "desc": "clip",
+                        "author": {"nickname": "A"},
+                        "video": {"duration": 1000, "cover": {"url_list": ["x"]}},
+                    } for index in range(7)],
+                    "next_refresh_index": refresh_index + 1,
+                    "has_more": 1,
+                }
+
+        browser = BrowserClient()
+        resolver._douyin_browser_client = browser
+
+        with self.assertRaisesRegex(RuntimeError, "尚未达到完整 20 条"):
+            resolver._fetch_short_video_home("douyin", 1, 56)
+        self.assertEqual(browser.calls, 2)
+
+        videos, more = resolver._fetch_short_video_home("douyin", 1, 56)
+        self.assertEqual(len(videos), 20)
+        self.assertTrue(more)
+        self.assertEqual(browser.calls, 3)
+
+    def test_douyin_home_placeholder_does_not_fill_page_capacity(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._config_fingerprint = lambda _site: "placeholder"
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "firefox:profile")
+
+        class BrowserClient:
+            def request_home_json(
+                self, _endpoint, _params, _referer, *, page, target_count, refresh_index
+            ):
+                placeholders = [{
+                    "aweme_id": f"bad-{index}", "desc": str(index), "author": {}, "video": {},
+                } for index in range(5)]
+                valid = [{
+                    "aweme_id": f"good-{index}", "desc": "clip", "author": {"nickname": "作者"},
+                    "video": {"cover": {"url_list": [f"https://img/{index}.jpg"]}},
+                } for index in range(20)]
+                return {
+                    "aweme_list": placeholders + valid,
+                    "next_refresh_index": refresh_index + 1,
+                    "has_more": 1,
+                }
+
+        resolver._douyin_browser_client = BrowserClient()
+        videos, _more = resolver._fetch_short_video_home("douyin", 1, 56)
+        self.assertEqual(len(videos), 20)
+        self.assertTrue(all(video.video_id.startswith("douyin:good-") for video in videos))
+
+    def test_douyin_home_stops_after_ten_complete_pages(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._config_fingerprint = lambda _site: "limit"
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "firefox:profile")
+
+        class BrowserClient:
+            def request_home_json(
+                self, _endpoint, _params, _referer, *, page, target_count, refresh_index
+            ):
+                start = (refresh_index - 1) * 40
+                return {
+                    "aweme_list": [{
+                        "aweme_id": str(start + index), "desc": "clip",
+                        "author": {"nickname": "A"},
+                        "video": {"duration": 1000, "cover": {"url_list": ["x"]}},
+                    } for index in range(40)],
+                    "next_refresh_index": refresh_index + 1,
+                    "has_more": 1,
+                }
+
+        resolver._douyin_browser_client = BrowserClient()
+        for page in range(1, 11):
+            videos, more = resolver._fetch_short_video_home("douyin", page, 56)
+            self.assertEqual(len(videos), 20)
+            self.assertEqual(more, page < 10)
+
+        with self.assertRaisesRegex(RuntimeError, "最多浏览 10 页"):
+            resolver._fetch_short_video_home("douyin", 11, 56)
 
     def test_tiktok_video_uses_secuid_and_cached_creator_entries(self) -> None:
         resolver = SiteResolver.__new__(SiteResolver)
@@ -467,6 +713,52 @@ class DouyinTikTokSupportTests(unittest.TestCase):
         self.assertEqual(video.video_id, "tiktok:456")
         self.assertIn("576p", video.qualities)
         self.assertEqual(video.qualities["576p"].video_url, "https://cdn/t.mp4")
+
+    def test_tiktok_cached_playback_uses_configured_browser_user_agent(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._short_video_item_cache = {}
+        resolver._short_video_item_cache_lock = __import__("threading").Lock()
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "firefox:profile")
+        item = {
+            "id": "457", "desc": "TikTok clip", "author": {"uniqueId": "user"},
+            "video": {"duration": 9, "PlayAddrStruct": {
+                "UrlList": ["https://www.tiktok.com/aweme/v1/play/?item_id=457"],
+                "Width": 576, "Height": 1024,
+            }},
+        }
+        video = resolver._video_info_from_short_video_item(item, "tiktok", "")
+        self.assertIn("Firefox/142.0", video.http_headers["User-Agent"])
+
+    def test_tiktok_cache_recovers_id_after_url_alias_eviction(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._short_video_item_cache = {}
+        resolver._short_video_item_cache_lock = __import__("threading").Lock()
+        item = {
+            "id": "456", "desc": "TikTok clip", "author": {"unique_id": "snake_user"},
+            "video": {"duration": 9, "cover": "https://img/t.jpg",
+                      "PlayAddrStruct": {"UrlList": ["https://cdn/t.mp4"], "Width": 576, "Height": 1024}},
+        }
+        resolver._short_video_item_store("tiktok", item)
+        # Simulate eviction of the URL alias while the raw ID alias remains.
+        resolver._short_video_item_cache.pop("tiktok|https://www.tiktok.com/@snake_user/video/456", None)
+        cached = resolver._short_video_item_lookup("https://www.tiktok.com/@snake_user/video/456")
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached[1]["id"], "456")
+
+    def test_tiktok_resolve_recovers_cache_miss_before_ytdlp(self) -> None:
+        resolver = SiteResolver.__new__(SiteResolver)
+        resolver._short_video_item_cache = {}
+        resolver._short_video_item_cache_lock = __import__("threading").Lock()
+        resolver.config = SimpleNamespace(cookie_browser_for_site=lambda _site: "")
+        item = {
+            "id": "789", "desc": "Recovered", "author": {"uniqueId": "user"},
+            "video": {"duration": 2, "playAddr": {"UrlList": ["https://cdn/recovered.mp4"], "Width": 576, "Height": 1024}},
+        }
+        resolver._search_tiktok = lambda *_args: (resolver._short_video_item_store("tiktok", item), False)[1]
+        resolver.youtube = SimpleNamespace(resolve=lambda _url: self.fail("yt-dlp should not run"))
+        video = resolver.resolve("https://www.tiktok.com/@user/video/789")
+        self.assertEqual(video.title, "Recovered")
+        self.assertIn("576p", video.qualities)
 
     def test_short_video_playback_prefers_authenticated_site_gateway(self) -> None:
         resolver = SiteResolver.__new__(SiteResolver)

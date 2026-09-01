@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QCoreApplication, QPoint, QRect, QSize, QThreadPool, QTimer, QUrl, Qt, Slot
-from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QIcon
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
@@ -55,6 +55,7 @@ from resolver.site_resolver import SiteResolver
 from services.site_registry import SITE_KEYS, SITE_LABELS, site_for_url
 from services.config_service import ConfigService
 from services.douyin_browser_service import DouyinBrowserService
+from services.xiaohongshu_browser_service import XiaohongshuBrowserService
 from services.network_quality_service import NetworkMeasurement, NetworkMeasurementCache, select_quality_for_bandwidth
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
 from services.runtime_install_service import NODE_TRUSTED_HOSTS, RuntimeInstallService
@@ -63,6 +64,8 @@ from services.update_service import REPO_URL, UpdateCheckResult, UpdateService, 
 from ui.about_page import AboutPage
 from ui.cast_dialog import DlnaCastDialog
 from ui.download_page import DownloadPage
+from ui.douyin_verification_dialog import DouyinVerificationDialog
+from ui.xiaohongshu_verification_dialog import XiaohongshuVerificationDialog
 from ui.favorite_page import FavoritePage
 from ui.history_page import HistoryPage
 from ui.home_page import HomePage
@@ -82,6 +85,7 @@ from ui.picture_in_picture import (
 )
 from ui.playlist_page import PlaylistPage
 from ui.settings_page import SettingsPage
+from ui.startup_cookie_guide_dialog import StartupCookieGuideDialog
 from ui.toolbar import PlayerToolbar
 from ui.toast import Toast
 from ui.url_dialog import UrlPlayDialog
@@ -273,6 +277,8 @@ class MainWindow(QMainWindow):
         self.resolver = SiteResolver(self.config)
         self.douyin_browser_service = DouyinBrowserService(self.config, self)
         self.resolver.set_douyin_browser_client(self.douyin_browser_service)
+        self.xiaohongshu_browser_service = XiaohongshuBrowserService(self.config, self)
+        self.resolver.set_xiaohongshu_browser_client(self.xiaohongshu_browser_service)
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
@@ -325,6 +331,8 @@ class MainWindow(QMainWindow):
         self._network_measurements = NetworkMeasurementCache()
         self._creator_playlist_generation = 0
         self._creator_playlist_workers: dict[tuple[int, str], CreatorVideosWorker] = {}
+        self._creator_playlist_pending_video_id = ""
+        self._creator_playlist_pending_generation = 0
         # 左侧「合集列表」：与右侧播放列表各自独立一套状态，互不覆盖。
         self.current_collection: PlaylistInfo | None = None
         self.current_collection_index = -1
@@ -382,6 +390,12 @@ class MainWindow(QMainWindow):
         self._browse_source = self.config.default_home_source()
         # 每发起一轮首页/搜索加载就自增，用来丢弃切换站点后才回来的旧结果。
         self._browse_generation = 0
+        self._browse_source_switch_frozen = False
+        self._douyin_verification_dialog: DouyinVerificationDialog | None = None
+        self._douyin_verification_retry_context: tuple[str, str, int, int] | None = None
+        self._xiaohongshu_verification_dialog: XiaohongshuVerificationDialog | None = None
+        self._xiaohongshu_verification_retry_context: tuple[str, str, int, int] | None = None
+        self._startup_cookie_guide_dialog: StartupCookieGuideDialog | None = None
         self._subtitle_request_id = 0
         self._pending_recent_url = ""
         self._last_update_result: UpdateCheckResult | None = None
@@ -434,6 +448,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.load_home)
         QTimer.singleShot(1200, self._maybe_prompt_ffmpeg_install)
         QTimer.singleShot(300, self._start_cookie_probe)
+        QTimer.singleShot(700, self._show_startup_cookie_guide)
         if is_root_user():
             QTimer.singleShot(0, self._show_root_session_warning)
         self.top_bar_widget.set_topmost_state(self._is_topmost)
@@ -570,6 +585,8 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_signals(self) -> None:
+        self.douyin_browser_service.verification_required.connect(self._show_douyin_verification)
+        self.xiaohongshu_browser_service.verification_required.connect(self._show_xiaohongshu_verification)
         self.top_bar_widget.search_requested.connect(self._toolbar_search_requested)
         self.top_bar_widget.source_changed.connect(self._set_browse_source)
         self.play_url_button.clicked.connect(self._show_play_url_dialog)
@@ -603,6 +620,9 @@ class MainWindow(QMainWindow):
         self.player_page.picture_in_picture_requested.connect(self._toggle_picture_in_picture)
         self.player_page.picture_in_picture_mouse_event.connect(self._handle_picture_in_picture_mouse_event)
         self.player_page.picture_in_picture_lock_changed.connect(self._set_picture_in_picture_locked)
+        self.player_page.playlist_loading_hint_requested.connect(
+            lambda: self.toast.show_message("播放列表加载中，请稍候")
+        )
         self.player_page.download_requested.connect(self._download_current_video)
         self.player_page.favorite_requested.connect(self._favorite_current_video)
         self.player_page.playlist_entry_requested.connect(self._play_playlist_index)
@@ -747,6 +767,21 @@ class MainWindow(QMainWindow):
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
 
+        # 首页/搜索在后台加载时，前台播放不应被其迟到回调覆盖为失败状态。
+        # 使当前浏览代次失效，并释放抖音/小红书的浏览器请求；返回首页时
+        # 复用已有完整缓存或重新加载，不展示被中断任务的错误。
+        if getattr(self.home_page, "is_loading", lambda: False)():
+            self._browse_generation += 1
+            self.home_page.set_loading(False)
+            for service in (
+                getattr(self, "douyin_browser_service", None),
+                getattr(self, "xiaohongshu_browser_service", None),
+            ):
+                cancel = getattr(service, "cancel_home_requests", None)
+                if callable(cancel):
+                    cancel()
+            logger.info("home loading interrupted by foreground playback")
+
         self._flush_playback_resume()
         self._resume_media_key = ""
         kind = self.resolver.detect_url_kind(target)
@@ -788,9 +823,31 @@ class MainWindow(QMainWindow):
             reason,
             self._pending_quality_hint,
         )
+        return self._playback_request_id
+
+    def _show_startup_cookie_guide(self) -> None:
+        if self._shutting_down or bool(self.config.get("ui.hide_startup_cookie_guide", False)):
+            return
+        dialog = StartupCookieGuideDialog(self.config, self)
+        dialog.open_settings_requested.connect(self._open_cookie_settings_from_guide)
+        dialog.finished.connect(self._startup_cookie_guide_finished)
+        self._startup_cookie_guide_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _open_cookie_settings_from_guide(self) -> None:
+        page = self.settings_page
+        self.stack.setCurrentWidget(page)
+        page.focus_cookie_settings(self._browse_source)
+
+    def _startup_cookie_guide_finished(self, _result: int) -> None:
+        dialog = self._startup_cookie_guide_dialog
+        self._startup_cookie_guide_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
         self._pending_smart_video = None
         self._pending_smart_kbps = None
-        return self._playback_request_id
 
     def _quality_hint(self) -> PlaybackQualityHint | None:
         if not self.current_video or not self.current_quality_label:
@@ -870,6 +927,9 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.home_page)
         self._render_home(self._home_cache, page, has_next)
         self.home_page.set_loading(False)
+        unfreeze = getattr(self, "_set_browse_source_switch_frozen", None)
+        if callable(unfreeze):
+            unfreeze(False)
 
     def _start_home_load(self, page: int, *, force_refresh: bool = False) -> None:
         source = self._browse_source
@@ -884,22 +944,34 @@ class MainWindow(QMainWindow):
                 self._apply_home_cache(videos, cached_page, has_next, reason="page")
                 return
         logger.info("home load requested page=%s source=%s", target_page, source)
-        self._home_page = target_page
         self._browse_generation += 1
         generation = self._browse_generation
         self.stack.setCurrentWidget(self.home_page)
         source_label = self.resolver.home_source_label(source)
-        self.home_page.set_home_context(self._home_page, False, source_label=source_label)
-        self.home_page.set_loading(True, f"正在获取 {source_label} 首页内容（第 {self._home_page} 页），请稍候...")
+        if not self._home_cache:
+            self.home_page.set_home_context(target_page, False, source_label=source_label)
+        if source == "douyin":
+            loading_message = (
+                f"正在加载抖音首页第 {target_page} 页：需要初始化浏览器签名、读取登录状态，"
+                "并从多个推荐批次中去重聚合 20 条可播放视频，通常会比其它站点更慢，请耐心等待..."
+            )
+        elif source == "xiaohongshu":
+            loading_message = (
+                f"正在加载小红书视频首页第 {target_page} 页：需要启动浏览器安全环境、读取登录状态，"
+                "并滚动视频频道聚合可播放内容，首次加载通常需要较长时间，请耐心等待..."
+            )
+        else:
+            loading_message = f"正在获取 {source_label} 首页内容（第 {target_page} 页），请稍候..."
+        self.home_page.set_loading(True, loading_message)
         worker = HomeWorker(
             self.resolver,
-            page=self._home_page,
+            page=target_page,
             page_size=56,
             force_refresh=force_refresh,
             source=source,
         )
-        worker.signals.success.connect(partial(self._home_loaded, generation))
-        worker.signals.error.connect(partial(self._home_failed, generation))
+        worker.signals.success.connect(partial(self._home_loaded, generation, target_page))
+        worker.signals.error.connect(partial(self._home_failed, generation, target_page))
         worker.signals.finished.connect(partial(self._browse_load_finished, generation))
         self._start_worker(worker)
 
@@ -955,10 +1027,18 @@ class MainWindow(QMainWindow):
         搜索意图（文本本身保留，用户随时可以再点搜索）。首页结果按站点留档，切回来能直接复用。
         """
         normalized = SiteResolver.normalize_source(source)
-        if not normalized or normalized == self._browse_source:
+        if not normalized or normalized == self._browse_source or getattr(self, "_browse_source_switch_frozen", False):
             return
+        freeze = getattr(self, "_set_browse_source_switch_frozen", None)
+        if callable(freeze):
+            freeze(True)
         # 先把旧站点的首页结果留档，再切换。
         self._store_home_state(self._browse_source)
+        clear_home = getattr(self.home_page, "clear_videos", None)
+        if callable(clear_home):
+            label_getter = getattr(self.resolver, "home_source_label", None)
+            label = label_getter(normalized) if callable(label_getter) else normalized
+            clear_home(source_label=label, page=1)
         self._browse_source = normalized
         logger.info("browse source switched to %s mode=%s", normalized, self._browse_mode)
         self._home_cache = []
@@ -979,18 +1059,165 @@ class MainWindow(QMainWindow):
         # 站点切换后旧 worker 仍会跑完，它的 finished 不该把新一轮的加载态关掉。
         if generation == self._browse_generation:
             self.home_page.set_loading(False)
+            pending = getattr(self, "_browse_verification_pending_for_current_source", lambda: False)()
+            if not pending:
+                unfreeze = getattr(self, "_set_browse_source_switch_frozen", None)
+                if callable(unfreeze):
+                    unfreeze(False)
+
+    def _set_browse_source_switch_frozen(self, frozen: bool) -> None:
+        frozen = bool(frozen)
+        self._browse_source_switch_frozen = frozen
+        setter = getattr(self.top_bar_widget, "set_source_switch_frozen", None)
+        if callable(setter):
+            setter(frozen)
+        logger.info("browse source switch %s", "frozen" if frozen else "unfrozen")
+
+    def _browse_verification_pending_for_current_source(self) -> bool:
+        if self._browse_source == "douyin":
+            return bool(self.douyin_browser_service.verification_pending())
+        if self._browse_source == "xiaohongshu":
+            return bool(self.xiaohongshu_browser_service.verification_pending())
+        return False
 
     @staticmethod
     def _site_label_for_url(url: str) -> str:
-        return {"bilibili": "Bilibili", "youtube": "YouTube", "douyin": "抖音", "tiktok": "TikTok"}.get(
-            site_for_url(url), "YouTube"
-        )
+        return SITE_LABELS.get(site_for_url(url), "YouTube")
 
     def _refresh_home_page(self) -> None:
         if self.home_page.mode() == "search" and self._search_keyword:
             self._start_search(self._search_keyword, self.home_page.page(), force_refresh=True)
             return
         self._start_home_load(self.home_page.page(), force_refresh=True)
+
+    @Slot(str, str)
+    def _show_douyin_verification(self, url: str, reason: str) -> None:
+        if self._shutting_down:
+            return
+        if self._browse_source == "douyin":
+            mode = self._browse_mode
+            keyword = self._search_keyword if mode == "search" else ""
+            page = self._search_page if mode == "search" else self._home_page
+            self._douyin_verification_retry_context = (mode, keyword, page, self._browse_generation)
+        else:
+            self._douyin_verification_retry_context = None
+
+        dialog = self._douyin_verification_dialog
+        if dialog is not None:
+            dialog.update_request(url, reason)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+
+        dialog = DouyinVerificationDialog(self.douyin_browser_service, url, reason, self)
+        dialog.continue_requested.connect(self._complete_douyin_verification)
+        dialog.cancel_requested.connect(self._cancel_douyin_verification)
+        dialog.finished.connect(self._douyin_verification_finished)
+        self._douyin_verification_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        logger.info("douyin verification window shown mode=%s page=%s", self._browse_mode, self.home_page.page())
+
+    def _complete_douyin_verification(self) -> None:
+        context = self._douyin_verification_retry_context
+        self._douyin_verification_retry_context = None
+        self.douyin_browser_service.complete_verification()
+        if context is None:
+            self.toast.show_message("验证状态已更新")
+            return
+        mode, keyword, page, generation = context
+        if self._browse_source != "douyin" or generation != self._browse_generation:
+            self.toast.show_message("验证完成；当前页面已变化，请按需重新加载抖音内容")
+            return
+
+        def retry() -> None:
+            if self._shutting_down or self._browse_source != "douyin":
+                return
+            if mode == "search" and keyword:
+                self._search_keyword = keyword
+                self._search_page = page
+                self._start_search(keyword, page, force_refresh=True)
+            else:
+                self._home_page = page
+                self._start_home_load(page, force_refresh=True)
+
+        QTimer.singleShot(0, retry)
+        logger.info("douyin verification completed; retry scheduled mode=%s page=%s", mode, page)
+
+    def _cancel_douyin_verification(self) -> None:
+        self._douyin_verification_retry_context = None
+        self.douyin_browser_service.cancel_verification()
+        logger.info("douyin verification cancelled")
+
+    def _douyin_verification_finished(self, _result: int) -> None:
+        dialog = self._douyin_verification_dialog
+        self._douyin_verification_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    @Slot(str, str)
+    def _show_xiaohongshu_verification(self, url: str, reason: str) -> None:
+        if self._shutting_down:
+            return
+        if self._browse_source == "xiaohongshu":
+            mode = self._browse_mode
+            keyword = self._search_keyword if mode == "search" else ""
+            page = self._search_page if mode == "search" else self._home_page
+            self._xiaohongshu_verification_retry_context = (mode, keyword, page, self._browse_generation)
+        else:
+            self._xiaohongshu_verification_retry_context = None
+        dialog = self._xiaohongshu_verification_dialog
+        if dialog is not None:
+            dialog.update_request(url, reason)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        dialog = XiaohongshuVerificationDialog(self.xiaohongshu_browser_service, url, reason, self)
+        dialog.continue_requested.connect(self._complete_xiaohongshu_verification)
+        dialog.cancel_requested.connect(self._cancel_xiaohongshu_verification)
+        dialog.finished.connect(self._xiaohongshu_verification_finished)
+        self._xiaohongshu_verification_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _complete_xiaohongshu_verification(self) -> None:
+        context = self._xiaohongshu_verification_retry_context
+        self._xiaohongshu_verification_retry_context = None
+        self.xiaohongshu_browser_service.complete_verification()
+        if context is None:
+            self.toast.show_message("验证状态已更新")
+            return
+        mode, keyword, page, generation = context
+        if self._browse_source != "xiaohongshu" or generation != self._browse_generation:
+            self.toast.show_message("验证完成；当前页面已变化，请按需重新加载小红书内容")
+            return
+
+        def retry() -> None:
+            if self._shutting_down or self._browse_source != "xiaohongshu":
+                return
+            if mode == "search" and keyword:
+                self._search_keyword = keyword
+                self._search_page = page
+                self._start_search(keyword, page, force_refresh=True)
+            else:
+                self._home_page = page
+                self._start_home_load(page, force_refresh=True)
+
+        QTimer.singleShot(0, retry)
+
+    def _cancel_xiaohongshu_verification(self) -> None:
+        self._xiaohongshu_verification_retry_context = None
+        self.xiaohongshu_browser_service.cancel_verification()
+
+    def _xiaohongshu_verification_finished(self, _result: int) -> None:
+        dialog = self._xiaohongshu_verification_dialog
+        self._xiaohongshu_verification_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
 
     def _is_stale_browse_result(self, generation: int) -> bool:
         """切换站点后，先前那一轮的结果要丢掉，别把已经换掉的页面又覆盖回去。"""
@@ -1000,20 +1227,29 @@ class MainWindow(QMainWindow):
         return True
 
     @_skip_after_shutdown
-    def _home_loaded(self, generation: int, videos: list[HomeVideo], has_next: bool) -> None:
+    def _home_loaded(
+        self, generation: int, target_page: int, videos: list[HomeVideo], has_next: bool
+    ) -> None:
         if self._is_stale_browse_result(generation):
             return
-        logger.info("home loaded page=%s count=%s has_next=%s", self._home_page, len(videos), has_next)
+        self._home_page = target_page
+        logger.info("home loaded page=%s count=%s has_next=%s", target_page, len(videos), has_next)
         self._home_cache = list(videos)
         self._home_has_next = has_next
         self._store_home_state(self._browse_source)
-        self._render_home(self._home_cache, self._home_page, has_next)
+        self._render_home(self._home_cache, target_page, has_next)
 
     @_skip_after_shutdown
-    def _home_failed(self, generation: int, message: str) -> None:
+    def _home_failed(self, generation: int, target_page: int, message: str) -> None:
         if self._is_stale_browse_result(generation):
             return
-        logger.error("home load failed: %s", message)
+        logger.error("home load failed page=%s: %s", target_page, message)
+        if self._browse_source == "douyin" and self.douyin_browser_service.verification_pending():
+            self.home_page.status_label.setText("抖音需要完成安全验证，请在验证窗口中操作")
+            return
+        if self._browse_source == "xiaohongshu" and self.xiaohongshu_browser_service.verification_pending():
+            self.home_page.status_label.setText("小红书需要完成安全验证，请在验证窗口中操作")
+            return
         self.home_page.set_error(message)
 
     @_skip_after_shutdown
@@ -1041,6 +1277,12 @@ class MainWindow(QMainWindow):
         if self._is_stale_browse_result(generation):
             return
         logger.error("search failed keyword=%s page=%s: %s", self._search_keyword, self._search_page, message)
+        if self._browse_source == "douyin" and self.douyin_browser_service.verification_pending():
+            self.home_page.status_label.setText("抖音需要完成安全验证，请在验证窗口中操作")
+            return
+        if self._browse_source == "xiaohongshu" and self.xiaohongshu_browser_service.verification_pending():
+            self.home_page.status_label.setText("小红书需要完成安全验证，请在验证窗口中操作")
+            return
         self.home_page.set_error(message)
 
     @_skip_after_shutdown
@@ -1692,13 +1934,18 @@ class MainWindow(QMainWindow):
             except TypeError:
                 mode = self.config.default_quality_tier()
         if mode != "smart":
-            return select_quality_by_tier(video.qualities, mode)
+            return MainWindow._prefer_compatible_xiaohongshu_quality(
+                video,
+                select_quality_by_tier(video.qualities, mode),
+            )
         if self._pending_smart_kbps is not None:
             kbps = self._pending_smart_kbps
             self._pending_smart_kbps = None
             if kbps < 0:
-                return select_quality_by_tier(video.qualities, "medium")
-            return select_quality_for_bandwidth(video.qualities, kbps)
+                selected = select_quality_by_tier(video.qualities, "medium")
+            else:
+                selected = select_quality_for_bandwidth(video.qualities, kbps)
+            return MainWindow._prefer_compatible_xiaohongshu_quality(video, selected)
         candidate = max(
             video.qualities.values(),
             key=lambda quality: (int(quality.height or 0), int(quality.fps or 0), float(quality.tbr or 0)),
@@ -1709,9 +1956,39 @@ class MainWindow(QMainWindow):
         _proxy_label, proxy = self.config.effective_proxy()
         cached = self._network_measurements.get(site, candidate.video_url, proxy)
         if cached is not None:
-            return select_quality_for_bandwidth(video.qualities, cached.kbps)
+            return MainWindow._prefer_compatible_xiaohongshu_quality(
+                video,
+                select_quality_for_bandwidth(video.qualities, cached.kbps),
+            )
         self._start_network_probe(video, candidate.video_url, site, proxy)
         return None
+
+    @staticmethod
+    def _prefer_compatible_xiaohongshu_quality(
+        video: VideoInfo,
+        selected: VideoQuality | None,
+    ) -> VideoQuality | None:
+        """自动选择时避开安装版常见的 HEVC 黑屏，手动切换仍可使用 HEVC。"""
+        if selected is None or str(video.source_site or "").strip().lower() != "xiaohongshu":
+            return selected
+        codec = str(selected.vcodec or "").strip().lower()
+        if not any(token in codec for token in ("hevc", "h265", "hev1")):
+            return selected
+        h264 = [
+            quality
+            for quality in video.qualities.values()
+            if any(token in str(quality.vcodec or "").strip().lower() for token in ("h264", "avc1"))
+        ]
+        if not h264:
+            return selected
+        return max(
+            h264,
+            key=lambda quality: (
+                int(quality.height or 0),
+                int(quality.fps or 0),
+                float(quality.tbr or 0),
+            ),
+        )
 
     def _start_network_probe(self, video: VideoInfo, url: str, site: str, proxy: str) -> None:
         request_id = self._playback_request_id
@@ -2694,15 +2971,28 @@ class MainWindow(QMainWindow):
             self._start_dlna_action(self._dlna_device, "set_volume", self._dlna_pending_volume)
 
     def _schedule_creator_playlist(self, video: VideoInfo) -> None:
-        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok"}:
+        set_loading = getattr(self, "_set_creator_playlist_loading", None)
+        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok", "xiaohongshu"}:
+            if callable(set_loading):
+                set_loading(False)
             return
         if not (video.creator_id or video.channel_id or video.creator_url):
             logger.info("creator playlist skipped; video has no creator identity id=%s", video.video_id)
+            if callable(set_loading):
+                set_loading(False)
             self.toast.show_message("无法识别视频制作者，未加载作者视频列表")
             return
-        self._creator_playlist_generation += 1
+        invalidate = getattr(self, "_invalidate_creator_playlist_request", None)
+        if callable(invalidate):
+            invalidate()
+        else:
+            self._creator_playlist_generation += 1
         generation = self._creator_playlist_generation
         video_id = video.video_id
+        self._creator_playlist_pending_video_id = video_id
+        self._creator_playlist_pending_generation = generation
+        if callable(set_loading):
+            set_loading(True)
         logger.info(
             "creator playlist scheduled generation=%s site=%s video=%s creator=%s",
             generation,
@@ -2745,9 +3035,15 @@ class MainWindow(QMainWindow):
                 logger.info("creator playlist result ignored as stale generation=%s video=%s", generation, video_id)
                 return
             if playlist is None or len(playlist.entries) <= 1:
+                finish = getattr(self, "_finish_creator_playlist_loading", None)
+                if callable(finish):
+                    finish(generation, video_id)
                 logger.info("creator playlist has no additional entries generation=%s video=%s", generation, video_id)
                 self.toast.show_message("未找到该制作者的其他可用视频")
                 return
+            finish = getattr(self, "_finish_creator_playlist_loading", None)
+            if callable(finish):
+                finish(generation, video_id)
             current_index = self._find_playlist_index(playlist, video_id)
             self._activate_playlist(
                 playlist,
@@ -2773,6 +3069,9 @@ class MainWindow(QMainWindow):
         if not self._is_creator_playlist_request_current(generation, video_id):
             logger.debug("stale creator playlist failure ignored generation=%s video=%s", generation, video_id)
             return
+        finish = getattr(self, "_finish_creator_playlist_loading", None)
+        if callable(finish):
+            finish(generation, video_id)
         logger.warning("creator playlist failed generation=%s video=%s: %s", generation, video_id, message)
         self.toast.show_message("作者视频列表加载失败，当前视频继续播放")
 
@@ -2780,6 +3079,9 @@ class MainWindow(QMainWindow):
     @_skip_after_shutdown
     def _creator_playlist_worker_finished(self, generation: int, video_id: str) -> None:
         self._creator_playlist_workers.pop((generation, video_id), None)
+        finish = getattr(self, "_finish_creator_playlist_loading", None)
+        if callable(finish):
+            finish(generation, video_id)
         logger.info("creator playlist worker finished generation=%s video=%s", generation, video_id)
 
     def _is_creator_playlist_request_current(self, generation: int, video_id: str) -> bool:
@@ -2792,12 +3094,40 @@ class MainWindow(QMainWindow):
 
     def _invalidate_creator_playlist_request(self) -> None:
         self._creator_playlist_generation += 1
+        self._creator_playlist_pending_video_id = ""
+        self._creator_playlist_pending_generation = 0
+        self._set_creator_playlist_loading(False)
+
+    def _set_creator_playlist_loading(self, loading: bool) -> None:
+        page = getattr(self, "player_page", None)
+        setter = getattr(page, "set_playlist_loading", None)
+        if callable(setter):
+            setter(bool(loading))
+
+    def _finish_creator_playlist_loading(self, generation: int, video_id: str) -> None:
+        if (
+            generation != self._creator_playlist_pending_generation
+            or video_id != self._creator_playlist_pending_video_id
+        ):
+            return
+        self._creator_playlist_pending_video_id = ""
+        self._creator_playlist_pending_generation = 0
+        self._set_creator_playlist_loading(False)
 
     def _settings_saved(self) -> None:
         logger.info("settings saved")
         self._invalidate_creator_playlist_request()
         self.mpv.apply_network_options()
         self.resolver = SiteResolver(self.config)
+        douyin_setter = getattr(self.resolver, "set_douyin_browser_client", None)
+        if callable(douyin_setter):
+            douyin_setter(getattr(self, "douyin_browser_service", None))
+        xhs_setter = getattr(self.resolver, "set_xiaohongshu_browser_client", None)
+        if callable(xhs_setter):
+            xhs_setter(getattr(self, "xiaohongshu_browser_service", None))
+        reload_xhs = getattr(getattr(self, "xiaohongshu_browser_service", None), "reload_settings", None)
+        if callable(reload_xhs):
+            reload_xhs()
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
@@ -3992,7 +4322,14 @@ class MainWindow(QMainWindow):
             if self._picture_in_picture:
                 self._persist_picture_in_picture_state()
             self._shutting_down = True
+            if self._douyin_verification_dialog is not None:
+                self._douyin_verification_dialog.close()
+            if self._xiaohongshu_verification_dialog is not None:
+                self._xiaohongshu_verification_dialog.close()
+            if self._startup_cookie_guide_dialog is not None:
+                self._startup_cookie_guide_dialog.close()
             self.douyin_browser_service.shutdown()
+            self.xiaohongshu_browser_service.shutdown()
             self._invalidate_creator_playlist_request()
             self._dlna_position_timer.stop()
             self._dlna_volume_timer.stop()

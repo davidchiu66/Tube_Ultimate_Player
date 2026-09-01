@@ -39,6 +39,9 @@
     },
     "tiktok": {
       "file": ""
+    },
+    "xiaohongshu": {
+      "file": ""
     }
   },
   "cache": {
@@ -88,6 +91,7 @@
   },
   "ui": {
     "theme": "dark",
-    "language": "zh-CN"
+    "language": "zh-CN",
+    "hide_startup_cookie_guide": false
   }
 }

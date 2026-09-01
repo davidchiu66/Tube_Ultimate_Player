@@ -56,6 +56,17 @@ class MpvLoadAutoplayTests(unittest.TestCase):
 
 
 class MpvOptionCompatibilityTests(unittest.TestCase):
+    def test_network_options_clear_referer_from_previous_media(self) -> None:
+        properties: list[tuple[str, str]] = []
+        state = SimpleNamespace(
+            config=SimpleNamespace(effective_proxy=lambda: ("", "")),
+            set_property_string=lambda name, value: properties.append((name, value)),
+        )
+
+        MpvPlayer.apply_network_options(state, {"User-Agent": "Mozilla/5.0"})
+
+        self.assertIn(("referrer", ""), properties)
+
     def test_missing_optional_fast_profile_does_not_abort_initialization(self) -> None:
         options: list[str] = []
 

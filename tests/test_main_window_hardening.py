@@ -143,6 +143,105 @@ class DefaultQualityTests(unittest.TestCase):
 
         self.assertEqual(result.label, "720p")
 
+    def test_xiaohongshu_automatic_quality_prefers_h264_when_hevc_is_highest(self) -> None:
+        video = VideoInfo(
+            video_id="xiaohongshu:note",
+            source_site="xiaohongshu",
+            title="小红书视频",
+            qualities={
+                "2160p": VideoQuality(
+                    label="2160p", width=2160, height=3840, fps=30,
+                    vcodec="hevc", acodec="aac", ext="mp4", format_id="hevc",
+                    video_url="https://example.test/hevc.mp4",
+                ),
+                "1080p": VideoQuality(
+                    label="1080p", width=1080, height=1920, fps=30,
+                    vcodec="h264", acodec="aac", ext="mp4", format_id="h264",
+                    video_url="https://example.test/h264.mp4",
+                ),
+            },
+        )
+
+        selected = MainWindow._prefer_compatible_xiaohongshu_quality(video, video.qualities["2160p"])
+
+        self.assertEqual(selected.label, "1080p")
+
+
+class PlaybackRequestTests(unittest.TestCase):
+    def test_begin_playback_request_returns_current_request_id(self) -> None:
+        state = SimpleNamespace(
+            _playback_request_id=0,
+            _pending_quality_reason="",
+            _pending_quality_hint=None,
+            _playback_request_context=None,
+            _quality_hint=lambda: None,
+        )
+
+        request_id = MainWindow._begin_playback_request(state, "https://example.test/video", reason="direct")
+
+        self.assertEqual(request_id, 1)
+        self.assertEqual(state._playback_request_id, request_id)
+
+    def test_xiaohongshu_video_is_eligible_for_creator_playlist(self) -> None:
+        video = VideoInfo(
+            video_id="xiaohongshu:note",
+            title="视频",
+            source_site="xiaohongshu",
+            creator_id="user-id",
+        )
+        state = SimpleNamespace(
+            _creator_playlist_generation=0,
+            _creator_playlist_workers={},
+            current_video=video,
+            _shutting_down=False,
+        )
+
+        with patch("ui.main_window.QTimer.singleShot") as single_shot:
+            MainWindow._schedule_creator_playlist(state, video)
+
+        self.assertEqual(state._creator_playlist_generation, 1)
+        single_shot.assert_called_once()
+
+    def test_playback_invalidates_home_generation_while_home_is_loading(self) -> None:
+        class Home:
+            def is_loading(self):
+                return True
+
+            def set_loading(self, value):
+                self.value = value
+
+        service = type("Service", (), {"cancel_home_requests": lambda self: setattr(self, "cancelled", True)})()
+        state = SimpleNamespace(
+            home_page=Home(),
+            _browse_generation=4,
+            douyin_browser_service=service,
+            xiaohongshu_browser_service=service,
+            _dlna_device=None,
+            _dlna_cast_pending=False,
+            _flush_playback_resume=lambda: None,
+            _resume_media_key="old",
+            _remember_playback_return_widget=lambda: None,
+            _clear_playlist_context=lambda: None,
+            _arm_playback_window_mode=lambda: None,
+        )
+
+        # 只验证播放入口的首页中断逻辑，后续解析流程不属于本用例。
+        state._begin_playback_request = lambda *_args, **_kwargs: 1
+        state._start_worker = lambda *_args, **_kwargs: None
+        with patch.object(MainWindow, "_begin_playback_request", return_value=1):
+            state.current_local_media_path = ""
+            state._active_queue = ""
+            state.player_page = SimpleNamespace(set_loading=lambda *_args: None)
+            state.stack = SimpleNamespace(setCurrentWidget=lambda *_args: None)
+            state.resolver = SimpleNamespace(detect_url_kind=lambda _url: "video")
+            state.thread_pool = None
+            state._playback_request_id = 1
+            state.url_edit = None
+            MainWindow.play_url(state, "https://example.test/video")
+
+        self.assertEqual(state._browse_generation, 5)
+        self.assertFalse(getattr(state.home_page, "value", True))
+        self.assertTrue(service.cancelled)
 
 class LazyPageTests(unittest.TestCase):
     """P4：启动只构建首页与播放页，其余页面首访时才建。"""
@@ -189,6 +288,28 @@ class LazyPageTests(unittest.TestCase):
     def test_created_page_lookup_does_not_build(self) -> None:
         self.assertIsNone(self.window._created_page("settings"))
         self.assertEqual(self.window._lazy_pages, {})
+
+    def test_home_page_number_is_not_committed_before_load_succeeds(self) -> None:
+        self.window._browse_source = "douyin"
+        self.window._home_page = 1
+        self.window._home_cache = [SimpleNamespace(video_id="old")]
+        self.window.home_page.set_home_context(1, True, source_label="抖音")
+        workers = []
+
+        with (
+            patch.object(self.window, "_take_home_state", return_value=None),
+            patch.object(self.window, "_start_worker", workers.append),
+        ):
+            self.window._start_home_load(2)
+
+        self.assertEqual(self.window._home_page, 1)
+        self.assertEqual(self.window.home_page.page(), 1)
+        self.assertIn("初始化浏览器签名", self.window.home_page.status_label.text())
+        self.assertIn("聚合 20 条可播放视频", self.window.home_page.status_label.text())
+        workers[0].signals.error.emit("页面尚未准备好")
+        QApplication.processEvents()
+        self.assertEqual(self.window._home_page, 1)
+        self.assertEqual(self.window.home_page.page(), 1)
 
     @unittest.skipUnless(sys.platform.startswith("win"), "Windows HWND regression")
     def test_picture_in_picture_round_trip_preserves_native_window_ids(self) -> None:

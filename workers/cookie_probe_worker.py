@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from services.config_service import detect_browser_cookie_sources
 from services.cookie_probe_service import discover_cookie_databases, probe_site_cookie_browsers_detailed
+from services.site_registry import SITE_KEYS
 
 
 logger = logging.getLogger("tube_player.cookie")
@@ -24,7 +25,7 @@ class CookieProbeSignals(QObject):
 class CookieProbeWorker(QRunnable):
     """启动时异步探测各站点的登录 Cookie 浏览器，不阻塞首屏。"""
 
-    def __init__(self, sites: tuple[str, ...] = ("bilibili", "youtube", "douyin", "tiktok")) -> None:
+    def __init__(self, sites: tuple[str, ...] = SITE_KEYS) -> None:
         super().__init__()
         self.sites = sites
         self.signals = CookieProbeSignals()

@@ -101,7 +101,7 @@ class YoutubeResolver:
                 video.raw_info.setdefault("author", {})
                 if isinstance(video.raw_info["author"], dict):
                     video.raw_info["author"].setdefault("nickname", nickname)
-        if video.source_site == "youtube" and source_site in {"douyin", "tiktok"}:
+        if video.source_site == "youtube" and source_site in {"douyin", "tiktok", "xiaohongshu"}:
             video.source_site = source_site
             video.webpage_url = str(info.get("webpage_url") or original_url)
             raw_id = str(info.get("id") or "").strip()
@@ -840,7 +840,7 @@ class YoutubeResolver:
                 bvid=str(info.get("bvid") or info.get("id") or ""),
                 aid=str(info.get("aid") or ""),
             )
-        elif source_site in {"douyin", "tiktok"}:
+        elif source_site in {"douyin", "tiktok", "xiaohongshu"}:
             video_id = f"{source_site}:{video_id or _current_video_id_for_site(webpage_url, source_site).split(':', 1)[-1]}"
 
         return VideoInfo(
@@ -901,7 +901,7 @@ class YoutubeResolver:
     ) -> PlaylistEntry | None:
         if source_site == "bilibili":
             return YoutubeResolver._parse_bilibili_playlist_entry(entry, playlist_id, position)
-        if source_site in {"douyin", "tiktok"}:
+        if source_site in {"douyin", "tiktok", "xiaohongshu"}:
             return YoutubeResolver._parse_generic_playlist_entry(entry, playlist_id, position, source_site)
 
         video_id = _clean_video_id(str(entry.get("id") or "").strip())
@@ -1338,6 +1338,10 @@ def _is_tiktok_host(host: str) -> bool:
     return host.endswith("tiktok.com")
 
 
+def _is_xiaohongshu_host(host: str) -> bool:
+    return host.endswith("xiaohongshu.com") or host.endswith("xhslink.com")
+
+
 def _creator_videos_url(video: VideoInfo) -> str:
     raw = str(video.creator_url or "").strip().rstrip("/")
     if video.source_site == "bilibili":
@@ -1372,6 +1376,8 @@ def _detect_source_site(url: str) -> str:
         return "douyin"
     if _is_tiktok_host(host):
         return "tiktok"
+    if _is_xiaohongshu_host(host):
+        return "xiaohongshu"
     return "youtube"
 
 
@@ -1384,6 +1390,11 @@ def _current_video_id_for_site(url: str, source_site: str) -> str:
         if match:
             return f"{source_site}:{match.group(1)}"
         return f"{source_site}:{parsed.path.rstrip('/').rsplit('/', 1)[-1] or 'unknown'}"
+    if source_site == "xiaohongshu":
+        parsed = urlparse(str(url or ""))
+        match = re.search(r"/(?:explore|discovery/item)/([\da-f]+)", parsed.path, re.IGNORECASE)
+        note_id = match.group(1) if match else parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        return f"xiaohongshu:{note_id or 'unknown'}"
     return _video_id_from_watch_url(url)
 
 

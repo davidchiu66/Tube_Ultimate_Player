@@ -4,7 +4,7 @@ import logging
 from logging import FileHandler
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from app_paths import LOG_DIR
 
@@ -71,6 +71,18 @@ def sanitize_command(command: Iterable[str]) -> list[str]:
         else:
             value = str(part)
             parsed = urlparse(value)
+            host = str(parsed.hostname or "").lower()
+            query_names = {name.lower() for name, _value in parse_qsl(parsed.query, keep_blank_values=True)}
+            if parsed.scheme in {"http", "https"} and host.endswith("xiaohongshu.com") and (
+                "xsec_token" in query_names or "xsec_source" in query_names
+            ):
+                value = parsed._replace(query="<security-context>", fragment="").geturl()
+                sanitized.append(value)
+                continue
+            if parsed.scheme in {"http", "https"} and host.endswith("xhscdn.com"):
+                value = f"{parsed.scheme}://{parsed.netloc}/<media-url>"
+                sanitized.append(value)
+                continue
             if parsed.scheme in {"http", "https"} and (
                 "/aweme/v1/play/" in parsed.path or str(parsed.hostname or "").endswith("douyinvod.com")
             ):

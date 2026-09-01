@@ -95,8 +95,14 @@ class DownloadWorker(QRunnable):
             and any(code in output.text for code in ("HTTP Error 401", "HTTP Error 403", "HTTP Error 404", "HTTP Error 410"))
         ):
             logger.warning("direct media URL rejected; refreshing task_id=%s", self.task.task_id)
-            refresh_error = self._refresh_legacy_short_video_task()
-            output = _DownloadOutput(1, refresh_error, "") if refresh_error else self._run_direct_media()
+            if self.task.source_site == "xiaohongshu":
+                # 小红书浏览器兜底格式不是短视频接口条目，不能走抖音/TikTok 的
+                # 搜索恢复逻辑；退回带安全上下文的原详情 URL 让 yt-dlp 重试。
+                self.task.download_url = ""
+                output = self._run_once(force_cookie_file=False)
+            else:
+                refresh_error = self._refresh_legacy_short_video_task()
+                output = _DownloadOutput(1, refresh_error, "") if refresh_error else self._run_direct_media()
 
         # 先换浏览器再退回 Cookie 文件：Chrome/Brave/Edge 的 App-Bound Encryption
         # （Chrome 127+）会让 yt-dlp 报 "Failed to decrypt with DPAPI"，这跟账号无关，
@@ -302,7 +308,11 @@ class DownloadWorker(QRunnable):
     def _direct_media_headers(self) -> dict[str, str]:
         headers = dict(self.task.http_headers or {})
         site = str(self.task.source_site or "").strip().lower()
-        root = "https://www.tiktok.com" if site == "tiktok" else "https://www.douyin.com"
+        root = {
+            "tiktok": "https://www.tiktok.com",
+            "douyin": "https://www.douyin.com",
+            "xiaohongshu": "https://www.xiaohongshu.com",
+        }.get(site, "https://www.douyin.com")
         headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36")
         headers.setdefault("Referer", self.task.url or root + "/")
         headers.setdefault("Origin", root)

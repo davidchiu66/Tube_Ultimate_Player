@@ -9,28 +9,28 @@
 </p>
 
 <p align="center">
-  面向 YouTube、Bilibili、抖音与 TikTok 的搜索、首页浏览、URL 播放、播放列表管理与下载场景。
+  面向 YouTube、Bilibili、抖音、TikTok 与小红书的搜索、首页浏览、URL 播放、播放列表管理与下载场景。
 </p>
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.29-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.30-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-803-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-862-16a34a?style=flat-square">
 </p>
 
 ## 亮点
 
-- 同时支持 YouTube、Bilibili、抖音与 TikTok，四站点共用统一播放器、下载器、收藏、历史和播放记忆体系
+- 同时支持 YouTube、Bilibili、抖音、TikTok 与小红书，五站点共用统一播放器、下载器、收藏、历史和播放记忆体系
 - 支持首页推荐、关键词搜索、URL 直接播放、播放列表详情页与播放器侧滑播放列表面板
 - 首页 / 搜索 / 播放列表 / 播放器显示视频更新时间（数据源提供时）
 - 完整字幕支持：Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举，下拉框列常用轨，其余可在带搜索的完整列表中挑选
 - 顶部工具栏新增明确的“播放列表”入口，可直接查看当前列表和已保存列表
 - “播放 URL”面板保留最近播放地址，可直接点选重播
-- 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放
+- 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放；列表解析期间移入右侧热点会提示加载状态
 - 使用 `libmpv` 播放，支持暂停、停止、全屏、小窗播放、清晰度切换、倍速、字幕与自动隐藏控制面板
 - 支持 `Esc` 退出全屏、`Z/X` 调整倍速、鼠标滚轮调节音量，并在屏幕中央显示音量/倍速提示
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
@@ -38,7 +38,7 @@
 - 播放快捷键支持在设置页查看、修改、禁用、冲突校验和恢复默认
 - 内置下载队列，支持并发下载、暂停、继续、删除、完成回放与完成 toast 提示
 - 下载列表最新任务置顶，并支持暂停/启动/删除的批量操作（选中或当前筛选范围）
-- Cookie 支持“自动检测”按站点分别挑选已登录的浏览器，读取失败会明确提示原因
+- Cookie 支持“自动检测”按站点分别挑选已登录的浏览器，读取失败会明确提示原因；首次启动提供 Cookie 配置指南
 - 下载遇到浏览器 Cookie 解密失败时自动改用其它浏览器重试
 - 被设为系统默认浏览器的便携版浏览器也能被识别，Cookie 库按绝对路径定位
 - 升级包与 FFmpeg 安装包强制校验来源域名、大小与 SHA256，压缩包拒绝路径穿越条目
@@ -56,7 +56,7 @@
 
 ### 典型使用方式
 
-1. 启动应用后进入默认首页，可选择 `Bilibili`、`YouTube`、`抖音` 或 `TikTok`
+1. 启动应用后进入默认首页，可选择 `Bilibili`、`YouTube`、`抖音`、`TikTok` 或 `小红书`
 2. 在顶部搜索框输入关键词，或通过“播放 URL”弹窗直接输入任意站点地址
 3. 点击首页或搜索结果卡片中的“播放”，也可双击卡片、收藏、历史或播放列表条目开始播放
 4. 在播放器中切换清晰度、倍速、全屏，点击“浏览器播放”打开原始页面，或点击“投屏”发送到局域网 DLNA 设备
@@ -67,16 +67,16 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 首页 | YouTube / Bilibili / 抖音 / TikTok 推荐内容、分站点缓存与分页浏览、卡片独立播放/收藏/下载 |
-| 搜索 | 四站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
-| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 抖音 / TikTok 及列表类链接，保留最近播放历史 |
+| 首页 | YouTube / Bilibili / 抖音 / TikTok / 小红书推荐内容、分站点缓存与分页浏览、卡片独立播放/收藏/下载 |
+| 搜索 | 五站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
+| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 抖音 / TikTok / 小红书及列表类链接，保留最近播放历史 |
 | 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、在线视频/本地视频播放记忆点、浏览器播放、全屏、小窗拖动/等比缩放/置顶、同目录本地播放列表、快进/后退、静音、滚轮与快捷键调音量、音量/倍速中屏提示、自动隐藏控制器 |
 | 字幕 | Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举、常用轨直选、完整列表搜索、下载后本地加载 |
 | 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表面板、已保存列表加载/删除、命名保存、自动连播、批量下载、更新时间列 |
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制、上游断流重连 |
 | 下载 | 下载队列、并发控制、暂停、继续、删除、批量操作、最新置顶、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 常规与快捷键 Tab、三态代理模式、四站点独立 Cookie 与默认画质、按站点 Cookie 自动检测、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
+| 设置 | 常规与快捷键 Tab、三态代理模式、五站点独立 Cookie 与默认画质、按站点 Cookie 自动检测、迷你窗口播放器风格、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
 | 关于 | 当前版本、系统与 CPU 架构探测展示、GitHub 链接、检测新版本、Release Note 展示、Windows 自动升级与 Linux 手动升级包下载 |
 
 ## Bilibili 支持说明
@@ -98,6 +98,16 @@
 1. 优先使用浏览器已登录 Cookie 调用公开搜索 API
 2. 失败时回退到 WBI 签名搜索 API
 3. 仍失败时回退到搜索结果页抓取
+
+## 小红书支持说明
+
+当前版本支持小红书视频频道首页、关键词搜索、视频笔记 URL 播放、下载、收藏、历史和作者视频列表。
+小红书首页使用 `https://www.xiaohongshu.com/red_video`，视频解析与作者列表优先复用内置浏览器安全上下文；首次加载通常比其它站点更慢，请耐心等待。
+
+- 小红书视频笔记使用独立的 Cookie、浏览器配置和请求上下文，不与其它站点混用
+- 支持视频清晰度选择、播放记忆点、作者昵称和作者其它视频列表
+- 图文笔记、直播、评论、私信、商城等非视频内容不属于当前支持范围
+- 遇到页面安全验证时，按界面提示在内置验证窗口完成操作后重试
 
 ## 快速开始
 
@@ -164,6 +174,7 @@ Tube_Ultimate_Player/
 - `cookie_bilibili.txt`
 - `cookie_douyin.txt`
 - `cookie_tiktok.txt`
+- `cookie_xiaohongshu.txt`
 - `data/tube_ultimate_player.sqlite3`
 - `data/download_tasks.json`
 - `downloads/`
@@ -279,6 +290,21 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
 滚轮调音量只在视频区与控制面板背景生效，音量滑块、清晰度/字幕/倍速下拉框与播放列表面板保留各自的原生滚轮行为。
 
+## 0.2.30 更新摘要
+
+本版本完成小红书视频能力接入，并增强作者播放列表加载体验：
+
+- 新增小红书视频首页、搜索、URL 播放、下载、收藏、历史、播放记忆、清晰度选择和设置适配
+- 新增小红书作者视频列表，播放时显示作者昵称并支持浏览其它作品
+- 新增小红书独立浏览器服务、安全验证窗口和 Cookie 自动检测/配置
+- 新增首次启动 Cookie 操作指南，可勾选后不再显示
+- 播放列表解析期间将鼠标移入播放器右侧热点时，提示“播放列表加载中，请稍候”；加载完成后自动恢复侧滑
+- 加强首页加载中播放、站点切换和异步 worker 失效处理，避免迟到回调覆盖当前界面
+- 完善抖音首页/搜索的浏览器签名与风控恢复，补充小红书页面安全上下文和媒体 URL 处理
+- 新增小红书相关回归测试；全量自动化测试达到 `862` 项
+
+完整说明见 [`docs/releases/v0.2.30.md`](docs/releases/v0.2.30.md)。
+
 ## 0.2.23 更新摘要
 
 浏览体验与稳定性为主，并新增 Windows ARM64 产物：
@@ -314,13 +340,13 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 ## 下载、收藏与历史
 
 - 三个列表统一使用黑底金边表格风格，避免深色主题下出现白底白字不可读的问题。
-- 下载任务、收藏和播放历史均显示来源（`YouTube` / `Bilibili` / `抖音` / `TikTok`）。
+- 下载任务、收藏和播放历史均显示来源（`YouTube` / `Bilibili` / `抖音` / `TikTok` / `小红书`）。
 - 收藏和播放历史保存作者信息；旧 SQLite 数据库启动时会自动补充缺失字段。
 - 列表搜索为本地即时筛选，不会重复请求站点接口。
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `803` 项）：
+运行完整自动化测试（当前版本共 `862` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -349,7 +375,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 1. 本项目是通用桌面客户端，不提供任何受版权保护内容的托管、镜像或转售服务。
 2. 用户应仅在拥有合法权利、授权或当地法律允许的情况下使用本工具访问、播放或下载内容。
-3. 用户应自行遵守 YouTube、Bilibili、抖音、TikTok 及相关平台的服务条款、版权政策、地区限制、年龄限制和其他适用规则。
+3. 用户应自行遵守 YouTube、Bilibili、抖音、TikTok、小红书及相关平台的服务条款、版权政策、地区限制、年龄限制和其他适用规则。
 4. 本项目不保证对任何第三方平台的持续可用性、兼容性或访问权限。
 5. 用户导入的 Cookie、代理、账号状态及下载行为均由用户自行负责；仓库不包含任何真实个人 Cookie、账号数据或私有配置。
 6. 本项目对第三方软件和服务的引用仅用于兼容与集成说明，不代表对其拥有权或附带再授权。
@@ -362,6 +388,7 @@ python -m unittest discover -s tests -p "test_*.py"
 - `cookie_bilibili.txt`
 - `cookie_douyin.txt`
 - `cookie_tiktok.txt`
+- `cookie_xiaohongshu.txt`
 - `config/user_config.json`
 - `logs/`
 - `downloads/`

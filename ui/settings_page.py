@@ -4,7 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -310,6 +310,7 @@ class SettingsPage(QWidget):
         general_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         general_tab.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         general_tab.setWidget(general_content)
+        self.general_tab = general_tab
 
         self.shortcut_edits: dict[str, QKeySequenceEdit] = {}
         shortcut_form = QFormLayout()
@@ -434,6 +435,19 @@ class SettingsPage(QWidget):
         self._default_quality_changed = False
         self._quality_changed_sites.clear()
         self._browser_changed_sites.clear()
+
+    def focus_cookie_settings(self, site: str = "") -> None:
+        target = str(site or self.config.default_home_source()).strip().lower()
+        radio = self._site_config_radios.get(target)
+        if radio is not None:
+            radio.setChecked(True)
+        self.tabs.setCurrentIndex(0)
+
+        def reveal() -> None:
+            self.general_tab.ensureWidgetVisible(self.cookie_browser_combo, 24, 80)
+            self.cookie_browser_combo.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        QTimer.singleShot(0, reveal)
 
     def save(self) -> None:
         shortcuts = self._shortcut_values()

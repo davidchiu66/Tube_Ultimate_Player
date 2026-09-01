@@ -18,6 +18,7 @@ from services.cookie_probe_service import (
     probe_site_cookie_browsers,
     probe_site_cookie_browsers_detailed,
 )
+from workers.cookie_probe_worker import CookieProbeWorker
 
 
 def make_chromium_db(path: Path, entries: list[tuple[str, str]]) -> None:
@@ -89,6 +90,16 @@ class ProbeTests(unittest.TestCase):
         result = probe_site_cookie_browsers(("youtube",), [db])
 
         self.assertEqual(result, {"youtube": "firefox:p"})
+
+    def test_xiaohongshu_login_cookie_is_detected(self) -> None:
+        db = self._firefox("firefox:xhs", [(".xiaohongshu.com", "web_session")])
+
+        result = probe_site_cookie_browsers(("xiaohongshu",), [db])
+
+        self.assertEqual(result, {"xiaohongshu": "firefox:xhs"})
+
+    def test_startup_probe_includes_all_registered_sites(self) -> None:
+        self.assertIn("xiaohongshu", CookieProbeWorker().sites)
 
     def test_missing_file_is_skipped(self) -> None:
         missing = CookieDatabase(browser_spec="gone:Default", path=self.root / "nope.db", kind="chromium")

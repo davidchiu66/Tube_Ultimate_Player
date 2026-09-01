@@ -22,6 +22,10 @@ MPV_FORMAT_DOUBLE = 5
 
 
 logger = logging.getLogger("tube_player.mpv")
+DEFAULT_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+)
 
 
 class MpvError(RuntimeError):
@@ -148,12 +152,11 @@ class MpvPlayer(QObject):
             self.set_property_string("http-proxy", "")
 
         headers = headers or {}
-        user_agent = headers.get("User-Agent") or headers.get("user-agent")
-        if user_agent:
-            self.set_property_string("user-agent", user_agent)
-        referer = headers.get("Referer") or headers.get("referer")
-        if referer:
-            self.set_property_string("referrer", referer)
+        user_agent = headers.get("User-Agent") or headers.get("user-agent") or DEFAULT_HTTP_USER_AGENT
+        self.set_property_string("user-agent", user_agent)
+        referer = headers.get("Referer") or headers.get("referer") or ""
+        # 每次加载都覆盖上一条媒体的 Referer，避免跨站媒体请求继承旧状态。
+        self.set_property_string("referrer", referer)
         # Signed short-video CDN URLs may require the browser session cookie in
         # addition to User-Agent/Referer. mpv expects these as comma-separated
         # HTTP header fields; clear the property when no custom headers remain.

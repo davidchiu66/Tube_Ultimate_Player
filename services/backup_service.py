@@ -156,6 +156,7 @@ def restore_backup_archive(
         "cookies/cookie_bilibili.txt": _cookie_target("bilibili", Path(config_dir)),
         "cookies/cookie_douyin.txt": _cookie_target("douyin", Path(config_dir)),
         "cookies/cookie_tiktok.txt": _cookie_target("tiktok", Path(config_dir)),
+        "cookies/cookie_xiaohongshu.txt": _cookie_target("xiaohongshu", Path(config_dir)),
     }
     snapshot = build_backup_archive(
         output_dir=snapshots,
@@ -169,6 +170,7 @@ def restore_backup_archive(
             "bilibili": targets["cookies/cookie_bilibili.txt"],
             "douyin": targets["cookies/cookie_douyin.txt"],
             "tiktok": targets["cookies/cookie_tiktok.txt"],
+            "xiaohongshu": targets["cookies/cookie_xiaohongshu.txt"],
         },
     )
     try:
@@ -258,7 +260,7 @@ def _validate_manifest_shape(manifest: object) -> None:
         if relative in seen or relative not in {
             "config/user_config.json", "data/tube_ultimate_player.sqlite3",
             "data/download_tasks.json", "cookies/cookie_youtube.txt", "cookies/cookie_bilibili.txt",
-            "cookies/cookie_douyin.txt", "cookies/cookie_tiktok.txt",
+            "cookies/cookie_douyin.txt", "cookies/cookie_tiktok.txt", "cookies/cookie_xiaohongshu.txt",
         }:
             raise BackupError(f"manifest 包含无效文件：{relative}")
         seen.add(relative)

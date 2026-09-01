@@ -35,7 +35,12 @@ def build_download_task(
             (track.tbr or track.abr) if track else quality.audio_tbr,
             video.duration,
         )
-        if video.source_site in {"douyin", "tiktok"} and quality.video_url:
+        browser_fallback = bool(
+            video.source_site == "xiaohongshu"
+            and isinstance(video.raw_info, dict)
+            and video.raw_info.get("_tube_player_browser_fallback")
+        )
+        if (video.source_site in {"douyin", "tiktok"} or browser_fallback) and quality.video_url:
             # 这些格式是首页/搜索接口返回的应用内格式，不是 yt-dlp 网页解析器认识的
             # format_id。播放器已经验证过媒体地址，下载时复用它即可绕开二次网页风控。
             format_selector = "best"

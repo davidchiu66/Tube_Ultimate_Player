@@ -149,6 +149,8 @@ class PlaylistOverlay(QFrame):
     load_saved_requested = Signal(str)
     delete_saved_requested = Signal(str)
     auto_play_changed = Signal(bool)
+    # 右侧作者列表尚未准备好时，由宿主决定如何展示提示（通常是 Toast）。
+    playlist_loading_hint_requested = Signal()
 
     def __init__(
         self,
@@ -180,6 +182,8 @@ class PlaylistOverlay(QFrame):
         # 左右两侧面板互斥显示：两份 PANEL_WIDTH 要 ≥884px，窄窗口下必然遮挡视频。
         self._sibling_overlay: PlaylistOverlay | None = None
         self._context_available = False
+        self._loading = False
+        self._loading_hint_shown = False
         self._section_mode = False
         self._active_section_id = ""
         self._display_indices: list[int] = []
@@ -429,15 +433,45 @@ class PlaylistOverlay(QFrame):
         return widget if isinstance(widget, PlaylistItemWidget) else None
 
     def handle_pointer(self, pos: QPoint) -> None:
-        if not self.has_available_content():
-            return
         if self.geometry().contains(pos):
+            if self._loading:
+                self._request_loading_hint()
+                return
+            if not self.has_available_content():
+                return
             self.show_overlay()
             return
         if self._is_in_hot_zone(pos):
+            if self._loading:
+                self._request_loading_hint()
+                return
+            self._loading_hint_shown = False
+            if not self.has_available_content():
+                return
             self.show_overlay()
             return
+        self._loading_hint_shown = False
         self.schedule_hide()
+
+    def set_loading_state(self, loading: bool) -> None:
+        """标记当前作者播放列表是否仍在解析，避免空面板被误判为无功能。"""
+        loading = bool(loading)
+        if self._loading == loading:
+            return
+        self._loading = loading
+        if not loading:
+            self._loading_hint_shown = False
+        if loading:
+            self.hide_overlay(animated=False)
+
+    def is_loading(self) -> bool:
+        return self._loading
+
+    def _request_loading_hint(self) -> None:
+        if self._loading_hint_shown:
+            return
+        self._loading_hint_shown = True
+        self.playlist_loading_hint_requested.emit()
 
     def handle_idle_timeout(self) -> None:
         self.hide_overlay()

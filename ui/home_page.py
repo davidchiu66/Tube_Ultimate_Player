@@ -248,6 +248,9 @@ class HomePage(QWidget):
     def page(self) -> int:
         return self._page
 
+    def is_loading(self) -> bool:
+        return bool(self._loading)
+
     def set_loading(self, loading: bool, message: str = "") -> None:
         self._loading = loading
         self.refresh_button.setEnabled(not loading)
@@ -297,6 +300,13 @@ class HomePage(QWidget):
             self.status_label.setText(f"搜索“{keyword}”第 {page} 页，共加载 {len(videos)} 个视频")
         else:
             self.status_label.setText(f"首页第 {page} 页，共加载 {len(videos)} 个视频")
+        self._update_pagination()
+
+    def clear_videos(self, *, source_label: str = "首页", page: int = 1) -> None:
+        """切换站点或浏览上下文时立即移除旧卡片，避免串站点击。"""
+        self._clear_cards()
+        self.set_home_context(max(1, int(page)), False, source_label=source_label)
+        self.status_label.setText("正在加载内容，请稍候...")
         self._update_pagination()
 
     def _build_next_batch(self) -> None:

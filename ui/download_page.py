@@ -382,7 +382,7 @@ def _video_id_candidates(video_id: str) -> list[str]:
         return []
 
     candidates: list[str] = [raw]
-    if raw.startswith(("bilibili:", "douyin:", "tiktok:")):
+    if raw.startswith(("bilibili:", "douyin:", "tiktok:", "xiaohongshu:")):
         raw = raw.split(":", 1)[1]
         if raw not in candidates:
             candidates.append(raw)
