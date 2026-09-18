@@ -36,6 +36,17 @@ class MacosBuildTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unbundled Homebrew dependency"):
                     build_macos.verify_no_homebrew_links(app)
 
+    def test_plist_version_helper_adds_missing_key(self) -> None:
+        with TemporaryDirectory() as temp_dir, patch("build_macos.subprocess.run") as run:
+            plist = Path(temp_dir) / "Info.plist"
+            plist.write_text("plist", encoding="utf-8")
+            run.side_effect = [
+                __import__("subprocess").CalledProcessError(1, "PlistBuddy"),
+                None,
+            ]
+            build_macos._set_plist_string(plist, "CFBundleVersion", "0.2.31")
+            self.assertIn("Add :CFBundleVersion string 0.2.31", run.call_args_list[1].args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

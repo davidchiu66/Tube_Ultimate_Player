@@ -122,20 +122,25 @@ def run_pyinstaller(icon: Path, version: str) -> Path:
     if not APP_BUNDLE.is_dir():
         raise RuntimeError(f"PyInstaller did not create {APP_BUNDLE}")
     info_plist = APP_BUNDLE / "Contents" / "Info.plist"
-    subprocess.run(
-        [
-            "/usr/libexec/PlistBuddy",
-            "-c",
-            f"Set :CFBundleShortVersionString {version}",
-            str(info_plist),
-        ],
-        check=True,
-    )
-    subprocess.run(
-        ["/usr/libexec/PlistBuddy", "-c", f"Set :CFBundleVersion {version}", str(info_plist)],
-        check=True,
-    )
+    _set_plist_string(info_plist, "CFBundleShortVersionString", version)
+    _set_plist_string(info_plist, "CFBundleVersion", version)
     return APP_BUNDLE
+
+
+def _set_plist_string(info_plist: Path, key: str, value: str) -> None:
+    buddy = "/usr/libexec/PlistBuddy"
+    try:
+        subprocess.run(
+            [buddy, "-c", f"Set :{key} {value}", str(info_plist)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        subprocess.run(
+            [buddy, "-c", f"Add :{key} string {value}", str(info_plist)],
+            check=True,
+        )
 
 
 def bundled_libmpv(app_bundle: Path) -> Path:
