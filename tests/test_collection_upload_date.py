@@ -16,7 +16,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from resolver.models import VideoInfo
-from resolver.youtube_resolver import _APPROXIMATE_DATE_ARGS, YoutubeResolver
+from resolver.youtube_resolver import (
+    _APPROXIMATE_DATE_ARGS,
+    _YOUTUBE_CLIENT_ARGS,
+    _YOUTUBE_EJS_ARGS,
+    YoutubeResolver,
+)
 from services.config_service import ConfigService
 from ui.text_elision import format_upload_date
 
@@ -68,7 +73,28 @@ class PlaylistCommandTests(unittest.TestCase):
         command = self.resolver._build_playlist_command("https://www.youtube.com/playlist?list=PL1")
 
         self.assertEqual(command.count(APPROXIMATE_DATE_FLAG), 1)
-        self.assertEqual(command.count("--extractor-args"), 1)
+        self.assertEqual(command.count("--extractor-args"), 2)
+
+    def test_commands_enable_youtube_ejs_components(self) -> None:
+        for command in (
+            self.resolver._build_command("https://www.youtube.com/watch?v=abcdefghijk"),
+            self.resolver._build_home_command("https://www.youtube.com/", 20),
+            self.resolver._build_playlist_command("https://www.youtube.com/playlist?list=PL1"),
+        ):
+            with self.subTest(command=command[:3]):
+                self.assertIn(_YOUTUBE_EJS_ARGS[0], command)
+                index = command.index(_YOUTUBE_EJS_ARGS[0])
+                self.assertEqual(command[index + 1], _YOUTUBE_EJS_ARGS[1])
+
+    def test_commands_use_default_and_web_safari_clients_for_full_format_ladder(self) -> None:
+        for command in (
+            self.resolver._build_command("https://www.youtube.com/watch?v=abcdefghijk"),
+            self.resolver._build_home_command("https://www.youtube.com/", 20),
+            self.resolver._build_playlist_command("https://www.youtube.com/playlist?list=PL1"),
+        ):
+            with self.subTest(command=command[:3]):
+                index = command.index(_YOUTUBE_CLIENT_ARGS[0], command.index(_YOUTUBE_EJS_ARGS[0]) + 2)
+                self.assertEqual(command[index + 1], _YOUTUBE_CLIENT_ARGS[1])
 
 
 class CollectionEntryDateTests(unittest.TestCase):

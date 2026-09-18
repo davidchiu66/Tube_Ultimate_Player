@@ -5,32 +5,33 @@
 </p>
 
 <p align="center">
-  <strong>基于 PySide6 + yt-dlp + libmpv 的 Windows / Linux 桌面视频播放器与下载工具</strong>
+  <strong>基于 PySide6 + yt-dlp + libmpv 的 Windows / macOS / Linux 桌面视频播放器与下载工具</strong>
 </p>
 
 <p align="center">
-  面向 YouTube、Bilibili、抖音、TikTok 与小红书的搜索、首页浏览、URL 播放、播放列表管理与下载场景。
+  面向 YouTube、Bilibili、抖音、TikTok、Instagram 与小红书的搜索、首页浏览、URL 播放、播放列表管理与下载场景。
 </p>
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2563eb?style=flat-square">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.30-c9a227?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.31-c9a227?style=flat-square">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-1d4ed8?style=flat-square">
   <img alt="UI" src="https://img.shields.io/badge/UI-PySide6-0f766e?style=flat-square">
   <img alt="Resolver" src="https://img.shields.io/badge/Resolver-yt--dlp-7c3aed?style=flat-square">
   <img alt="Player" src="https://img.shields.io/badge/Player-libmpv-0891b2?style=flat-square">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-862-16a34a?style=flat-square">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-892-16a34a?style=flat-square">
 </p>
 
 ## 亮点
 
-- 同时支持 YouTube、Bilibili、抖音、TikTok 与小红书，五站点共用统一播放器、下载器、收藏、历史和播放记忆体系
+- 同时支持 YouTube、Bilibili、抖音、TikTok、Instagram 与小红书，六站点共用统一播放器、下载器、收藏、历史和播放记忆体系
 - 支持首页推荐、关键词搜索、URL 直接播放、播放列表详情页与播放器侧滑播放列表面板
 - 首页 / 搜索 / 播放列表 / 播放器显示视频更新时间（数据源提供时）
 - 完整字幕支持：Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举，下拉框列常用轨，其余可在带搜索的完整列表中挑选
 - 顶部工具栏新增明确的“播放列表”入口，可直接查看当前列表和已保存列表
 - “播放 URL”面板保留最近播放地址，可直接点选重播
 - 单视频播放后可在后台生成作者作品播放列表，不阻塞当前视频首帧播放；列表解析期间移入右侧热点会提示加载状态
+- 播放器右侧播放列表滑窗提供“播放列表 / 评论”Tab，评论按需异步加载
 - 使用 `libmpv` 播放，支持暂停、停止、全屏、小窗播放、清晰度切换、倍速、字幕与自动隐藏控制面板
 - 支持 `Esc` 退出全屏、`Z/X` 调整倍速、鼠标滚轮调节音量，并在屏幕中央显示音量/倍速提示
 - 支持发现局域网 DLNA 播放设备，将在线视频和本地下载媒体远程投屏
@@ -44,7 +45,7 @@
 - 升级包与 FFmpeg 安装包强制校验来源域名、大小与 SHA256，压缩包拒绝路径穿越条目
 - 升级前探测本机系统与 CPU 架构并在「关于」页展示，只挑与本机相符的安装包，启动前再按文件名与 PE 头核对一次架构
 - 在线升级下载完成后可自动关闭应用并启动安装；便携版支持退出后自动解压替换和重启
-- 提供自带 Deno、FFmpeg 与 FFprobe 的增强安装包和免安装便携版，运行后无需再下载这些运行时
+- Windows 普通安装包和便携版随包提供 Deno，增强版另外提供 FFmpeg 与 FFprobe，运行后无需额外配置 JS Runtime
 - 运行时配置、数据库、日志、下载目录统一写入 `%LocalAppData%\Tube_Ultimate_Player`
 - Linux 首版面向 x86_64 的 X11/XWayland；已取消增强 AppImage/DEB 发布构建，转向 Fedora RPM 与 COPR 发布链路
 
@@ -56,7 +57,7 @@
 
 ### 典型使用方式
 
-1. 启动应用后进入默认首页，可选择 `Bilibili`、`YouTube`、`抖音`、`TikTok` 或 `小红书`
+1. 启动应用后进入默认首页，可选择 `Bilibili`、`YouTube`、`抖音`、`TikTok`、`Instagram` 或 `小红书`
 2. 在顶部搜索框输入关键词，或通过“播放 URL”弹窗直接输入任意站点地址
 3. 点击首页或搜索结果卡片中的“播放”，也可双击卡片、收藏、历史或播放列表条目开始播放
 4. 在播放器中切换清晰度、倍速、全屏，点击“浏览器播放”打开原始页面，或点击“投屏”发送到局域网 DLNA 设备
@@ -67,16 +68,16 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| 首页 | YouTube / Bilibili / 抖音 / TikTok / 小红书推荐内容、分站点缓存与分页浏览、卡片独立播放/收藏/下载 |
-| 搜索 | 五站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
-| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 抖音 / TikTok / 小红书及列表类链接，保留最近播放历史 |
+| 首页 | YouTube / Bilibili / 抖音 / TikTok / Instagram / 小红书推荐内容、分站点缓存与分页浏览、卡片独立播放/收藏/下载 |
+| 搜索 | 六站点关键词搜索、分页、卡片独立播放/收藏/下载、等待动画与长标题三行省略 |
+| URL 播放 | 弹窗输入 URL，自动识别 YouTube / Bilibili / 抖音 / TikTok / Instagram / 小红书及列表类链接，保留最近播放历史 |
 | 播放器 | `libmpv` 播放、暂停/继续、停止、自然结束重播、在线视频/本地视频播放记忆点、浏览器播放、全屏、小窗拖动/等比缩放/置顶、同目录本地播放列表、快进/后退、静音、滚轮与快捷键调音量、音量/倍速中屏提示、自动隐藏控制器 |
 | 字幕 | Bilibili AI 字幕与 YouTube 手动/自动字幕全量枚举、常用轨直选、完整列表搜索、下载后本地加载 |
-| 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表面板、已保存列表加载/删除、命名保存、自动连播、批量下载、更新时间列 |
+| 播放列表 | 顶部导航入口、明确播放列表、作者动态列表、侧滑播放列表/评论面板、已保存列表加载/删除、命名保存、自动连播、批量下载、更新时间列 |
 | DLNA 投屏 | SSDP 多网卡发现、设备缓存校验、在线视频/本地媒体投屏、远程播放/暂停/停止、进度同步、Seek、音量控制、上游断流重连 |
 | 下载 | 下载队列、并发控制、暂停、继续、删除、批量操作、最新置顶、来源显示、搜索、完成提示、本地文件播放 |
 | 数据列表 | 收藏、历史、下载任务的来源显示、搜索筛选与统一表格布局 |
-| 设置 | 常规与快捷键 Tab、三态代理模式、五站点独立 Cookie 与默认画质、按站点 Cookie 自动检测、迷你窗口播放器风格、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
+| 设置 | 常规与快捷键 Tab、三态代理模式、六站点独立 Cookie 与默认画质、按站点 Cookie 自动检测、迷你窗口播放器风格、FFmpeg、JS Runtime、下载目录、默认首页、快捷键自定义 |
 | 关于 | 当前版本、系统与 CPU 架构探测展示、GitHub 链接、检测新版本、Release Note 展示、Windows 自动升级与 Linux 手动升级包下载 |
 
 ## Bilibili 支持说明
@@ -174,6 +175,7 @@ Tube_Ultimate_Player/
 - `cookie_bilibili.txt`
 - `cookie_douyin.txt`
 - `cookie_tiktok.txt`
+- `cookie_instagram.txt`
 - `cookie_xiaohongshu.txt`
 - `data/tube_ultimate_player.sqlite3`
 - `data/download_tasks.json`
@@ -204,12 +206,13 @@ Linux 使用 XDG Base Directory，配置、数据、缓存与日志分别写入�
 
 ### GitHub Actions
 
-仓库中提供 Windows 发布工作流以及两套 Linux 工作流：
+仓库中提供 Windows、macOS 和 Linux 发布工作流：
 
 - `release.yml`：完整正式发布流程，包含便携版、安装包构建与 GitHub Release 发布
 - `release-portable.yml`：仅构建便携版
 - `release-installer.yml`：仅构建安装包
 - `release-installer-with-deno-ffmpeg.yml`：构建自带 Deno、FFmpeg 与 FFprobe 的增强安装包和增强便携版
+- `release-macos.yml`：在 macOS Intel 与 Apple Silicon runner 上构建 `.app`、`.dmg` 和 `.zip`
 - `test-linux.yml`：Ubuntu 单元测试与 Xvfb/libmpv 嵌入播放烟雾测试
 - `release-linux-rpm-copr.yml`：构建 Fedora SRPM/RPM，并可提交到 Fedora COPR
 
@@ -221,9 +224,10 @@ Linux 使用 XDG Base Directory，配置、数据、缓存与日志分别写入�
 4. 从 SourceForge 下载 `libmpv-2.dll`
 5. 结合仓库中的其余 `3rdpart` 依赖构建产物
 6. 运行 Ubuntu X11/libmpv 烟雾测试；Linux 发布通过 Fedora RPM/COPR 工作流完成
-7. 上传 Windows 普通/增强产物，并发布到 GitHub Releases
+7. 构建并上传 macOS Intel/Apple Silicon 产物
+8. 上传 Windows/macOS 普通与增强产物，并发布到 GitHub Releases
 
-正式发布同时提供普通版本和增强版本。增强安装包及增强便携版文件名带有
+正式发布同时提供普通版本和增强版本。普通 Windows 产物已内置 Deno；增强安装包及增强便携版文件名带有
 `_with_deno_ffmpeg` 后缀，体积更大，但可直接使用内置 Deno 与 FFmpeg。
 
 ### 自带 Deno 与 FFmpeg 的免安装便携版
@@ -290,20 +294,23 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 输入焦点位于搜索框、Cookie 文本框等编辑控件时，播放器快捷键会暂时停用，避免输入文字时误触播放操作。
 滚轮调音量只在视频区与控制面板背景生效，音量滑块、清晰度/字幕/倍速下拉框与播放列表面板保留各自的原生滚轮行为。
 
-## 0.2.30 更新摘要
+## 0.2.31 更新摘要
 
-本版本完成小红书视频能力接入，并增强作者播放列表加载体验：
+本版本继续增强多站点播放、评论、清晰度选择和发布能力：
 
-- 新增小红书视频首页、搜索、URL 播放、下载、收藏、历史、播放记忆、清晰度选择和设置适配
-- 新增小红书作者视频列表，播放时显示作者昵称并支持浏览其它作品
-- 新增小红书独立浏览器服务、安全验证窗口和 Cookie 自动检测/配置
-- 新增首次启动 Cookie 操作指南，可勾选后不再显示
-- 播放列表解析期间将鼠标移入播放器右侧热点时，提示“播放列表加载中，请稍候”；加载完成后自动恢复侧滑
-- 加强首页加载中播放、站点切换和异步 worker 失效处理，避免迟到回调覆盖当前界面
-- 完善抖音首页/搜索的浏览器签名与风控恢复，补充小红书页面安全上下文和媒体 URL 处理
-- 新增小红书相关回归测试；全量自动化测试达到 `862` 项
+- 新增 Instagram 首页/搜索浏览器采集，支持登录 Cookie、动态 Relay 数据、滚动加载和视频卡片提取
+- 播放器右侧播放列表增加结构化评论面板，支持 Bilibili 官方分页、YouTube 评论分页和“加载更多”
+- 评论首次加载、窗口尺寸变化和追加评论时自动重新计算换行与滚动锚点
+- 播放控制器增加“上一个/下一个”文字按钮，新增 `P/N` 快捷键并保留 `PgUp/PgDown`
+- 无播放列表或合集时，可按当前首页/搜索结果顺序切换视频
+- 普通播放器音量改为悬浮竖向滑条，减少控制器横向占用
+- 修复 YouTube 超宽视频将真实编码高度误显示为 `886p/590p` 的问题，恢复标准 `2160p/1440p/1080p` 档位显示
+- YouTube 解析同时使用 `default,web_safari` client，保留完整 4K 画质梯度和兼容性
+- 新增 macOS Intel 与 Apple Silicon 发布工作流，生成 `.app`、`.dmg` 和 `.zip`
+- macOS 构建自动打包 libmpv 动态库依赖并检查 Homebrew 路径泄漏
+- 全量自动化测试达到 `892` 项
 
-完整说明见 [`docs/releases/v0.2.30.md`](docs/releases/v0.2.30.md)。
+完整说明见 [`docs/releases/v0.2.31.md`](docs/releases/v0.2.31.md)。
 
 ## 0.2.23 更新摘要
 
@@ -340,13 +347,13 @@ RPM 使用 Fedora 系统依赖，不捆绑 libmpv、Deno、FFmpeg/FFprobe 或 yt
 ## 下载、收藏与历史
 
 - 三个列表统一使用黑底金边表格风格，避免深色主题下出现白底白字不可读的问题。
-- 下载任务、收藏和播放历史均显示来源（`YouTube` / `Bilibili` / `抖音` / `TikTok` / `小红书`）。
+- 下载任务、收藏和播放历史均显示来源（`YouTube` / `Bilibili` / `抖音` / `TikTok` / `Instagram` / `小红书`）。
 - 收藏和播放历史保存作者信息；旧 SQLite 数据库启动时会自动补充缺失字段。
 - 列表搜索为本地即时筛选，不会重复请求站点接口。
 
 ## 测试
 
-运行完整自动化测试（当前版本共 `862` 项）：
+运行完整自动化测试（当前版本共 `892` 项）：
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -375,7 +382,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 1. 本项目是通用桌面客户端，不提供任何受版权保护内容的托管、镜像或转售服务。
 2. 用户应仅在拥有合法权利、授权或当地法律允许的情况下使用本工具访问、播放或下载内容。
-3. 用户应自行遵守 YouTube、Bilibili、抖音、TikTok、小红书及相关平台的服务条款、版权政策、地区限制、年龄限制和其他适用规则。
+3. 用户应自行遵守 YouTube、Bilibili、抖音、TikTok、Instagram、小红书及相关平台的服务条款、版权政策、地区限制、年龄限制和其他适用规则。
 4. 本项目不保证对任何第三方平台的持续可用性、兼容性或访问权限。
 5. 用户导入的 Cookie、代理、账号状态及下载行为均由用户自行负责；仓库不包含任何真实个人 Cookie、账号数据或私有配置。
 6. 本项目对第三方软件和服务的引用仅用于兼容与集成说明，不代表对其拥有权或附带再授权。
@@ -388,6 +395,7 @@ python -m unittest discover -s tests -p "test_*.py"
 - `cookie_bilibili.txt`
 - `cookie_douyin.txt`
 - `cookie_tiktok.txt`
+- `cookie_instagram.txt`
 - `cookie_xiaohongshu.txt`
 - `config/user_config.json`
 - `logs/`

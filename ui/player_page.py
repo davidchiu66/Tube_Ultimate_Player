@@ -3,9 +3,9 @@ from __future__ import annotations
 from random import choice as random_choice
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QCursor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -84,6 +84,9 @@ class PlayerPage(QWidget):
     collection_delete_requested = Signal(str)
     collection_auto_play_changed = Signal(bool)
     playlist_loading_hint_requested = Signal()
+    comments_requested = Signal()
+    comments_more_requested = Signal(str)
+    queue_step_requested = Signal(int)
 
     def __init__(self, config: ConfigService | None = None) -> None:
         super().__init__()
@@ -95,6 +98,9 @@ class PlayerPage(QWidget):
         self._playlist_index = -1
         self._collection_count = 0
         self._collection_index = -1
+        self._browse_count = 0
+        self._browse_index = -1
+        self._navigation_kind = "browse"
         self._volume_before_mute = 80
         self._seeking = False
         self._populating = False
@@ -140,6 +146,11 @@ class PlayerPage(QWidget):
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(220)
         self._click_timer.timeout.connect(self._handle_video_single_click)
+
+        self._volume_popup_hide_timer = QTimer(self)
+        self._volume_popup_hide_timer.setSingleShot(True)
+        self._volume_popup_hide_timer.setInterval(180)
+        self._volume_popup_hide_timer.timeout.connect(self._hide_volume_popup_if_outside)
 
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
@@ -212,12 +223,37 @@ class PlayerPage(QWidget):
 
         self.play_button = QPushButton("播放")
         self.stop_button = QPushButton("停止")
+        self.previous_button = QPushButton("上一个")
+        self.previous_button.setFixedWidth(70)
+        self.previous_button.setToolTip("上一个（P）")
+        self.next_button = QPushButton("下一个")
+        self.next_button.setFixedWidth(70)
+        self.next_button.setToolTip("下一个（N）")
         self.download_button = QPushButton("下载")
         self.favorite_button = QPushButton("收藏")
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_button = QPushButton("音量")
+        self.volume_button.setFixedWidth(56)
+        self.volume_slider = QSlider(Qt.Orientation.Vertical)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
-        self.volume_slider.setFixedWidth(120)
+        self.volume_slider.setFixedSize(24, 104)
+        self.volume_value_label = QLabel("80")
+        self.volume_value_label.setObjectName("VolumePopupValue")
+        self.volume_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.volume_popup = QFrame(self)
+        self.volume_popup.setObjectName("VolumePopup")
+        self.volume_popup.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        volume_popup_layout = QVBoxLayout(self.volume_popup)
+        volume_popup_layout.setContentsMargins(8, 8, 8, 8)
+        volume_popup_layout.setSpacing(4)
+        volume_popup_layout.addWidget(self.volume_value_label)
+        volume_popup_layout.addWidget(self.volume_slider, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.volume_popup.adjustSize()
+        self.volume_popup.hide()
+        for widget in (self.volume_button, self.volume_popup, self.volume_slider, self.volume_value_label):
+            widget.setMouseTracking(True)
+            widget.installEventFilter(self)
 
         self.speed_combo = QComboBox()
         for label, value in (
@@ -247,22 +283,24 @@ class PlayerPage(QWidget):
         self.subtitle_combo.setFixedWidth(108)
 
         self.fullscreen_button = QPushButton("全屏")
-        self.fullscreen_button.setFixedWidth(84)
+        self.fullscreen_button.setFixedWidth(76)
         self.picture_in_picture_button = QPushButton("小窗")
-        self.picture_in_picture_button.setFixedWidth(84)
+        self.picture_in_picture_button.setFixedWidth(76)
         self.picture_in_picture_button.setToolTip("小窗播放（W）")
         self.cast_button = QPushButton("投屏")
-        self.cast_button.setFixedWidth(92)
+        self.cast_button.setFixedWidth(76)
 
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
         controls.addWidget(self.play_button)
         controls.addWidget(self.stop_button)
+        controls.addWidget(self.previous_button)
+        controls.addWidget(self.next_button)
         controls.addWidget(self.download_button)
         controls.addWidget(self.favorite_button)
         controls.addSpacing(4)
-        controls.addLayout(self._control_group("音量", self.volume_slider))
+        controls.addWidget(self.volume_button)
         controls.addLayout(self._control_group("倍速", self.speed_combo))
         controls.addLayout(self._control_group("清晰度", self.quality_combo))
         controls.addLayout(self._control_group("音轨", self.audio_combo))
@@ -331,6 +369,8 @@ class PlayerPage(QWidget):
 
         self.play_button.clicked.connect(self.play_pause_requested)
         self.stop_button.clicked.connect(self.stop_requested)
+        self.previous_button.clicked.connect(lambda: self._request_queue_step(-1))
+        self.next_button.clicked.connect(lambda: self._request_queue_step(1))
         self.download_button.clicked.connect(self.download_requested)
         self.favorite_button.clicked.connect(self.favorite_requested)
         self.browser_play_button.clicked.connect(self.browser_play_requested)
@@ -351,6 +391,8 @@ class PlayerPage(QWidget):
         self.playlist_overlay.playlist_loading_hint_requested.connect(
             self.playlist_loading_hint_requested
         )
+        self.playlist_overlay.comments_requested.connect(self.comments_requested)
+        self.playlist_overlay.comments_more_requested.connect(self.comments_more_requested)
         self.collection_overlay.entry_activated.connect(self.collection_entry_requested)
         self.collection_overlay.download_entries_requested.connect(self.collection_download_requested)
         self.collection_overlay.save_requested.connect(self.collection_save_requested)
@@ -504,8 +546,8 @@ class PlayerPage(QWidget):
         self.picture_in_picture_return_button.clicked.connect(self.picture_in_picture_requested)
         self.picture_in_picture_play_button.clicked.connect(self.play_pause_requested)
         self.picture_in_picture_replay_button.clicked.connect(self.play_pause_requested)
-        self.picture_in_picture_previous_button.clicked.connect(lambda: self._shortcut_playlist_step(-1))
-        self.picture_in_picture_next_button.clicked.connect(lambda: self._shortcut_playlist_step(1))
+        self.picture_in_picture_previous_button.clicked.connect(lambda: self._request_queue_step(-1))
+        self.picture_in_picture_next_button.clicked.connect(lambda: self._request_queue_step(1))
         self.picture_in_picture_mute_button.clicked.connect(self._shortcut_toggle_mute)
         self.picture_in_picture_fullscreen_button.clicked.connect(self.fullscreen_requested)
         self.picture_in_picture_lock_button.clicked.connect(self._toggle_picture_in_picture_lock)
@@ -665,15 +707,46 @@ class PlayerPage(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._position_control_panel(animated=False)
+        self._position_volume_popup()
         self.playlist_overlay.relayout(self.rect())
         self.collection_overlay.relayout(self.rect())
         self._position_shortcut_hint()
         self._position_picture_in_picture_controls()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        volume_widgets = tuple(
+            widget
+            for widget in (
+                getattr(self, "volume_button", None),
+                getattr(self, "volume_popup", None),
+                getattr(self, "volume_slider", None),
+                getattr(self, "volume_value_label", None),
+            )
+            if widget is not None
+        )
+        if watched in volume_widgets:
+            if event.type() in (QEvent.Type.Enter, QEvent.Type.MouseMove):
+                self._show_volume_popup()
+            elif event.type() == QEvent.Type.Leave:
+                self._volume_popup_hide_timer.start()
+
         if event.type() == QEvent.Type.MouseButtonRelease and self._control_interaction_active:
             self._control_interaction_active = False
             QTimer.singleShot(0, self._reevaluate_control_pointer)
+
+        # Playlist/collection panes own their scrolling.  Let their wheel
+        # events reach QListWidget even when Qt reports the parent player as
+        # the watched object (this can happen for dynamically created rows).
+        if event.type() == QEvent.Type.Wheel and (
+            watched is self.playlist_overlay
+            or self.playlist_overlay.isAncestorOf(watched)
+            or watched is self.collection_overlay
+            or self.collection_overlay.isAncestorOf(watched)
+        ):
+            self._show_cursor()
+            if self._auto_hide_enabled:
+                self._idle_timer.start()
+            return False
 
         if event.type() == QEvent.Type.Wheel and self._wheel_adjusts_volume(watched):
             self._show_cursor()
@@ -1251,6 +1324,7 @@ class PlayerPage(QWidget):
             self.volume_slider.setValue(volume)
 
     def set_playlist_context(self, playlist, current_index: int = -1, auto_play_next: bool = False) -> None:
+        self._navigation_kind = "playlist"
         self._playlist_count = len(playlist.entries) if playlist is not None else 0
         self._playlist_index = current_index
         if playlist is not None:
@@ -1262,30 +1336,65 @@ class PlayerPage(QWidget):
         self._install_mouse_tracking(self.playlist_overlay)
         self.playlist_overlay.relayout(self.rect())
         self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
 
     def clear_playlist_context(self) -> None:
         self._playlist_count = 0
         self._playlist_index = -1
         self.set_playlist_loading(False)
         self.playlist_overlay.set_playlist(None)
+        if self._collection_count > 0:
+            self._navigation_kind = "collection"
+        elif self._browse_count > 0:
+            self._navigation_kind = "browse"
         self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
+
+    def set_browse_context(self, count: int, current_index: int = -1) -> None:
+        if self._playlist_count <= 0 and self._collection_count <= 0:
+            self._navigation_kind = "browse"
+        self._browse_count = max(0, int(count))
+        self._browse_index = int(current_index)
+        self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
+
+    def clear_browse_context(self) -> None:
+        self.set_browse_context(0, -1)
+
+    def set_browse_current_index(self, index: int) -> None:
+        self._navigation_kind = "browse"
+        self._browse_index = int(index)
+        self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
 
     def set_playlist_loading(self, loading: bool) -> None:
         self.playlist_overlay.set_loading_state(loading)
+
+    def set_playlist_available(self, available: bool) -> None:
+        self.playlist_overlay.set_context_available(available)
+
+    def set_comments(self, comments, **kwargs) -> None:
+        self.playlist_overlay.set_comments(comments, **kwargs)
+
+    def clear_comments(self) -> None:
+        self.playlist_overlay.clear_comments()
 
     def set_playlist_saved_items(self, playlists, current_key: str = "") -> None:
         self.playlist_overlay.set_saved_playlists(playlists, current_key=current_key)
 
     def set_playlist_current_index(self, index: int) -> None:
+        self._navigation_kind = "playlist"
         self._playlist_index = index
         self.playlist_overlay.set_current_index(index)
         self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
 
     # ------------------------------------------------------------------
     # 左侧合集面板
     # ------------------------------------------------------------------
 
     def set_collection_context(self, playlist, current_index: int = -1, auto_play_next: bool = False) -> None:
+        self._navigation_kind = "collection"
         self._collection_count = len(playlist.entries) if playlist is not None else 0
         self._collection_index = current_index
         self.collection_overlay.set_playlist(playlist, current_index=current_index, auto_play_next=auto_play_next)
@@ -1293,20 +1402,28 @@ class PlayerPage(QWidget):
         self._install_mouse_tracking(self.collection_overlay)
         self.collection_overlay.relayout(self.rect())
         self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
 
     def clear_collection_context(self) -> None:
         self._collection_count = 0
         self._collection_index = -1
         self.collection_overlay.set_playlist(None)
+        if self._playlist_count > 0:
+            self._navigation_kind = "playlist"
+        elif self._browse_count > 0:
+            self._navigation_kind = "browse"
         self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
 
     def set_collection_saved_items(self, playlists, current_key: str = "") -> None:
         self.collection_overlay.set_saved_playlists(playlists, current_key=current_key)
 
     def set_collection_current_index(self, index: int) -> None:
+        self._navigation_kind = "collection"
         self._collection_index = index
         self.collection_overlay.set_current_index(index)
         self._update_picture_in_picture_queue_buttons()
+        self._update_playback_buttons()
 
     def set_collection_available(self, available: bool) -> None:
         """有视频在播就允许左侧滑出，即便探测结果是"不属于任何合集"（显示空态）。"""
@@ -1375,6 +1492,35 @@ class PlayerPage(QWidget):
         else:
             self._controls_animation.stop()
             self.control_panel.move(target)
+        self._position_volume_popup()
+
+    def _show_volume_popup(self) -> None:
+        if not self.volume_button.isEnabled():
+            return
+        self._volume_popup_hide_timer.stop()
+        self.volume_value_label.setText(str(self.volume_slider.value()))
+        self.volume_popup.adjustSize()
+        self._position_volume_popup()
+        self.volume_popup.show()
+        self.volume_popup.raise_()
+
+    def _position_volume_popup(self) -> None:
+        if not hasattr(self, "volume_popup") or not hasattr(self, "volume_button"):
+            return
+        button_pos = self.volume_button.mapTo(self, QPoint(0, 0))
+        x = button_pos.x() + (self.volume_button.width() - self.volume_popup.width()) // 2
+        y = button_pos.y() - self.volume_popup.height() - 6
+        self.volume_popup.move(
+            max(0, min(x, max(0, self.width() - self.volume_popup.width()))),
+            max(0, y),
+        )
+
+    def _hide_volume_popup_if_outside(self) -> None:
+        global_pos = QCursor.pos()
+        for widget in (self.volume_button, self.volume_popup):
+            if widget.isVisible() and widget.rect().contains(widget.mapFromGlobal(global_pos)):
+                return
+        self.volume_popup.hide()
 
     def _wheel_adjusts_volume(self, watched) -> bool:
         """只有视频区、播放器空白处与控制面板背景上的滚轮才用来调音量。
@@ -1384,6 +1530,13 @@ class PlayerPage(QWidget):
         """
         if not self._shortcut_context_active():
             return False
+        # When a QListWidget is already at its end, Qt may propagate the wheel
+        # event to this page.  Use the pointer position as a second guard so
+        # that boundary scrolling in either side pane never changes volume.
+        global_pos = QCursor.pos()
+        for overlay in (self.playlist_overlay, self.collection_overlay):
+            if overlay.isVisible() and overlay.rect().contains(overlay.mapFromGlobal(global_pos)):
+                return False
         return watched is self or watched is self.video_widget or watched is self.control_panel
 
     def _handle_volume_wheel(self, event) -> None:
@@ -1423,6 +1576,7 @@ class PlayerPage(QWidget):
         self.speed_changed.emit(float(self.speed_combo.currentData()))
 
     def _handle_volume_changed(self, volume: int) -> None:
+        self.volume_value_label.setText(str(int(volume)))
         if volume > 0:
             self._volume_before_mute = volume
         self.volume_changed.emit(volume)
@@ -1473,6 +1627,9 @@ class PlayerPage(QWidget):
         enabled = self._has_media and not self._loading
         self.play_button.setEnabled(enabled)
         self.stop_button.setEnabled(enabled)
+        previous_enabled, next_enabled = self._queue_step_enabled()
+        self.previous_button.setEnabled(enabled and previous_enabled)
+        self.next_button.setEnabled(enabled and next_enabled)
         self.download_button.setEnabled(enabled and self._download_available)
         self.favorite_button.setEnabled(enabled and self._favorite_available and not self._favorite_active)
         self.browser_play_button.setEnabled(enabled and self._browser_play_available)
@@ -1488,6 +1645,9 @@ class PlayerPage(QWidget):
         self.subtitle_combo.setEnabled(enabled and not self._cast_active and bool(self._subtitles))
         self.progress_slider.setEnabled(enabled and (not self._cast_active or self._cast_seek_supported))
         self.volume_slider.setEnabled(enabled and (not self._cast_active or self._cast_volume_supported))
+        self.volume_button.setEnabled(enabled and (not self._cast_active or self._cast_volume_supported))
+        if not self.volume_button.isEnabled():
+            self.volume_popup.hide()
         self.play_button.setText("播放" if self._paused or self._playback_finished else "暂停")
         self.picture_in_picture_play_button.setEnabled(enabled)
         self._update_picture_in_picture_dynamic_icons()
@@ -1504,16 +1664,28 @@ class PlayerPage(QWidget):
         self._update_picture_in_picture_queue_buttons()
 
     def _update_picture_in_picture_queue_buttons(self) -> None:
-        if self._playlist_count > 0:
+        if self._navigation_kind == "playlist" and self._playlist_count > 0:
             previous_enabled = self._playlist_index > 0
             next_enabled = 0 <= self._playlist_index < self._playlist_count - 1
-        elif self._collection_count > 0:
+        elif self._navigation_kind == "collection" and self._collection_count > 0:
             previous_enabled = self._collection_index > 0
             next_enabled = 0 <= self._collection_index < self._collection_count - 1
+        elif self._navigation_kind == "browse" and self._browse_count > 0:
+            previous_enabled = self._browse_index > 0
+            next_enabled = 0 <= self._browse_index < self._browse_count - 1
         else:
             previous_enabled = next_enabled = False
         self.picture_in_picture_previous_button.setEnabled(previous_enabled)
         self.picture_in_picture_next_button.setEnabled(next_enabled)
+
+    def _queue_step_enabled(self) -> tuple[bool, bool]:
+        if self._navigation_kind == "playlist" and self._playlist_count > 0:
+            return self._playlist_index > 0, 0 <= self._playlist_index < self._playlist_count - 1
+        if self._navigation_kind == "collection" and self._collection_count > 0:
+            return self._collection_index > 0, 0 <= self._collection_index < self._collection_count - 1
+        if self._browse_count > 0:
+            return self._browse_index > 0, 0 <= self._browse_index < self._browse_count - 1
+        return False, False
 
     def _sync_auto_hide_state(self) -> None:
         if self._picture_in_picture:
@@ -1558,6 +1730,14 @@ class PlayerPage(QWidget):
         if not self._can_hide_controls_for_pointer_exit():
             self._idle_timer.start()
             return
+        # A side panel is an active browsing surface.  Keep it open while the
+        # pointer remains over the list, including when the user pauses to
+        # read comments; otherwise the player timeout hides it mid-browse.
+        global_pos = QCursor.pos()
+        for overlay in (self.playlist_overlay, self.collection_overlay):
+            if overlay.isVisible() and overlay.rect().contains(overlay.mapFromGlobal(global_pos)):
+                self._idle_timer.start()
+                return
         self._hide_controls()
         self.playlist_overlay.handle_idle_timeout()
         self.collection_overlay.handle_idle_timeout()
@@ -1670,6 +1850,8 @@ class PlayerPage(QWidget):
             "seek_end": self._shortcut_seek_end,
             "playlist_previous": lambda: self._shortcut_playlist_step(-1),
             "playlist_next": lambda: self._shortcut_playlist_step(1),
+            "previous_video": lambda: self._request_queue_step(-1),
+            "next_video": lambda: self._request_queue_step(1),
         }
         for definition in SHORTCUT_DEFINITIONS:
             sequence = (
@@ -1796,6 +1978,15 @@ class PlayerPage(QWidget):
         target = self._playlist_index + int(delta)
         if 0 <= target < self._playlist_count:
             self.playlist_entry_requested.emit(target)
+
+    def _request_queue_step(self, delta: int) -> None:
+        """Single navigation entry used by the main controls and P/N keys."""
+        if not self._shortcut_context_active():
+            return
+        previous_enabled, next_enabled = self._queue_step_enabled()
+        if (int(delta) < 0 and not previous_enabled) or (int(delta) > 0 and not next_enabled):
+            return
+        self.queue_step_requested.emit(int(delta))
 
     @staticmethod
     def _control_group(label_text: str, widget: QWidget) -> QHBoxLayout:

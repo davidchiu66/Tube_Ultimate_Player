@@ -29,7 +29,7 @@ class StartupCookieGuideDialog(QDialog):
 
         body = QLabel(
             "首次使用建议先为各视频网站配置 Cookie。\n\n"
-            "推荐方法：安装 Firefox，并分别登录 Bilibili、YouTube、抖音、TikTok 和小红书，"
+            "推荐方法：安装 Firefox，并分别登录 Bilibili、YouTube、抖音、TikTok、Instagram 和小红书，"
             "然后进入“设置”，使用“自动检测”获取各站点 Cookie。\n\n"
             "也可以使用浏览器扩展（例如 Get cookies.txt LOCALLY）在本机导出 cookies.txt，"
             "再进入“设置”，为每个视频网站分别导入并保存。\n\n"

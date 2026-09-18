@@ -40,6 +40,9 @@
     "tiktok": {
       "file": ""
     },
+    "instagram": {
+      "file": ""
+    },
     "xiaohongshu": {
       "file": ""
     }
@@ -87,7 +90,9 @@
     "seek_start": "Home",
     "seek_end": "End",
     "playlist_previous": "PgUp",
-    "playlist_next": "PgDown"
+    "playlist_next": "PgDown",
+    "previous_video": "P",
+    "next_video": "N"
   },
   "ui": {
     "theme": "dark",

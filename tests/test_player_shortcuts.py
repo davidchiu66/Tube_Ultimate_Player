@@ -4,10 +4,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent, QShortcut
 from PySide6.QtWidgets import QApplication
 
@@ -37,7 +38,50 @@ class PlayerShortcutTests(unittest.TestCase):
 
     def test_extended_playback_shortcuts_are_registered(self) -> None:
         sequences = {shortcut.key().toString() for shortcut in self.page.findChildren(QShortcut)}
-        self.assertTrue({"M", "Home", "End", "PgUp", "PgDown", "Esc", "Z", "X"}.issubset(sequences))
+        self.assertTrue({"M", "Home", "End", "PgUp", "PgDown", "P", "N", "Esc", "Z", "X"}.issubset(sequences))
+
+    def test_previous_next_buttons_follow_stop_and_emit_queue_step(self) -> None:
+        buttons = self.page.stop_button.parentWidget().findChildren(type(self.page.stop_button))
+        self.assertLess(buttons.index(self.page.stop_button), buttons.index(self.page.previous_button))
+        self.assertLess(buttons.index(self.page.previous_button), buttons.index(self.page.next_button))
+        self.assertEqual(self.page.previous_button.text(), "上一个")
+        self.assertEqual(self.page.next_button.text(), "下一个")
+        self.assertEqual(self.page.previous_button.toolTip(), "上一个（P）")
+        self.assertEqual(self.page.next_button.toolTip(), "下一个（N）")
+        steps: list[int] = []
+        self.page.queue_step_requested.connect(steps.append)
+        self.page.set_browse_context(3, 1)
+        self.page._request_queue_step(-1)
+        self.page._request_queue_step(1)
+        self.assertEqual(steps, [-1, 1])
+
+    def test_normal_controller_uses_compact_vertical_volume_control(self) -> None:
+        self.assertEqual(self.page.volume_slider.orientation(), Qt.Orientation.Vertical)
+        self.assertFalse(self.page.volume_popup.isVisible())
+        self.assertEqual(self.page.volume_slider.width(), 24)
+        self.assertEqual(self.page.volume_slider.height(), 104)
+        self.assertEqual(self.page.cast_button.width(), 76)
+        self.assertEqual(self.page.fullscreen_button.width(), 76)
+        self.assertEqual(self.page.picture_in_picture_button.width(), 76)
+
+    def test_volume_popup_opens_on_hover_and_closes_after_leaving(self) -> None:
+        self.page.set_playback_available(True)
+        self.page.eventFilter(self.page.volume_button, QEvent(QEvent.Type.Enter))
+        self.assertTrue(self.page.volume_popup.isVisible())
+        self.page.eventFilter(self.page.volume_button, QEvent(QEvent.Type.Leave))
+        self.page._volume_popup_hide_timer.timeout.emit()
+        self.assertFalse(self.page.volume_popup.isVisible())
+
+    def test_browse_queue_navigation_uses_bounds(self) -> None:
+        steps: list[int] = []
+        self.page.queue_step_requested.connect(steps.append)
+        self.page.set_browse_context(3, 1)
+        self.page._request_queue_step(-1)
+        self.page.set_browse_current_index(0)
+        self.page._request_queue_step(-1)
+        self.page.set_browse_current_index(2)
+        self.page._request_queue_step(1)
+        self.assertEqual(steps, [-1])
 
     def test_action_and_large_seek_shortcuts_are_registered(self) -> None:
         sequences = {shortcut.key().toString() for shortcut in self.page.findChildren(QShortcut)}
@@ -227,6 +271,17 @@ class PlayerShortcutTests(unittest.TestCase):
         )
         QApplication.sendEvent(target, event)
 
+        self.assertTrue(self.page._idle_timer.isActive())
+
+    def test_idle_timeout_keeps_open_side_panel_under_pointer(self) -> None:
+        entry = PlaylistEntry("p", "1", "Video", "https://example.com/1", position=1)
+        playlist = PlaylistInfo("p", "Playlist", "https://example.com", entries=[entry])
+        self.page.set_playlist_context(playlist, current_index=0)
+        self.page.playlist_overlay.show_overlay(animated=False)
+        pointer = self.page.playlist_overlay.mapToGlobal(QPoint(20, 20))
+        with patch("ui.player_page.QCursor.pos", return_value=pointer):
+            self.page._handle_idle_timeout()
+        self.assertTrue(self.page.playlist_overlay.is_open())
         self.assertTrue(self.page._idle_timer.isActive())
 
     def test_paused_playback_uses_the_same_auto_hide_behavior(self) -> None:

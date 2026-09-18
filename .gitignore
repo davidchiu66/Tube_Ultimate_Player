@@ -35,6 +35,7 @@ runtime/
 # Dynamically downloaded third-party binaries
 3rdpart/libmpv-2.dll
 3rdpart/yt-dlp.exe
+3rdpart/yt-dlp.bak0704
 3rdpart/deno
 3rdpart/ffmpeg
 3rdpart/ffprobe

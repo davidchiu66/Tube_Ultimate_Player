@@ -98,6 +98,11 @@ class ProbeTests(unittest.TestCase):
 
         self.assertEqual(result, {"xiaohongshu": "firefox:xhs"})
 
+    def test_instagram_login_cookie_is_detected(self) -> None:
+        db = self._firefox("firefox:instagram", [(".instagram.com", "sessionid")])
+        result = probe_site_cookie_browsers(("instagram",), [db])
+        self.assertEqual(result, {"instagram": "firefox:instagram"})
+
     def test_startup_probe_includes_all_registered_sites(self) -> None:
         self.assertIn("xiaohongshu", CookieProbeWorker().sites)
 

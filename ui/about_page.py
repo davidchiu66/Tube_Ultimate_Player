@@ -38,6 +38,7 @@ class AboutPage(QWidget):
         self.name_label = QLabel(APP_NAME)
         self.name_label.setObjectName("TitleLabel")
         self.version_label = QLabel("当前版本：-")
+        self.ytdlp_version_label = QLabel("yt-dlp 版本：-")
         self.latest_label = QLabel("最新版本：-")
         self.mode_label = QLabel("运行形态：-")
         self.platform_label = QLabel("系统环境：-")
@@ -45,7 +46,7 @@ class AboutPage(QWidget):
         self.status_label.setObjectName("MetaLabel")
 
         self.description_label = QLabel(
-            "基于 PySide6、yt-dlp 与 libmpv 的桌面视频播放器，支持 YouTube / Bilibili / 抖音 / TikTok / 小红书浏览、搜索、收藏、历史与下载。"
+            "基于 PySide6、yt-dlp 与 libmpv 的桌面视频播放器，支持 YouTube / Bilibili / 抖音 / TikTok / Instagram / 小红书浏览、搜索、收藏、历史与下载。"
         )
         self.description_label.setWordWrap(True)
 
@@ -85,6 +86,7 @@ class AboutPage(QWidget):
         text_col.addWidget(title)
         text_col.addWidget(self.name_label)
         text_col.addWidget(self.version_label)
+        text_col.addWidget(self.ytdlp_version_label)
         text_col.addWidget(self.latest_label)
         text_col.addWidget(self.mode_label)
         text_col.addWidget(self.platform_label)
@@ -108,6 +110,9 @@ class AboutPage(QWidget):
 
     def set_current_version(self, version: str) -> None:
         self.version_label.setText(f"当前版本：{version}")
+
+    def set_ytdlp_version(self, version: str) -> None:
+        self.ytdlp_version_label.setText(f"yt-dlp 版本：{version or '未检测到'}")
 
     def set_install_mode(self, label: str) -> None:
         self.mode_label.setText(f"运行形态：{label}")

@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app_paths import thirdpart_path
-from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
+from resolver.models import CommentInfo, HomeVideo, PlaylistEntry, PlaylistInfo, VideoInfo
 from resolver.quality_selector import QualitySelector
 from resolver.subtitle_parser import SubtitleParser
 from services.config_service import (
@@ -29,17 +29,59 @@ from services.logging_service import sanitize_command
 
 logger = logging.getLogger("tube_player.resolver")
 ytdlp_logger = logging.getLogger("tube_player.ytdlp")
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None and str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
 VIDEO_ID_PATTERN = re.compile(r"^[0-9A-Za-z_-]{11}$")
 # --flat-playlist 的条目默认不带日期，首页/搜索卡片因此一片空白。加上这个开关，
 # youtube:tab 与 youtube:search 会把页面上的「N 天前」折算成 timestamp 一并返回；
 # 代价是日期只精确到天级，够卡片展示用。
 _APPROXIMATE_DATE_ARGS = ("--extractor-args", "youtubetab:approximate_date")
+# Recent yt-dlp releases keep YouTube's evolving JavaScript challenge code in
+# the EJS component repository.  Without it, a frozen build can resolve only
+# the low fallback formats even when Node/Deno is installed on the host.
+_YOUTUBE_EJS_ARGS = ("--remote-components", "ejs:github")
+# Use the regular clients for the complete DASH ladder and keep web_safari as
+# an authenticated HLS fallback. The latter alone reports the encoded height
+# for ultra-wide videos (for example 1920x886), while YouTube labels the same
+# quality tier as 1080p; combining both clients preserves 4K and resilience.
+_YOUTUBE_CLIENT_ARGS = ("--extractor-args", "youtube:player_client=default,web_safari")
 
 
 class YoutubeResolver:
     def __init__(self, config: ConfigService) -> None:
         self.config = config
         self.ytdlp_path = self._find_ytdlp()
+
+    def ytdlp_version(self) -> str:
+        """Return the version of the exact yt-dlp executable used by this resolver."""
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
+        try:
+            result = subprocess.run(
+                [str(self.ytdlp_path), "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                creationflags=creationflags,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            ytdlp_logger.warning("failed to read yt-dlp version path=%s error=%s", self.ytdlp_path, exc)
+            return ""
+        if result.returncode != 0:
+            ytdlp_logger.warning(
+                "yt-dlp version command failed path=%s returncode=%s stderr=%s",
+                self.ytdlp_path,
+                result.returncode,
+                (result.stderr or "").strip(),
+            )
+            return ""
+        return (result.stdout or "").strip().splitlines()[0].strip() if (result.stdout or "").strip() else ""
 
     def resolve(self, url: str) -> VideoInfo:
         original_url = str(url or "").strip()
@@ -101,12 +143,95 @@ class YoutubeResolver:
                 video.raw_info.setdefault("author", {})
                 if isinstance(video.raw_info["author"], dict):
                     video.raw_info["author"].setdefault("nickname", nickname)
-        if video.source_site == "youtube" and source_site in {"douyin", "tiktok", "xiaohongshu"}:
+        if video.source_site == "youtube" and source_site in {"douyin", "tiktok", "xiaohongshu", "instagram"}:
             video.source_site = source_site
             video.webpage_url = str(info.get("webpage_url") or original_url)
             raw_id = str(info.get("id") or "").strip()
             video.video_id = f"{source_site}:{raw_id or _current_video_id_for_site(video.webpage_url, source_site).split(':', 1)[-1]}"
         return video
+
+    def fetch_comments(
+        self, video: VideoInfo, *, cursor: str = "", limit: int = 20
+    ) -> tuple[list[CommentInfo], str, bool]:
+        """Fetch a read-only page of comments through yt-dlp.
+
+        yt-dlp exposes comments only for extractors that implement the feature;
+        an unsupported site returns an explicit error and the UI can show the
+        site-level unavailable state.
+        """
+        source = str(video.source_site or "youtube").strip().lower()
+        if source not in {"youtube", "bilibili"}:
+            raise RuntimeError("当前站点暂不支持评论读取")
+        try:
+            offset = max(0, int(str(cursor or "0").strip() or 0))
+        except ValueError:
+            offset = 0
+        page_size = max(1, min(50, int(limit)))
+        # yt-dlp exposes YouTube comment continuation internally but not as a
+        # public cursor. Request through the end of the desired page plus one
+        # sentinel, then expose a stable offset cursor to the UI.
+        target_count = offset + page_size + 1
+        command = [
+            str(self.ytdlp_path),
+            "--dump-single-json",
+            "--skip-download",
+            "--no-playlist",
+            "--write-comments",
+            "--extractor-args",
+            f"youtube:max_comments={target_count},all,all,all,all;comment_sort=top",
+            "--socket-timeout",
+            "30",
+            "--retries",
+            "3",
+        ]
+        js_runtime = self.config.js_runtime()
+        if js_runtime:
+            command.extend(["--js-runtimes", js_runtime])
+        command.extend(_YOUTUBE_EJS_ARGS)
+        command.extend(_YOUTUBE_CLIENT_ARGS)
+        _, proxy = self.config.effective_proxy()
+        if proxy:
+            command.extend(["--proxy", proxy])
+        self._add_cookie_args(command, video.webpage_url)
+        command.append(video.webpage_url)
+        result = self._run_ytdlp(command, video.webpage_url, "comments")
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(self._format_error(detail))
+        try:
+            info = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("评论返回内容无法解析") from exc
+        raw_comments = info.get("comments") or []
+        comments: list[CommentInfo] = []
+        page_comments = raw_comments[offset : offset + page_size]
+        for index, item in enumerate(page_comments, start=offset + 1):
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or item.get("content") or "").strip()
+            author = str(item.get("author") or item.get("author_name") or "").strip()
+            if not text or not author:
+                continue
+            comment_id = str(item.get("id") or f"{video.video_id}:{index}").strip()
+            comments.append(
+                CommentInfo(
+                    comment_id=comment_id,
+                    video_id=video.video_id,
+                    source_site=source,
+                    author_name=author,
+                    text=text,
+                    author_id=str(item.get("author_id") or "").strip(),
+                    avatar_url=str(item.get("author_thumbnail") or item.get("author_avatar") or "").strip(),
+                    like_count=_optional_int(item.get("like_count")),
+                    reply_count=_optional_int(item.get("reply_count")),
+                    created_at=str(item.get("timestamp") or item.get("time_text") or "").strip(),
+                    parent_id=str(item.get("parent_id") or "").strip(),
+                    position=index,
+                )
+            )
+        has_more = len(raw_comments) > offset + page_size
+        next_cursor = str(offset + page_size) if has_more else ""
+        return comments, next_cursor, has_more
 
     def _merge_douyin_detail_formats(self, info: dict, source_url: str) -> dict:
         video_id = str(info.get("id") or "").strip()
@@ -655,6 +780,8 @@ class YoutubeResolver:
         js_runtime = self.config.js_runtime()
         if js_runtime:
             command.extend(["--js-runtimes", js_runtime])
+        command.extend(_YOUTUBE_EJS_ARGS)
+        command.extend(_YOUTUBE_CLIENT_ARGS)
 
         _, proxy = self.config.effective_proxy()
         if proxy:
@@ -697,6 +824,8 @@ class YoutubeResolver:
         js_runtime = self.config.js_runtime()
         if js_runtime:
             command.extend(["--js-runtimes", js_runtime])
+        command.extend(_YOUTUBE_EJS_ARGS)
+        command.extend(_YOUTUBE_CLIENT_ARGS)
 
         _, proxy = self.config.effective_proxy()
         if proxy:
@@ -741,6 +870,8 @@ class YoutubeResolver:
         js_runtime = self.config.js_runtime()
         if js_runtime:
             command.extend(["--js-runtimes", js_runtime])
+        command.extend(_YOUTUBE_EJS_ARGS)
+        command.extend(_YOUTUBE_CLIENT_ARGS)
 
         _, proxy = self.config.effective_proxy()
         if proxy:
@@ -840,7 +971,7 @@ class YoutubeResolver:
                 bvid=str(info.get("bvid") or info.get("id") or ""),
                 aid=str(info.get("aid") or ""),
             )
-        elif source_site in {"douyin", "tiktok", "xiaohongshu"}:
+        elif source_site in {"douyin", "tiktok", "xiaohongshu", "instagram"}:
             video_id = f"{source_site}:{video_id or _current_video_id_for_site(webpage_url, source_site).split(':', 1)[-1]}"
 
         return VideoInfo(
@@ -901,7 +1032,7 @@ class YoutubeResolver:
     ) -> PlaylistEntry | None:
         if source_site == "bilibili":
             return YoutubeResolver._parse_bilibili_playlist_entry(entry, playlist_id, position)
-        if source_site in {"douyin", "tiktok", "xiaohongshu"}:
+        if source_site in {"douyin", "tiktok", "xiaohongshu", "instagram"}:
             return YoutubeResolver._parse_generic_playlist_entry(entry, playlist_id, position, source_site)
 
         video_id = _clean_video_id(str(entry.get("id") or "").strip())
@@ -1094,7 +1225,7 @@ class YoutubeResolver:
 
     @staticmethod
     def _find_ytdlp() -> Path:
-        for name in ("yt-dlp.exe", "yt-dlp_linux", "yt-dlp"):
+        for name in ("yt-dlp.exe", "yt-dlp_linux", "yt-dlp_macos", "yt-dlp"):
             bundled = thirdpart_path(name)
             if bundled.is_file():
                 return bundled
@@ -1342,6 +1473,10 @@ def _is_xiaohongshu_host(host: str) -> bool:
     return host.endswith("xiaohongshu.com") or host.endswith("xhslink.com")
 
 
+def _is_instagram_host(host: str) -> bool:
+    return host.endswith("instagram.com") or host.endswith("instagr.am")
+
+
 def _creator_videos_url(video: VideoInfo) -> str:
     raw = str(video.creator_url or "").strip().rstrip("/")
     if video.source_site == "bilibili":
@@ -1357,6 +1492,11 @@ def _creator_videos_url(video: VideoInfo) -> str:
         if not raw:
             return ""
         return urlparse(raw)._replace(query="", fragment="").geturl().rstrip("/")
+
+    if video.source_site == "instagram":
+        if not raw and video.creator_id:
+            raw = f"https://www.instagram.com/{video.creator_id}/"
+        return urlparse(raw)._replace(query="", fragment="").geturl().rstrip("/") if raw else ""
 
     if not raw and (video.creator_id or video.channel_id):
         raw = f"https://www.youtube.com/channel/{video.creator_id or video.channel_id}"
@@ -1378,6 +1518,8 @@ def _detect_source_site(url: str) -> str:
         return "tiktok"
     if _is_xiaohongshu_host(host):
         return "xiaohongshu"
+    if _is_instagram_host(host):
+        return "instagram"
     return "youtube"
 
 
@@ -1395,6 +1537,11 @@ def _current_video_id_for_site(url: str, source_site: str) -> str:
         match = re.search(r"/(?:explore|discovery/item)/([\da-f]+)", parsed.path, re.IGNORECASE)
         note_id = match.group(1) if match else parsed.path.rstrip("/").rsplit("/", 1)[-1]
         return f"xiaohongshu:{note_id or 'unknown'}"
+    if source_site == "instagram":
+        parsed = urlparse(str(url or ""))
+        match = re.search(r"/(?:reel|p|tv)/([A-Za-z0-9_-]+)", parsed.path, re.IGNORECASE)
+        shortcode = match.group(1) if match else parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        return f"instagram:{shortcode or 'unknown'}"
     return _video_id_from_watch_url(url)
 
 

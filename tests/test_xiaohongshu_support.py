@@ -55,8 +55,8 @@ class XiaohongshuSupportTests(unittest.TestCase):
 
     def test_compact_toolbar_uses_single_letter_site_labels(self) -> None:
         toolbar = PlayerToolbar()
-        labels = [toolbar.source_selector._radios[key].text() for key in ("bilibili", "youtube", "douyin", "tiktok", "xiaohongshu")]
-        self.assertEqual(labels, ["B", "Y", "D", "T", "X"])
+        labels = [toolbar.source_selector._radios[key].text() for key in ("bilibili", "youtube", "douyin", "tiktok", "instagram", "xiaohongshu")]
+        self.assertEqual(labels, ["B", "Y", "D", "T", "I", "X"])
 
     def test_home_item_keeps_security_context_and_metadata(self) -> None:
         video = SiteResolver._xiaohongshu_home_item(_home_item(), context="home")

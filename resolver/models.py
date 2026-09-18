@@ -255,6 +255,24 @@ class SubtitleInfo:
 
 
 @dataclass
+class CommentInfo:
+    """Read-only comment data shown in the player's comments tab."""
+
+    comment_id: str
+    video_id: str
+    source_site: str
+    author_name: str
+    text: str
+    author_id: str = ""
+    avatar_url: str = ""
+    like_count: int | None = None
+    reply_count: int | None = None
+    created_at: str = ""
+    parent_id: str = ""
+    position: int = 0
+
+
+@dataclass
 class VideoInfo:
     video_id: str
     title: str

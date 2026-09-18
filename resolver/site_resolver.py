@@ -15,7 +15,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 
-from resolver.models import HomeVideo, PlaylistEntry, PlaylistInfo, PlaylistSection, VideoInfo
+from resolver.models import CommentInfo, HomeVideo, PlaylistEntry, PlaylistInfo, PlaylistSection, VideoInfo
 from resolver.quality_selector import QualitySelector
 from resolver.youtube_resolver import YoutubeResolver
 from services.config_service import (
@@ -55,6 +55,23 @@ _XIAOHONGSHU_ITEM_CACHE_TTL_SECONDS = 900.0
 _MAX_XIAOHONGSHU_ITEM_CACHE_ITEMS = 300
 
 
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None and str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_comment_time(value: object) -> str:
+    try:
+        timestamp = int(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if timestamp <= 0:
+        return ""
+    return _dt.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+
+
 class SiteResolver:
     def __init__(self, config: ConfigService) -> None:
         self.config = config
@@ -79,6 +96,7 @@ class SiteResolver:
         self._douyin_browse_last_request_at = 0.0
         self._douyin_browser_client = None
         self._xiaohongshu_browser_client = None
+        self._instagram_browser_client = None
         self._xiaohongshu_item_cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
         self._xiaohongshu_item_cache_lock = threading.Lock()
 
@@ -87,6 +105,9 @@ class SiteResolver:
 
     def set_xiaohongshu_browser_client(self, client) -> None:
         self._xiaohongshu_browser_client = client
+
+    def set_instagram_browser_client(self, client) -> None:
+        self._instagram_browser_client = client
 
     def home_source(self) -> str:
         return self.config.default_home_source()
@@ -331,7 +352,7 @@ class SiteResolver:
         )
 
     def resolve_creator_playlist(self, video: VideoInfo, limit: int = 50) -> PlaylistInfo | None:
-        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok", "xiaohongshu"}:
+        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok", "instagram", "xiaohongshu"}:
             return None
         creator_key = str(video.creator_id or video.channel_id or video.creator_url).strip()
         if not creator_key:
@@ -352,6 +373,8 @@ class SiteResolver:
             creator_url, fetched_entries = self._fetch_tiktok_creator_videos(video, limit)
         elif video.source_site == "xiaohongshu":
             creator_url, fetched_entries = self._fetch_xiaohongshu_creator_videos(video, limit)
+        elif video.source_site == "instagram":
+            return None
         else:
             creator_url, fetched_entries = self.youtube.fetch_creator_videos(video, limit)
 
@@ -847,6 +870,8 @@ class SiteResolver:
             result = self._fetch_short_video_home("tiktok", page, page_size)
         elif source == "xiaohongshu":
             result = self._fetch_xiaohongshu_home(page, page_size, force_refresh=force_refresh)
+        elif source == "instagram":
+            result = self._fetch_instagram_home(page, page_size)
         else:
             result = self.youtube.fetch_home_videos(page, page_size)
         self._cache_store(key, result)
@@ -1790,6 +1815,8 @@ class SiteResolver:
                     result = self._search_tiktok_fallback(query, page, page_size)
             elif source == "xiaohongshu":
                 result = self._search_xiaohongshu(query, page, page_size, force_refresh=force_refresh)
+            elif source == "instagram":
+                result = self._search_instagram(query, page, page_size)
             else:
                 result = self.youtube.search_videos(query, page, page_size)
         except Exception:
@@ -1804,6 +1831,114 @@ class SiteResolver:
             raise
         self._cache_store(key, result)
         return result
+
+    def _fetch_instagram_home(self, page: int, page_size: int) -> tuple[list[HomeVideo], bool]:
+        count = max(1, min(20, int(page_size)))
+        client = getattr(self, "_instagram_browser_client", None)
+        browser_paged = False
+        if client is not None and hasattr(client, "request_home"):
+            payload = client.request_home(page, count)
+            videos = self._instagram_videos_from_items(payload.get("items") or [])
+            has_more = bool(payload.get("has_more"))
+            browser_paged = True
+        else:
+            html_text = self._fetch_instagram_page("https://www.instagram.com/")
+            videos = self._instagram_videos_from_html(html_text)
+            has_more = len(videos) > page * count
+        start = 0 if browser_paged else max(0, int(page) - 1) * count
+        result = videos[start : start + count]
+        if not result:
+            raise RuntimeError("Instagram 首页没有返回可播放视频，请确认已登录 Instagram")
+        return result, has_more or len(videos) > start + count
+
+    def _search_instagram(self, keyword: str, page: int, page_size: int) -> tuple[list[HomeVideo], bool]:
+        query = urllib.parse.quote(str(keyword or "").strip())
+        count = max(1, min(20, int(page_size)))
+        client = getattr(self, "_instagram_browser_client", None)
+        browser_paged = False
+        if client is not None and hasattr(client, "request_search"):
+            payload = client.request_search(str(keyword or "").strip(), page, count)
+            videos = self._instagram_videos_from_items(payload.get("items") or [])
+            has_more = bool(payload.get("has_more"))
+            browser_paged = True
+        else:
+            html_text = self._fetch_instagram_page(
+                f"https://www.instagram.com/explore/search/keyword/?q={query}"
+            )
+            videos = self._instagram_videos_from_html(html_text)
+            has_more = len(videos) > page * count
+        start = 0 if browser_paged else max(0, int(page) - 1) * count
+        result = videos[start : start + count]
+        if not result:
+            raise RuntimeError("Instagram 搜索没有返回可播放视频，请确认关键词、登录状态和地区限制")
+        return result, has_more or len(videos) > start + count
+
+    @staticmethod
+    def _instagram_videos_from_items(items: list[dict]) -> list[HomeVideo]:
+        videos: list[HomeVideo] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            shortcode = str(item.get("id") or item.get("shortcode") or "").strip()
+            if not shortcode or shortcode in seen:
+                continue
+            seen.add(shortcode)
+            videos.append(
+                HomeVideo(
+                    video_id=f"instagram:{shortcode}",
+                    title=str(item.get("title") or shortcode).strip(),
+                    webpage_url=str(item.get("url") or f"https://www.instagram.com/reel/{shortcode}/"),
+                    source_site="instagram",
+                    uploader=str(item.get("uploader") or "").strip(),
+                    duration=int(item.get("duration") or 0),
+                    thumbnail=str(item.get("thumbnail") or "").strip(),
+                )
+            )
+        return videos
+
+    def _fetch_instagram_page(self, url: str) -> str:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.instagram.com/",
+        }
+        cookie = self._preferred_cookie_header(url)
+        if cookie:
+            headers["Cookie"] = cookie
+        request = urllib.request.Request(url, headers=headers)
+        with self._build_opener().open(request, timeout=25) as response:
+            return response.read().decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _instagram_videos_from_html(html_text: str) -> list[HomeVideo]:
+        # SSR pages and embedded JSON both expose canonical Reel/Post links. Keep
+        # this parser conservative: only links with a shortcode become cards.
+        normalized_html = str(html_text or "").replace("\\/", "/")
+        pattern = re.compile(
+            r"(?:https?://(?:www\.)?instagram\.com)?/(?:reel|p|tv)/([A-Za-z0-9_-]+)/?",
+            re.IGNORECASE,
+        )
+        videos: list[HomeVideo] = []
+        seen: set[str] = set()
+        for match in pattern.finditer(normalized_html):
+            shortcode = match.group(1)
+            video_id = f"instagram:{shortcode}"
+            if video_id in seen:
+                continue
+            seen.add(video_id)
+            url = f"https://www.instagram.com/reel/{shortcode}/"
+            context = html.unescape(normalized_html[max(0, match.start() - 500) : match.end() + 500])
+            title_match = re.search(r'"(?:title|caption|description)"\s*:\s*"([^"\\]{1,240})', context)
+            title = title_match.group(1).strip() if title_match else shortcode
+            videos.append(HomeVideo(video_id, title, url, "instagram"))
+        return videos
+
+    def fetch_comments(self, video: VideoInfo, *, cursor: str = "", limit: int = 20):
+        if str(video.source_site or "").strip().lower() == "bilibili":
+            return self.bilibili.fetch_comments(video, cursor=cursor, limit=limit)
+        return self.youtube.fetch_comments(video, cursor=cursor, limit=limit)
 
     def _search_xiaohongshu(
         self,
@@ -2296,6 +2431,79 @@ class BilibiliResolver:
     def __init__(self, config: ConfigService, ytdlp_resolver: YoutubeResolver) -> None:
         self.config = config
         self.ytdlp = ytdlp_resolver
+
+    def fetch_comments(
+        self, video: VideoInfo, *, cursor: str = "", limit: int = 20
+    ) -> tuple[list[CommentInfo], str, bool]:
+        """Read Bilibili replies through the lightweight paged web API.
+
+        Running yt-dlp with ``--write-comments`` reparses the entire video and
+        currently exposes only a fixed first batch.  Bilibili's reply endpoint
+        is considerably faster and provides a stable ``cursor.next`` token.
+        """
+        bvid = _extract_bvid(video.video_id) or _extract_bvid(video.webpage_url)
+        aid = _extract_aid(video.webpage_url)
+        if not aid and bvid:
+            view = self._request_json(
+                "https://api.bilibili.com/x/web-interface/view",
+                params={"bvid": bvid},
+                cookie_policy="prefer",
+            )
+            aid = str((view.get("data") or {}).get("aid") or "").strip()
+        if not aid:
+            raise RuntimeError("Bilibili 评论缺少稿件 ID")
+        try:
+            next_cursor = int(str(cursor or "0").strip() or 0)
+        except ValueError:
+            next_cursor = 0
+        page_size = max(1, min(50, int(limit)))
+        payload = self._request_json(
+            "https://api.bilibili.com/x/v2/reply/main",
+            params={
+                "next": next_cursor,
+                "type": 1,
+                "oid": aid,
+                "mode": 3,
+                "plat": 1,
+                "ps": page_size,
+            },
+            cookie_policy="prefer",
+        )
+        data = payload.get("data") or {}
+        replies = data.get("replies") or []
+        comments: list[CommentInfo] = []
+        for index, item in enumerate(replies, start=1):
+            if not isinstance(item, dict):
+                continue
+            member = item.get("member") or {}
+            content = item.get("content") or {}
+            author = str(member.get("uname") or "").strip()
+            text = str(content.get("message") or "").strip()
+            if not author or not text:
+                continue
+            avatar = str(member.get("avatar") or "").strip()
+            if avatar.startswith("//"):
+                avatar = "https:" + avatar
+            comments.append(
+                CommentInfo(
+                    comment_id=str(item.get("rpid") or f"{video.video_id}:{index}"),
+                    video_id=video.video_id,
+                    source_site="bilibili",
+                    author_name=author,
+                    text=text,
+                    author_id=str(member.get("mid") or "").strip(),
+                    avatar_url=avatar,
+                    like_count=_optional_int(item.get("like")),
+                    reply_count=_optional_int(item.get("count")),
+                    created_at=_format_comment_time(item.get("ctime")),
+                    parent_id=str(item.get("parent") or "").strip(),
+                    position=index,
+                )
+            )
+        cursor_data = data.get("cursor") or {}
+        next_value = int(cursor_data.get("next") or 0)
+        is_end = bool(cursor_data.get("is_end")) or next_value <= 0
+        return comments, (str(next_value) if not is_end else ""), not is_end
 
     def detect_url_kind(self, url: str) -> str:
         raw = str(url or "").strip()

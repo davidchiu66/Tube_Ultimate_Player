@@ -1,9 +1,24 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import re
 
 from resolver.models import AudioTrack, PlaybackQualityHint, VideoQuality
 from services.locale_service import match_audio_language
+
+
+_STANDARD_WIDTH_HEIGHT = {
+    256: 144,
+    426: 240,
+    640: 360,
+    854: 480,
+    1280: 720,
+    1920: 1080,
+    2560: 1440,
+    3840: 2160,
+    7680: 4320,
+}
+_QUALITY_NOTE_PATTERN = re.compile(r"(?<!\d)(144|240|360|480|720|1080|1440|2160|4320)p", re.I)
 
 
 def select_quality_by_tier(
@@ -205,39 +220,39 @@ class QualitySelector:
             split = 1 if fmt.get("acodec") in (None, "none") else 0
             return split, cls.score_video(fmt)
 
-        def _label_of(fmt: dict) -> str:
+        def _display_height(fmt: dict) -> int:
             height = int(fmt.get("height") or 0)
             width = int(fmt.get("width") or 0)
-            display_height = min(width, height) if width > 0 and height > width else height
+            if width > 0 and height > width:
+                return width
+            note_match = _QUALITY_NOTE_PATTERN.search(str(fmt.get("format_note") or ""))
+            return int(note_match.group(1)) if note_match else _STANDARD_WIDTH_HEIGHT.get(width, height)
+
+        def _label_of(fmt: dict) -> str:
+            display_height = _display_height(fmt)
             fps = int(fmt.get("fps") or 0)
             return f"{display_height}p{fps}" if fps and fps > 30 else f"{display_height}p"
 
-        best_by_label: dict[str, dict] = {}
+        best_by_height: dict[int, dict] = {}
         # 同档位的已混音变体单独留一份：A1 把画面轨切到纯视频后，"随画面（免转码）"
         # 还要能回到今天的单流地址（C1）。
-        best_muxed_by_label: dict[str, dict] = {}
+        best_muxed_by_height: dict[int, dict] = {}
         for fmt in videos:
-            label = _label_of(fmt)
-            current = best_by_label.get(label)
+            display_height = _display_height(fmt)
+            current = best_by_height.get(display_height)
             if current is None or _video_key(fmt) > _video_key(current):
-                best_by_label[label] = fmt
+                best_by_height[display_height] = fmt
             if fmt.get("acodec") not in (None, "none"):
-                muxed = best_muxed_by_label.get(label)
+                muxed = best_muxed_by_height.get(display_height)
                 if muxed is None or cls.score_video(fmt) > cls.score_video(muxed):
-                    best_muxed_by_label[label] = fmt
+                    best_muxed_by_height[display_height] = fmt
 
-        ordered_labels = sorted(
-            best_by_label,
-            key=lambda label: (
-                int(label.split("p", 1)[0] or 0),
-                int(label.split("p", 1)[1] or 0) if label.split("p", 1)[1] else 0,
-            ),
-            reverse=True,
-        )
+        ordered_heights = sorted(best_by_height, reverse=True)
 
         qualities: OrderedDict[str, VideoQuality] = OrderedDict()
-        for label in ordered_labels:
-            fmt = best_by_label[label]
+        for display_height in ordered_heights:
+            fmt = best_by_height[display_height]
+            label = _label_of(fmt)
             audio_url = None
             audio_format_id = None
             audio_filesize = None
@@ -251,7 +266,7 @@ class QualitySelector:
                 acodec = best_audio.get("acodec") or "none"
 
             # 只有在本档位确实走了分离流时，"随画面"才是另一种选择；本身就是单流时留空。
-            muxed_fmt = best_muxed_by_label.get(label) if audio_url else None
+            muxed_fmt = best_muxed_by_height.get(display_height) if audio_url else None
             muxed_video_url = cls.playable_url(muxed_fmt) if muxed_fmt else None
 
             qualities[label] = VideoQuality(

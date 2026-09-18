@@ -52,7 +52,7 @@ class RuntimeInstallService:
             return RuntimeStatus(
                 False,
                 "",
-                "未检测到 JS Runtime。增强版应内置 Deno；标准版请通过发行版包管理器安装 deno 或 nodejs。",
+                "未检测到 JS Runtime。增强版与新版普通 Windows 发布包应内置 Deno；也可以安装 Deno/Node.js。",
                 automatic_install_supported=False,
             )
         return RuntimeStatus(False, "", "未检测到 JS Runtime，建议安装 Node.js LTS。")

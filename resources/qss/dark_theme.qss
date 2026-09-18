@@ -43,6 +43,45 @@ QTabBar::tab:selected {
     border-color: #c9a227;
 }
 
+#PlaylistOverlayCommentsList {
+    background: transparent;
+    border: 0;
+    padding: 0;
+}
+
+#CommentOverlayItem {
+    background: #1b1b1b;
+    border: 0;
+    border-bottom: 1px solid #343434;
+}
+
+#CommentOverlayItem:hover {
+    background: #202020;
+}
+
+#CommentAvatar {
+    background: #30343a;
+    color: #aeb8c5;
+    border: 1px solid #434a54;
+    border-radius: 17px;
+    font-size: 12px;
+}
+
+#CommentAuthor {
+    color: #d7dce2;
+    font-weight: 600;
+}
+
+#CommentText {
+    color: #f1f2f3;
+    font-size: 14px;
+}
+
+#CommentMeta {
+    color: #8b949e;
+    font-size: 12px;
+}
+
 QHeaderView::section {
     background: #242424;
     color: #f2f2f2;
@@ -87,6 +126,32 @@ QSlider::groove:horizontal {
 QSlider::handle:horizontal {
     width: 14px;
     margin: -5px 0;
+    background: #3ea6ff;
+    border-radius: 7px;
+}
+
+#VolumePopup {
+    background: #202020;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+}
+
+#VolumePopupValue {
+    color: #f2f2f2;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QSlider::groove:vertical {
+    width: 5px;
+    background: #2a2a2a;
+    border-radius: 2px;
+}
+
+QSlider::handle:vertical {
+    width: 14px;
+    height: 14px;
+    margin: 0 -5px;
     background: #3ea6ff;
     border-radius: 7px;
 }

@@ -24,6 +24,7 @@ SITE_DEFINITIONS: tuple[SiteDefinition, ...] = (
     SiteDefinition("youtube", "YouTube", "Y", ("youtube.com", "youtu.be", "youtube-nocookie.com")),
     SiteDefinition("douyin", "抖音", "D", ("douyin.com", "iesdouyin.com")),
     SiteDefinition("tiktok", "TikTok", "T", ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com")),
+    SiteDefinition("instagram", "Instagram", "I", ("instagram.com", "instagr.am")),
     SiteDefinition("xiaohongshu", "小红书", "X", ("xiaohongshu.com", "xhslink.com"), supports_playlist=False),
 )
 SITE_KEYS = tuple(item.key for item in SITE_DEFINITIONS)

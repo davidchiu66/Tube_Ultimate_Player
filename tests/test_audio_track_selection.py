@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox
 
 from download import command_builder
 from download.command_builder import build_download_task
-from resolver.models import MUXED_AUDIO_TRACK_ID, AudioTrack, VideoInfo
+from resolver.models import MUXED_AUDIO_TRACK_ID, VideoInfo
 from resolver.quality_selector import QualitySelector
 from resolver.youtube_resolver import YoutubeResolver
 from services.locale_service import (
@@ -344,6 +344,60 @@ class LocaleServiceTests(unittest.TestCase):
 
 
 class SelectAllTests(unittest.TestCase):
+    def test_ultrawide_youtube_formats_use_standard_quality_tiers(self) -> None:
+        formats = [
+            {
+                "format_id": "hls-1080",
+                "url": "https://example.test/1080.m3u8",
+                "width": 1920,
+                "height": 886,
+                "fps": 60,
+                "vcodec": "avc1.64002a",
+                "acodec": "aac",
+                "ext": "mp4",
+            },
+            {
+                "format_id": "dash-720-30",
+                "url": "https://example.test/720-30.mp4",
+                "width": 1280,
+                "height": 590,
+                "fps": 30,
+                "format_note": "720p",
+                "vcodec": "avc1.64001f",
+                "acodec": "none",
+                "ext": "mp4",
+            },
+            {
+                "format_id": "dash-720-60",
+                "url": "https://example.test/720-60.mp4",
+                "width": 1280,
+                "height": 590,
+                "fps": 60,
+                "format_note": "720p60",
+                "vcodec": "avc1.640020",
+                "acodec": "none",
+                "ext": "mp4",
+            },
+            {
+                "format_id": "dash-4k",
+                "url": "https://example.test/2160.mp4",
+                "width": 3840,
+                "height": 1772,
+                "fps": 60,
+                "format_note": "2160p60",
+                "vcodec": "vp9",
+                "acodec": "none",
+                "ext": "webm",
+            },
+        ]
+
+        qualities = QualitySelector.select_all(formats)
+
+        self.assertEqual(list(qualities), ["2160p60", "1080p60", "720p60"])
+        self.assertNotIn("720p", qualities)
+        self.assertEqual(qualities["1080p60"].height, 886)
+        self.assertEqual(qualities["2160p60"].height, 1772)
+
     def test_multi_language_switches_to_video_only(self) -> None:
         formats = multi_language_formats()
         tracks = QualitySelector.select_audio_tracks(formats, "zh-Hans-CN")
@@ -757,7 +811,4 @@ class PreferredAudioLanguageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
 

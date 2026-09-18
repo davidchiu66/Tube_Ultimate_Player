@@ -80,6 +80,38 @@ class ShortcutSettingsTests(unittest.TestCase):
 
         self.assertEqual(runtime, f"deno:{deno}")
 
+    def test_stale_configured_js_runtime_falls_back_to_auto_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            default_path = root / "default.json"
+            default_path.write_text('{"youtube": {"js_runtime": "auto"}}', encoding="utf-8")
+            config = ConfigService(default_path=default_path, user_path=root / "user.json")
+            config.set("youtube.js_runtime", r"deno:J:\\old\\deno.exe")
+            with patch("services.config_service.detect_js_runtime", return_value="node:C:\\node.exe"):
+                self.assertEqual(config.js_runtime(), "node:C:\\node.exe")
+
+    def test_unavailable_download_directory_is_repaired_to_runtime_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            default_path = root / "default.json"
+            default_path.write_text('{"download": {"save_dir": ""}}', encoding="utf-8")
+            config = ConfigService(default_path=default_path, user_path=root / "user.json")
+            configured = root / "missing-drive"
+            config.set("download.save_dir", str(configured))
+            original_mkdir = Path.mkdir
+
+            def mkdir_with_missing_drive(self, *args, **kwargs):
+                if self == configured:
+                    raise FileNotFoundError(3, "path not found", str(self))
+                return original_mkdir(self, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", mkdir_with_missing_drive):
+                repaired = Path(config.download_dir())
+
+            self.assertNotEqual(repaired, configured)
+            self.assertEqual(Path(config.get("download.save_dir")), repaired)
+            self.assertTrue(repaired.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

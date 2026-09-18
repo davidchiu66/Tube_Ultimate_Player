@@ -55,6 +55,7 @@ from resolver.site_resolver import SiteResolver
 from services.site_registry import SITE_KEYS, SITE_LABELS, site_for_url
 from services.config_service import ConfigService
 from services.douyin_browser_service import DouyinBrowserService
+from services.instagram_browser_service import InstagramBrowserService
 from services.xiaohongshu_browser_service import XiaohongshuBrowserService
 from services.network_quality_service import NetworkMeasurement, NetworkMeasurementCache, select_quality_for_bandwidth
 from services.ffmpeg_install_service import FfmpegInstallInfo, FfmpegInstallService
@@ -92,6 +93,7 @@ from ui.url_dialog import UrlPlayDialog
 from workers.archive_extract_worker import ArchiveExtractWorker
 from workers.backup_worker import BackupListWorker, BackupRestoreWorker, BackupUploadWorker, WebdavTestWorker
 from workers.collection_worker import CollectionWorker
+from workers.comments_worker import CommentsWorker
 from workers.cookie_probe_worker import CookieProbeWorker
 from workers.creator_videos_worker import CreatorVideosWorker
 from workers.dlna_worker import DlnaActionWorker
@@ -279,6 +281,8 @@ class MainWindow(QMainWindow):
         self.resolver.set_douyin_browser_client(self.douyin_browser_service)
         self.xiaohongshu_browser_service = XiaohongshuBrowserService(self.config, self)
         self.resolver.set_xiaohongshu_browser_client(self.xiaohongshu_browser_service)
+        self.instagram_browser_service = InstagramBrowserService(self.config, self)
+        self.resolver.set_instagram_browser_client(self.instagram_browser_service)
         self.update_service = UpdateService(self.config)
         self.runtime_install_service = RuntimeInstallService(self.config)
         self.ffmpeg_install_service = FfmpegInstallService(self.config)
@@ -333,6 +337,8 @@ class MainWindow(QMainWindow):
         self._creator_playlist_workers: dict[tuple[int, str], CreatorVideosWorker] = {}
         self._creator_playlist_pending_video_id = ""
         self._creator_playlist_pending_generation = 0
+        self._comments_generation = 0
+        self._comments_workers: dict[tuple[int, str], CommentsWorker] = {}
         # 左侧「合集列表」：与右侧播放列表各自独立一套状态，互不覆盖。
         self.current_collection: PlaylistInfo | None = None
         self.current_collection_index = -1
@@ -377,6 +383,8 @@ class MainWindow(QMainWindow):
         self._dlna_position_timer.setInterval(1500)
         self._dlna_position_timer.timeout.connect(self._poll_dlna_position)
         self._home_cache: list[HomeVideo] = []
+        self._browse_queue: list[HomeVideo] = []
+        self._browse_queue_index = -1
         self._home_page = 1
         self._home_has_next = False
         # 站点 -> (缓存时间, 视频, 页码, 还有下一页)，切换站点时直接复用，避免每次都重新拉取。
@@ -572,6 +580,7 @@ class MainWindow(QMainWindow):
             page,
             current_version=self.update_service.local_version(),
             mode_label=mode_label,
+            ytdlp_version=self.resolver.youtube.ytdlp_version(),
         )
         return page
 
@@ -608,6 +617,7 @@ class MainWindow(QMainWindow):
 
         self.player_page.play_pause_requested.connect(self._toggle_play_pause)
         self.player_page.stop_requested.connect(self._stop_playback)
+        self.player_page.queue_step_requested.connect(self._navigate_queue_step)
         self.player_page.seek_requested.connect(self._seek_playback)
         self.player_page.volume_changed.connect(self._set_volume)
         self.player_page.speed_changed.connect(self._set_speed)
@@ -623,6 +633,8 @@ class MainWindow(QMainWindow):
         self.player_page.playlist_loading_hint_requested.connect(
             lambda: self.toast.show_message("播放列表加载中，请稍候")
         )
+        self.player_page.comments_requested.connect(self._request_comments)
+        self.player_page.comments_more_requested.connect(self._request_more_comments)
         self.player_page.download_requested.connect(self._download_current_video)
         self.player_page.favorite_requested.connect(self._favorite_current_video)
         self.player_page.playlist_entry_requested.connect(self._play_playlist_index)
@@ -689,8 +701,15 @@ class MainWindow(QMainWindow):
         return min(preferred, usable)
 
     @staticmethod
-    def _apply_about_page_defaults(page: AboutPage, *, current_version: str = "", mode_label: str = "") -> None:
+    def _apply_about_page_defaults(
+        page: AboutPage,
+        *,
+        current_version: str = "",
+        mode_label: str = "",
+        ytdlp_version: str = "",
+    ) -> None:
         page.set_current_version(current_version)
+        page.set_ytdlp_version(ytdlp_version)
         page.set_install_mode(mode_label)
         page.set_platform(detect_platform_info().describe())
         page.set_latest_version("-")
@@ -706,7 +725,12 @@ class MainWindow(QMainWindow):
             return
         current_version = self.update_service.local_version()
         _mode, mode_label = self.update_service.detect_install_mode()
-        self._apply_about_page_defaults(page, current_version=current_version, mode_label=mode_label)
+        self._apply_about_page_defaults(
+            page,
+            current_version=current_version,
+            mode_label=mode_label,
+            ytdlp_version=self.resolver.youtube.ytdlp_version(),
+        )
 
     def _refresh_runtime_status(self) -> None:
         page = self._created_page("settings")
@@ -776,6 +800,7 @@ class MainWindow(QMainWindow):
             for service in (
                 getattr(self, "douyin_browser_service", None),
                 getattr(self, "xiaohongshu_browser_service", None),
+                getattr(self, "instagram_browser_service", None),
             ):
                 cancel = getattr(service, "cancel_home_requests", None)
                 if callable(cancel):
@@ -789,10 +814,16 @@ class MainWindow(QMainWindow):
             self._load_playlist(target, auto_play_current=(kind == "video_with_playlist"))
             return
 
+        browse_index = getattr(self, "_browse_index_for_url", lambda _url: -1)(target)
         self._remember_playback_return_widget()
         self._clear_playlist_context()
         # 单条播放不属于任何队列，连播交给探测结果决定。
-        self._active_queue = ""
+        self._active_queue = "browse" if browse_index >= 0 else ""
+        if browse_index >= 0:
+            self._browse_queue_index = browse_index
+            setter = getattr(self.player_page, "set_browse_current_index", None)
+            if callable(setter):
+                setter(browse_index)
         request_id = self._begin_playback_request(target, reason="direct")
         self.current_local_media_path = ""
         logger.info("play url requested: %s", target)
@@ -805,6 +836,56 @@ class MainWindow(QMainWindow):
         worker.signals.error.connect(lambda message: self._resolve_failed_for_request(request_id, message))
         worker.signals.finished.connect(lambda: self._url_resolve_finished(request_id))
         self._start_worker(worker)
+
+    def _set_browse_queue(self, videos: list[HomeVideo]) -> None:
+        self._browse_queue = list(videos or [])
+        self._browse_queue_index = -1
+        setter = getattr(self.player_page, "set_browse_context", None)
+        if callable(setter):
+            setter(len(self._browse_queue), -1)
+
+    def _browse_index_for_url(self, url: str) -> int:
+        target = str(url or "").strip()
+        for index, video in enumerate(getattr(self, "_browse_queue", []) or []):
+            if str(video.webpage_url or "").strip() == target:
+                return index
+        return -1
+
+    def _play_browse_entry(self, index: int) -> bool:
+        if not (0 <= index < len(getattr(self, "_browse_queue", []) or [])):
+            return False
+        entry = self._browse_queue[index]
+        self._browse_queue_index = index
+        self._active_queue = "browse"
+        self._remember_playback_return_widget()
+        request_id = self._begin_playback_request(entry.webpage_url, reason="queue_manual", inherit=True)
+        self.player_page.set_browse_current_index(index)
+        self.stack.setCurrentWidget(self.player_page)
+        self.player_page.set_loading(True, "正在解析视频地址，请稍候...")
+        worker = ResolverWorker(entry.webpage_url, self.resolver)
+        worker.signals.success.connect(lambda video: self._resolved_for_request(request_id, video))
+        worker.signals.error.connect(lambda message: self._resolve_failed_for_request(request_id, message))
+        worker.signals.finished.connect(lambda: self._url_resolve_finished(request_id))
+        self._start_worker(worker)
+        return True
+
+    def _navigate_queue_step(self, delta: int) -> None:
+        if not self.player_page._shortcut_context_active():
+            return
+        step = int(delta)
+        if self._active_queue == "collection" and self.current_collection is not None:
+            self._play_collection_entry(self.current_collection, self.current_collection_index + step)
+            return
+        if self._active_queue in {"playlist", "local"} and self.current_playlist is not None:
+            self._play_playlist_entry(self.current_playlist, self.current_playlist_index + step)
+            return
+        if self.current_playlist is not None and self.current_playlist.entries:
+            self._play_playlist_entry(self.current_playlist, self.current_playlist_index + step)
+            return
+        if self.current_collection is not None and self.current_collection.entries:
+            self._play_collection_entry(self.current_collection, self.current_collection_index + step)
+            return
+        self._play_browse_entry(self._browse_queue_index + step)
 
     @_skip_after_shutdown
     def _url_resolve_finished(self, request_id: int | None = None) -> None:
@@ -902,6 +983,9 @@ class MainWindow(QMainWindow):
         return list(videos), cached_page, has_next
 
     def _render_home(self, videos: list[HomeVideo], page: int, has_next: bool) -> None:
+        setter = getattr(self, "_set_browse_queue", None)
+        if callable(setter):
+            setter(videos)
         self.home_page.set_videos(videos, mode="home", page=page, has_next=has_next)
         self.home_page.set_home_context(
             page,
@@ -959,6 +1043,11 @@ class MainWindow(QMainWindow):
             loading_message = (
                 f"正在加载小红书视频首页第 {target_page} 页：需要启动浏览器安全环境、读取登录状态，"
                 "并滚动视频频道聚合可播放内容，首次加载通常需要较长时间，请耐心等待..."
+            )
+        elif source == "instagram":
+            loading_message = (
+                f"正在加载 Instagram Reels 第 {target_page} 页：需要读取登录会话并解析官方页面视频卡片，"
+                "首次加载可能需要较长时间，请耐心等待..."
             )
         else:
             loading_message = f"正在获取 {source_label} 首页内容（第 {target_page} 页），请稍候..."
@@ -1270,6 +1359,9 @@ class MainWindow(QMainWindow):
             page=self._search_page,
             has_next=has_next,
         )
+        setter = getattr(self, "_set_browse_queue", None)
+        if callable(setter):
+            setter(videos)
         self.home_page.set_favorite_ids(self.favorites.favorite_ids())
 
     @_skip_after_shutdown
@@ -1792,6 +1884,7 @@ class MainWindow(QMainWindow):
 
     @_skip_after_shutdown
     def _resolved(self, video: VideoInfo) -> None:
+        self._invalidate_comments_request()
         self.current_video = video
         self.current_local_media_path = ""
         pending_url = getattr(self, "_pending_recent_url", "")
@@ -1826,6 +1919,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.current_quality_label = quality.label
+        self.player_page.set_playlist_available(True)
         self._pending_quality_hint = None
         self._pending_quality_reason = "direct"
         self.current_audio_track_id = self._select_default_audio_track(video)
@@ -1871,6 +1965,10 @@ class MainWindow(QMainWindow):
             self.player_page.set_cast_available(True)
             self.player_page.set_paused(False)
             self.history.record_play(video)
+            # Prefetch the first comment page in the background so opening the
+            # comments tab is immediate.  The generation checks in the worker
+            # callbacks discard the result if playback changed meanwhile.
+            QTimer.singleShot(250, lambda expected=video: self._prefetch_comments(expected))
             if resume > 0:
                 self.toast.show_message(f"从 {format_seconds(resume)} 继续播放")
             # 历史页未构建时，其构造函数会读取最新数据，无需在这里刷新。
@@ -2493,6 +2591,7 @@ class MainWindow(QMainWindow):
 
     def play_local_file(self, path: str) -> None:
         logger.info("play local file requested: %s", path)
+        self._invalidate_comments_request()
         if self._dlna_device is not None or self._dlna_cast_pending:
             self._stop_dlna_cast(resume_local=False, notify=False)
         self._remember_playback_return_widget()
@@ -2518,6 +2617,7 @@ class MainWindow(QMainWindow):
 
     def _stop_playback(self) -> None:
         logger.info("stop playback requested")
+        self._invalidate_comments_request()
         self._flush_playback_resume()
         if getattr(self, "_picture_in_picture", False):
             self._leave_picture_in_picture()
@@ -2527,6 +2627,7 @@ class MainWindow(QMainWindow):
         self.mpv.stop()
         self._set_playback_finished(False)
         self.player_page.set_playback_available(False)
+        self.player_page.set_playlist_available(False)
         if self.isFullScreen():
             self._leave_player_fullscreen()
         self._return_after_stop()
@@ -2972,7 +3073,7 @@ class MainWindow(QMainWindow):
 
     def _schedule_creator_playlist(self, video: VideoInfo) -> None:
         set_loading = getattr(self, "_set_creator_playlist_loading", None)
-        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok", "xiaohongshu"}:
+        if video.source_site not in {"youtube", "bilibili", "douyin", "tiktok", "instagram", "xiaohongshu"}:
             if callable(set_loading):
                 set_loading(False)
             return
@@ -3098,6 +3199,96 @@ class MainWindow(QMainWindow):
         self._creator_playlist_pending_generation = 0
         self._set_creator_playlist_loading(False)
 
+    def _invalidate_comments_request(self) -> None:
+        self._comments_generation += 1
+        self._comments_workers.clear()
+        page = getattr(self, "player_page", None)
+        clearer = getattr(page, "clear_comments", None)
+        if callable(clearer):
+            clearer()
+
+    def _request_comments(self) -> None:
+        video = self.current_video
+        if video is None:
+            self.player_page.set_comments([], error="当前没有正在播放的视频")
+            return
+        self._comments_generation += 1
+        generation = self._comments_generation
+        self.player_page.set_comments([], loading=True)
+        worker = CommentsWorker(self.resolver, video, generation)
+        worker.signals.success.connect(self._comments_loaded)
+        worker.signals.error.connect(self._comments_failed)
+        worker.signals.finished.connect(self._comments_finished)
+        self._comments_workers[(generation, video.video_id)] = worker
+        self._start_worker(worker, -1)
+
+    def _prefetch_comments(self, expected_video: VideoInfo) -> None:
+        if self.current_video is not expected_video:
+            return
+        overlay = getattr(self.player_page, "playlist_overlay", None)
+        if overlay is None or getattr(overlay, "_comments_loading", False):
+            return
+        if getattr(overlay, "_comments_loaded_for_video", "") == expected_video.video_id:
+            return
+        self._request_comments()
+
+    def _request_more_comments(self, cursor: str) -> None:
+        video = self.current_video
+        if video is None:
+            return
+        self._comments_generation += 1
+        generation = self._comments_generation
+        worker = CommentsWorker(self.resolver, video, generation, cursor=cursor)
+        worker.signals.success.connect(self._comments_loaded)
+        worker.signals.error.connect(self._comments_failed)
+        worker.signals.finished.connect(self._comments_finished)
+        self._comments_workers[(generation, video.video_id)] = worker
+        self._start_worker(worker, -1)
+
+    @Slot(int, str, object, bool)
+    @_skip_after_shutdown
+    def _comments_loaded(self, generation: int, video_id: str, payload, has_more: bool) -> None:
+        if generation != self._comments_generation or self.current_video is None or self.current_video.video_id != video_id:
+            return
+        comments, cursor = payload if isinstance(payload, tuple) and len(payload) == 2 else ([], "")
+        existing = list(getattr(self.player_page.playlist_overlay, "_comments", []) or [])
+        existing_ids = {getattr(old, "comment_id", "") for old in existing}
+        merged = existing + [
+            item
+            for item in comments
+            if getattr(item, "comment_id", "") not in existing_ids
+        ]
+        appended = len(merged) > len(existing)
+        self.player_page.set_comments(
+            merged,
+            cursor=cursor,
+            has_more=has_more,
+            video_id=video_id,
+            loading=False,
+            anchor_to_previous_page_end=appended,
+        )
+
+    @Slot(int, str, str)
+    @_skip_after_shutdown
+    def _comments_failed(self, generation: int, video_id: str, message: str) -> None:
+        if generation != self._comments_generation or self.current_video is None or self.current_video.video_id != video_id:
+            return
+        existing = list(getattr(self.player_page.playlist_overlay, "_comments", []) or [])
+        cursor = str(getattr(self.player_page.playlist_overlay, "_comments_cursor", "") or "")
+        self.player_page.set_comments(
+            existing,
+            cursor=cursor,
+            has_more=bool(cursor),
+            video_id=video_id if existing else "",
+            loading=False,
+            error=message,
+        )
+
+    @Slot(int, str)
+    @_skip_after_shutdown
+    def _comments_finished(self, generation: int, video_id: str) -> None:
+        self._comments_workers.pop((generation, video_id), None)
+
     def _set_creator_playlist_loading(self, loading: bool) -> None:
         page = getattr(self, "player_page", None)
         setter = getattr(page, "set_playlist_loading", None)
@@ -3125,6 +3316,9 @@ class MainWindow(QMainWindow):
         xhs_setter = getattr(self.resolver, "set_xiaohongshu_browser_client", None)
         if callable(xhs_setter):
             xhs_setter(getattr(self, "xiaohongshu_browser_service", None))
+        instagram_setter = getattr(self.resolver, "set_instagram_browser_client", None)
+        if callable(instagram_setter):
+            instagram_setter(getattr(self, "instagram_browser_service", None))
         reload_xhs = getattr(getattr(self, "xiaohongshu_browser_service", None), "reload_settings", None)
         if callable(reload_xhs):
             reload_xhs()
@@ -4330,6 +4524,7 @@ class MainWindow(QMainWindow):
                 self._startup_cookie_guide_dialog.close()
             self.douyin_browser_service.shutdown()
             self.xiaohongshu_browser_service.shutdown()
+            self.instagram_browser_service.shutdown()
             self._invalidate_creator_playlist_request()
             self._dlna_position_timer.stop()
             self._dlna_volume_timer.stop()

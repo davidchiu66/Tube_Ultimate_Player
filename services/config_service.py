@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import shutil
 import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from app_paths import (
     CONFIG_DIR,
-    DEFAULT_CONFIG_DIR,
     DOWNLOAD_DIR,
     RUNTIME_ROOT,
     default_config_path,
@@ -58,6 +57,8 @@ PICTURE_IN_PICTURE_STYLE_LABELS = {
 # 「播放 URL」面板保留的历史条数上限。
 RECENT_URL_LIMIT = 20
 RECENT_URL_KEY = "player.recent_urls"
+
+logger = logging.getLogger("tube_player.config")
 
 
 class ConfigService:
@@ -257,11 +258,35 @@ class ConfigService:
 
     def download_dir(self) -> str:
         value = str(self.get("download.save_dir", str(DOWNLOAD_DIR)) or str(DOWNLOAD_DIR)).strip()
-        path = Path(value)
-        if not path.is_absolute():
-            path = RUNTIME_ROOT / path
-        path.mkdir(parents=True, exist_ok=True)
-        return str(path)
+        configured = Path(value)
+        if not configured.is_absolute():
+            configured = RUNTIME_ROOT / configured
+
+        # 用户卸载/更换磁盘后，旧配置可能仍指向已经不存在的盘符（例如 J:\）。
+        # 目录是启动阶段就会访问的，不能让一个历史路径阻断整个应用启动；
+        # 失败时回退到当前运行时目录，并保留配置修复到下一次 save()。
+        fallback = Path(DOWNLOAD_DIR)
+        candidates = [configured]
+        if configured != fallback:
+            candidates.append(fallback)
+        last_error: OSError | None = None
+        for index, path in enumerate(candidates):
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                last_error = exc
+                logger.warning("download directory unavailable path=%s error=%s", path, exc)
+                continue
+            if index > 0:
+                self.set("download.save_dir", str(path))
+                logger.warning("download directory reset from %s to %s", configured, path)
+            return str(path)
+
+        # 极端情况下运行时目录也不可写，仍返回一个稳定路径让调用方可以继续启动，
+        # 后续下载操作会给出具体错误，而不是在 MainWindow 初始化阶段崩溃。
+        if last_error is not None:
+            logger.error("no usable download directory; using fallback path=%s error=%s", fallback, last_error)
+        return str(fallback)
 
     def download_max_concurrent(self) -> int:
         try:
@@ -473,7 +498,12 @@ class ConfigService:
         if runtime == "auto":
             return detect_js_runtime()
         if ":" in runtime:
-            return runtime
+            name, _, raw_path = runtime.partition(":")
+            candidate = Path(raw_path.strip())
+            if raw_path.strip() and candidate.is_file():
+                return f"{name.strip()}:{candidate}"
+            logger.warning("configured JS Runtime is unavailable path=%s; falling back to auto detection", raw_path)
+            return detect_js_runtime()
         path = shutil.which(runtime)
         return f"{runtime}:{path}" if path else runtime
 

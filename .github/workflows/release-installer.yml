@@ -74,10 +74,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path "3rdpart" | Out-Null
           Copy-Item -LiteralPath $dll.FullName -Destination "3rdpart/libmpv-2.dll" -Force
 
+      - name: Download Deno JavaScript runtime
+        shell: powershell
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/denoland/deno/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -eq "deno-x86_64-pc-windows-msvc.zip" } | Select-Object -First 1
+          if (-not $asset) { throw "Deno Windows x64 asset not found" }
+          $archive = Join-Path $env:RUNNER_TEMP "deno.zip"
+          $extractDir = Join-Path $env:RUNNER_TEMP "deno"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+          Copy-Item -LiteralPath (Join-Path $extractDir "deno.exe") -Destination "3rdpart/deno.exe" -Force
+          New-Item -ItemType Directory -Force -Path "3rdpart/licenses" | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/denoland/deno/main/LICENSE.md" -OutFile "3rdpart/licenses/deno-LICENSE.md"
+
       - name: Verify libmpv payload
         shell: powershell
         run: |
-          foreach ($name in @("libmpv-2.dll", "libEGL.dll", "libGLESv2.dll")) {
+          foreach ($name in @("libmpv-2.dll", "libEGL.dll", "libGLESv2.dll", "deno.exe")) {
             $path = Join-Path "3rdpart" $name
             if (-not (Test-Path $path)) { throw "Missing $path" }
             $size = (Get-Item $path).Length

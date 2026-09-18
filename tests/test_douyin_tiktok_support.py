@@ -30,7 +30,7 @@ class DouyinTikTokSupportTests(unittest.TestCase):
             self.assertEqual(_detect_source_site(url), site)
 
     def test_site_keys_include_both_new_sites(self) -> None:
-        self.assertEqual(SITE_KEYS, ("bilibili", "youtube", "douyin", "tiktok", "xiaohongshu"))
+        self.assertEqual(SITE_KEYS, ("bilibili", "youtube", "douyin", "tiktok", "instagram", "xiaohongshu"))
 
     def test_generic_video_ids_are_stable(self) -> None:
         self.assertEqual(_current_video_id_for_site("https://www.douyin.com/video/123", "douyin"), "douyin:123")

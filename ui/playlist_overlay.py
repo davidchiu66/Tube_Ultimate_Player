@@ -11,11 +11,12 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from resolver.models import PlaylistEntry, PlaylistInfo, PlaylistSection, SavedPlaylist
+from resolver.models import CommentInfo, PlaylistEntry, PlaylistInfo, SavedPlaylist
 from ui.text_elision import elide_multiline_text, format_seconds, format_upload_date
 from ui.thumbnail_cache import ThumbnailCache
 from ui.widgets import NoScrollComboBox
@@ -142,6 +143,66 @@ class PlaylistItemWidget(QFrame):
         )
 
 
+class CommentItemWidget(QFrame):
+    """Bilibili-like compact comment row with separate metadata hierarchy."""
+
+    def __init__(self, comment: CommentInfo, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.comment = comment
+        self.setObjectName("CommentOverlayItem")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self.avatar_label = QLabel("●")
+        self.avatar_label.setObjectName("CommentAvatar")
+        self.avatar_label.setFixedSize(34, 34)
+        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.author_label = QLabel(comment.author_name or "匿名用户")
+        self.author_label.setObjectName("CommentAuthor")
+        self.author_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        author_row = QHBoxLayout()
+        author_row.setContentsMargins(0, 0, 0, 0)
+        author_row.setSpacing(8)
+        author_row.addWidget(self.author_label)
+        author_row.addStretch(1)
+
+        self.text_label = QLabel(_clean_comment_text(comment.text))
+        self.text_label.setObjectName("CommentText")
+        self.text_label.setWordWrap(True)
+        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        metadata: list[str] = []
+        if comment.created_at:
+            metadata.append(str(comment.created_at))
+        if comment.like_count is not None:
+            metadata.append(f"赞 {comment.like_count}")
+        if comment.reply_count is not None:
+            metadata.append(f"回复 {comment.reply_count}")
+        self.meta_label = QLabel("  ·  ".join(metadata))
+        self.meta_label.setObjectName("CommentMeta")
+
+        content = QVBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(5)
+        content.addLayout(author_row)
+        content.addWidget(self.text_label)
+        if metadata:
+            content.addWidget(self.meta_label)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 10, 10, 10)
+        row.setSpacing(10)
+        row.addWidget(self.avatar_label, 0, Qt.AlignmentFlag.AlignTop)
+        row.addLayout(content, 1)
+        self.setMinimumHeight(88)
+
+
+def _clean_comment_text(value: str, limit: int = 2000) -> str:
+    text = " ".join(str(value or "").replace("\x00", "").splitlines()).strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
 class PlaylistOverlay(QFrame):
     entry_activated = Signal(int)
     download_entries_requested = Signal(object)
@@ -151,6 +212,8 @@ class PlaylistOverlay(QFrame):
     auto_play_changed = Signal(bool)
     # 右侧作者列表尚未准备好时，由宿主决定如何展示提示（通常是 Toast）。
     playlist_loading_hint_requested = Signal()
+    comments_requested = Signal()
+    comments_more_requested = Signal(str)
 
     def __init__(
         self,
@@ -184,6 +247,11 @@ class PlaylistOverlay(QFrame):
         self._context_available = False
         self._loading = False
         self._loading_hint_shown = False
+        self._comments: list[CommentInfo] = []
+        self._comments_cursor = ""
+        self._comments_has_more = False
+        self._comments_loading = False
+        self._comments_loaded_for_video = ""
         self._section_mode = False
         self._active_section_id = ""
         self._display_indices: list[int] = []
@@ -241,16 +309,52 @@ class PlaylistOverlay(QFrame):
         action_row.addWidget(self.download_all_button)
         action_row.addWidget(self.cancel_button)
 
+        self.comments_list_widget = QListWidget()
+        self.comments_list_widget.setObjectName(f"{object_name}CommentsList")
+        self.comments_list_widget.setWordWrap(True)
+        self.comments_list_widget.setSpacing(6)
+        self.comments_list_widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.comments_list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.comments_status_label = QLabel("切换到评论页后加载")
+        self.comments_status_label.setObjectName("MetaLabel")
+        self.comments_status_label.setWordWrap(True)
+        self.comments_retry_button = QPushButton("重新加载")
+        self.comments_more_button = QPushButton("加载更多")
+        self.comments_retry_button.clicked.connect(self._request_comments)
+        self.comments_more_button.clicked.connect(self._request_more_comments)
+        comments_actions = QHBoxLayout()
+        comments_actions.addWidget(self.comments_retry_button)
+        comments_actions.addWidget(self.comments_more_button)
+        comments_actions.addStretch(1)
+        comments_page = QWidget()
+        comments_layout = QVBoxLayout(comments_page)
+        comments_layout.setContentsMargins(0, 0, 0, 0)
+        comments_layout.setSpacing(8)
+        comments_layout.addWidget(self.comments_status_label)
+        comments_layout.addWidget(self.comments_list_widget, 1)
+        comments_layout.addLayout(comments_actions)
+
+        playlist_page = QWidget()
+        playlist_layout = QVBoxLayout(playlist_page)
+        playlist_layout.setContentsMargins(0, 0, 0, 0)
+        playlist_layout.setSpacing(8)
+        playlist_layout.addLayout(combo_row)
+        playlist_layout.addWidget(self.auto_play_checkbox)
+        playlist_layout.addWidget(self.list_widget, 1)
+        playlist_layout.addLayout(action_row)
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName(f"{object_name}Tabs")
+        self.tabs.addTab(playlist_page, "播放列表")
+        self.tabs.addTab(comments_page, "评论")
+        self.tabs.currentChanged.connect(self._tab_changed)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
         layout.addWidget(self.title_label)
         layout.addWidget(self.meta_label)
         layout.addWidget(self.back_button)
-        layout.addLayout(combo_row)
-        layout.addWidget(self.auto_play_checkbox)
-        layout.addWidget(self.list_widget, 1)
-        layout.addLayout(action_row)
+        layout.addWidget(self.tabs, 1)
 
         self.save_button.clicked.connect(self.save_requested)
         self.delete_button.clicked.connect(self._delete_saved)
@@ -263,6 +367,7 @@ class PlaylistOverlay(QFrame):
 
         self.setFixedWidth(PANEL_WIDTH)
         self._update_button_state()
+        self._update_comments_controls()
 
     def set_playlist(
         self,
@@ -391,6 +496,126 @@ class PlaylistOverlay(QFrame):
             self._sync_selection_visuals()
         self._update_button_state()
 
+    def set_comments(
+        self,
+        comments: list[CommentInfo],
+        *,
+        cursor: str = "",
+        has_more: bool = False,
+        video_id: str = "",
+        loading: bool = False,
+        error: str = "",
+        anchor_to_previous_page_end: bool = False,
+    ) -> None:
+        previous_count = self.comments_list_widget.count()
+        previous_scroll_maximum = self.comments_list_widget.verticalScrollBar().maximum()
+        self._comments = list(comments or [])
+        self._comments_cursor = str(cursor or "")
+        self._comments_has_more = bool(has_more)
+        if video_id:
+            self._comments_loaded_for_video = str(video_id)
+        self._comments_loading = bool(loading)
+        self.comments_list_widget.clear()
+        for comment in self._comments:
+            item = QListWidgetItem()
+            item.setToolTip(_clean_comment_text(comment.text))
+            self.comments_list_widget.addItem(item)
+            widget = CommentItemWidget(comment, self.comments_list_widget)
+            self.comments_list_widget.setItemWidget(item, widget)
+            self._resize_comment_item(item, widget)
+        if error:
+            self.comments_status_label.setText(error)
+        elif loading:
+            self.comments_status_label.setText("评论加载中，请稍候")
+        elif self._comments:
+            self.comments_status_label.setText(f"共加载 {len(self._comments)} 条评论")
+        else:
+            self.comments_status_label.setText("当前视频没有可显示的评论")
+        self._update_comments_controls()
+        # The comments tab can be populated before the overlay has received
+        # its final width. Recalculate after Qt lays out the viewport so the
+        # first page wraps exactly like subsequent pages.
+        QTimer.singleShot(0, self._resize_all_comment_items)
+        if anchor_to_previous_page_end and len(self._comments) > previous_count:
+            # Rebuilding rows is intentional because row heights depend on
+            # panel width. Restore the old maximum after Qt lays out the new
+            # rows: the previous page's last comment stays at the anchor, and
+            # the newly appended page remains immediately below it.
+            QTimer.singleShot(
+                0,
+                lambda maximum=previous_scroll_maximum: self._restore_comment_anchor(maximum),
+            )
+
+    def _restore_comment_anchor(self, previous_scroll_maximum: int) -> None:
+        scrollbar = self.comments_list_widget.verticalScrollBar()
+        scrollbar.setValue(min(max(0, int(previous_scroll_maximum)), scrollbar.maximum()))
+
+    def _resize_comment_item(self, item: QListWidgetItem, widget: CommentItemWidget) -> None:
+        width = max(120, self.comments_list_widget.viewport().width())
+        widget.setFixedWidth(width)
+        content_width = max(80, width - 34 - 10 - 20)
+        widget.text_label.setFixedWidth(content_width)
+        text_height = widget.text_label.heightForWidth(content_width)
+        widget.text_label.setFixedHeight(max(14, text_height))
+        widget.layout().activate()
+        widget.adjustSize()
+        item.setSizeHint(QSize(width, max(88, widget.sizeHint().height(), text_height + 34)))
+
+    def _resize_all_comment_items(self) -> None:
+        if not hasattr(self, "comments_list_widget"):
+            return
+        for row in range(self.comments_list_widget.count()):
+            item = self.comments_list_widget.item(row)
+            widget = self.comments_list_widget.itemWidget(item)
+            if isinstance(widget, CommentItemWidget):
+                self._resize_comment_item(item, widget)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if not hasattr(self, "comments_list_widget"):
+            return
+        self._resize_all_comment_items()
+
+    def _reset_comments(self) -> None:
+        self._comments = []
+        self._comments_cursor = ""
+        self._comments_has_more = False
+        self._comments_loading = False
+        self._comments_loaded_for_video = ""
+        if hasattr(self, "comments_list_widget"):
+            self.comments_list_widget.clear()
+            self.comments_status_label.setText("切换到评论页后加载")
+            self._update_comments_controls()
+
+    def clear_comments(self) -> None:
+        self._reset_comments()
+
+    def _tab_changed(self, index: int) -> None:
+        if index == 1 and not self._comments_loading and not self._comments_loaded_for_video:
+            self._request_comments()
+
+    def _request_comments(self) -> None:
+        if self._comments_loading:
+            return
+        self._comments_loading = True
+        self.comments_status_label.setText("评论加载中，请稍候")
+        self._update_comments_controls()
+        self.comments_requested.emit()
+
+    def _request_more_comments(self) -> None:
+        if self._comments_loading or not self._comments_has_more:
+            return
+        self._comments_loading = True
+        self._update_comments_controls()
+        self.comments_more_requested.emit(self._comments_cursor)
+
+    def _update_comments_controls(self) -> None:
+        if not hasattr(self, "comments_retry_button"):
+            return
+        self.comments_retry_button.setEnabled(not self._comments_loading)
+        self.comments_more_button.setVisible(bool(self._comments_has_more))
+        self.comments_more_button.setEnabled(not self._comments_loading and self._comments_has_more)
+
     def set_current_index(self, index: int) -> None:
         self._current_index = index
         display_index = index
@@ -491,6 +716,7 @@ class PlaylistOverlay(QFrame):
         self.show()
         self.raise_()
         self._move_panel(animated)
+        QTimer.singleShot(0, self._resize_all_comment_items)
         self._schedule_visible_thumbnail_load()
 
     def hide_overlay(self, animated: bool = True) -> None:
@@ -513,6 +739,8 @@ class PlaylistOverlay(QFrame):
             self.setFixedWidth(panel_width)
             self._resize_item_hints()
         self._move_panel(animated=False)
+        if hasattr(self, "comments_list_widget"):
+            QTimer.singleShot(0, self._resize_all_comment_items)
 
     def has_playlist(self) -> bool:
         return self._playlist is not None and bool(self._playlist.entries)

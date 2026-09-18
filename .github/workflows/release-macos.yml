@@ -1,0 +1,137 @@
+name: Build macOS Release
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: mac_x86_64
+            deno_asset: deno-x86_64-apple-darwin.zip
+          - runner: macos-15
+            arch: mac_arm64
+            deno_asset: deno-aarch64-apple-darwin.zip
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Validate formal version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n ' < app_version.txt)"
+          test -n "$version"
+          if [[ "$version" == *-* ]]; then
+            echo "Formal release versions must not contain prerelease suffixes: $version" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "Tag version ${GITHUB_REF_NAME#v} does not match app_version.txt $version" >&2
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: ${{ matrix.arch == 'mac_arm64' && 'arm64' || 'x64' }}
+
+      - name: Install system and Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install dylibbundler mpv
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller requests
+
+      - name: Prepare bundled macOS runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p 3rdpart/licenses
+
+          curl -L --fail --retry 5 --retry-delay 3 \
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos \
+            -o 3rdpart/yt-dlp_macos
+          chmod +x 3rdpart/yt-dlp_macos
+
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://github.com/denoland/deno/releases/latest/download/${{ matrix.deno_asset }}" \
+            -o "$RUNNER_TEMP/deno.zip"
+          ditto -x -k "$RUNNER_TEMP/deno.zip" "$RUNNER_TEMP/deno"
+          cp "$RUNNER_TEMP/deno/deno" 3rdpart/deno
+          chmod +x 3rdpart/deno
+
+          mpv_prefix="$(brew --prefix mpv)"
+          cp -L "$mpv_prefix/lib/libmpv.dylib" 3rdpart/libmpv.dylib
+
+          curl -L --fail --retry 5 --retry-delay 3 \
+            https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/LICENSE \
+            -o 3rdpart/licenses/yt-dlp-LICENSE
+          curl -L --fail --retry 5 --retry-delay 3 \
+            https://raw.githubusercontent.com/denoland/deno/main/LICENSE.md \
+            -o 3rdpart/licenses/deno-LICENSE.md
+          cp "$mpv_prefix/share/doc/mpv/Copyright" 3rdpart/licenses/mpv-Copyright 2>/dev/null || true
+
+      - name: Verify runtime architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          file 3rdpart/libmpv.dylib 3rdpart/yt-dlp_macos 3rdpart/deno
+          python - <<'PY'
+          import platform
+          expected = "arm64" if "${{ matrix.arch }}" == "mac_arm64" else "x86_64"
+          actual = platform.machine().lower()
+          aliases = {"arm64": {"arm64", "aarch64"}, "x86_64": {"x86_64", "amd64"}}
+          if actual not in aliases[expected]:
+              raise SystemExit(f"Runner architecture mismatch: expected {expected}, got {actual}")
+          PY
+
+      - name: Run macOS-compatible tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -q
+
+      - name: Build app, DMG and ZIP
+        shell: bash
+        run: python build_macos.py --arch "${{ matrix.arch }}"
+
+      - name: Inspect app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d dist/Tube_Ultimate_Player.app
+          test -f dist/macos/*_${{ matrix.arch }}.dmg
+          test -f dist/macos/*_${{ matrix.arch }}.zip
+          codesign --verify --deep --strict dist/Tube_Ultimate_Player.app
+          find dist/Tube_Ultimate_Player.app -name 'libmpv*.dylib' -print
+          if find dist/Tube_Ultimate_Player.app -type f \( -name '*.dylib' -o -perm -111 \) -print0 |
+            xargs -0 otool -L 2>/dev/null | grep -E '/opt/homebrew/|/usr/local/(Cellar|opt)/'; then
+            echo "The app bundle still contains Homebrew-local library references" >&2
+            exit 1
+          fi
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tube_Ultimate_Player_macos_${{ matrix.arch }}
+          path: |
+            dist/macos/*_${{ matrix.arch }}.dmg
+            dist/macos/*_${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 14

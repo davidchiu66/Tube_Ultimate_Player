@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -71,6 +72,19 @@ class WheelVolumeTests(unittest.TestCase):
     def test_quality_combo_wheel_is_not_intercepted(self) -> None:
         handled = self.page.eventFilter(self.page.quality_combo, wheel_event(120))
         self.assertFalse(handled)
+
+    def test_playlist_wheel_is_not_used_for_volume(self) -> None:
+        handled = self.page.eventFilter(self.page.playlist_overlay.list_widget, wheel_event(120))
+        self.assertFalse(handled)
+        self.assertEqual(self.page.volume_slider.value(), 50)
+
+    def test_parent_wheel_at_playlist_boundary_is_not_used_for_volume(self) -> None:
+        self.page.playlist_overlay.show()
+        pointer = self.page.playlist_overlay.mapToGlobal(QPoint(8, 8))
+        with patch("ui.player_page.QCursor.pos", return_value=pointer):
+            handled = self.page.eventFilter(self.page, wheel_event(120))
+        self.assertFalse(handled)
+        self.assertEqual(self.page.volume_slider.value(), 50)
 
     def test_no_response_without_media(self) -> None:
         self.page._has_media = False

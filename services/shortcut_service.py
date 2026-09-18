@@ -33,6 +33,8 @@ SHORTCUT_DEFINITIONS = (
     ShortcutDefinition("seek_end", "跳转到结尾", "End"),
     ShortcutDefinition("playlist_previous", "播放列表上一项", "PgUp"),
     ShortcutDefinition("playlist_next", "播放列表下一项", "PgDown"),
+    ShortcutDefinition("previous_video", "上一个视频", "P"),
+    ShortcutDefinition("next_video", "下一个视频", "N"),
 )
 
 DEFAULT_SHORTCUTS = {definition.action: definition.default for definition in SHORTCUT_DEFINITIONS}

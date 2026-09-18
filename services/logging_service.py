@@ -84,6 +84,12 @@ def sanitize_command(command: Iterable[str]) -> list[str]:
                 sanitized.append(value)
                 continue
             if parsed.scheme in {"http", "https"} and (
+                host.endswith("cdninstagram.com") or "/o1/v/t16/f1/" in parsed.path
+            ):
+                value = f"{parsed.scheme}://{parsed.netloc}/<media-url>"
+                sanitized.append(value)
+                continue
+            if parsed.scheme in {"http", "https"} and (
                 "/aweme/v1/play/" in parsed.path or str(parsed.hostname or "").endswith("douyinvod.com")
             ):
                 value = f"{parsed.scheme}://{parsed.netloc}/<media-url>"
