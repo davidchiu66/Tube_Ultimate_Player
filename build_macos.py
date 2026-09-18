@@ -150,6 +150,9 @@ def bundle_libmpv_dependencies(app_bundle: Path) -> Path:
     if not bundler:
         raise RuntimeError("dylibbundler is required to package Homebrew libmpv dependencies")
     libmpv = bundled_libmpv(app_bundle)
+    executable = app_bundle / "Contents" / "MacOS" / APP_NAME
+    if not executable.is_file():
+        raise RuntimeError(f"The app executable was not found: {executable}")
     destination = app_bundle / "Contents" / "Frameworks" / "mpv"
     destination.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -158,7 +161,7 @@ def bundle_libmpv_dependencies(app_bundle: Path) -> Path:
             "-od",
             "-b",
             "-x",
-            str(libmpv),
+            str(executable),
             "-d",
             str(destination),
             "-p",

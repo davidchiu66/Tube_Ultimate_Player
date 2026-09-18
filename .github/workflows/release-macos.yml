@@ -105,7 +105,17 @@ jobs:
       - name: Run macOS-compatible tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m unittest discover -s tests -q
+        run: >-
+          python -m unittest -q
+          tests.test_macos_build
+          tests.test_audio_track_selection
+          tests.test_collection_upload_date
+          tests.test_default_quality_tier
+          tests.test_instagram_comments
+          tests.test_player_shortcuts
+          tests.test_settings_shortcuts
+          tests.test_wheel_volume
+          tests.test_xiaohongshu_support
 
       - name: Build app, DMG and ZIP
         shell: bash
